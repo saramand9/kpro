@@ -1,0 +1,32 @@
+# IDE / editor local state
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Go build and test outputs
+bin/
+dist/
+build/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Local runtime output
+logs/
+tmp/
+*.log
+
+# Local environment files
+.env
+.env.*
+!.env.example
