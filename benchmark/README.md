@@ -32,6 +32,7 @@ BenchmarkUDP_Echo
 BenchmarkWebSocket_Echo
 BenchmarkHTTP_Echo
 BenchmarkHTTPS_Echo
+BenchmarkFiberHTTP_Echo
 BenchmarkSSE_Events
 ```
 

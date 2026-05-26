@@ -419,11 +419,7 @@ func startHTTPBenchmarkServer(b *testing.B, tlsEnabled bool) (string, func(), *h
 
 	endpoint := httpx.New(config)
 	endpoint.Post("/echo", func(ctx *httpx.Context) error {
-		body, err := ctx.Body()
-		if err != nil {
-			return err
-		}
-		return ctx.Text(http.StatusOK, string(body))
+		return ctx.CopyBody(http.StatusOK, "text/plain; charset=utf-8")
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
