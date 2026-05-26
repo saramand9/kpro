@@ -265,6 +265,21 @@ Invoke-RestMethod -Uri http://127.0.0.1:8080/health
 Invoke-RestMethod -Uri http://127.0.0.1:8080/echo -Method Post -Body "hello" -ContentType "text/plain"
 ```
 
+## Examples
+
+Standalone examples live under [examples/](examples/). Each protocol has a server and client:
+
+```text
+examples/tcp/server          examples/tcp/client
+examples/udp/server          examples/udp/client
+examples/websocket/server    examples/websocket/client
+examples/http/server         examples/http/client
+examples/https/server        examples/https/client
+examples/sse/server          examples/sse/client
+```
+
+See [examples/README.md](examples/README.md) for startup commands.
+
 ## Legacy TCP Server
 
 The root package also contains the earlier production-oriented TCP baseline:
