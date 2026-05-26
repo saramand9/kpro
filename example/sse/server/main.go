@@ -1,0 +1,39 @@
+package main
+
+import (
+	"flag"
+	"log"
+	"time"
+
+	"github.com/saramand9/bignet/kpro/example/internal/exampleutil"
+	"github.com/saramand9/bignet/kpro/server"
+	"github.com/saramand9/bignet/kpro/transport/sse"
+)
+
+func main() {
+	addr := flag.String("addr", ":8081", "sse listen address")
+	path := flag.String("path", "/events", "sse path")
+	flag.Parse()
+
+	app := server.New(server.Config{Name: "sse-example"})
+	app.SSE(*addr, *path).
+		Handle(func(ctx *sse.Context) error {
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return nil
+				case t := <-ticker.C:
+					if err := ctx.Send("time", []byte(t.Format(time.RFC3339))); err != nil {
+						return err
+					}
+				}
+			}
+		})
+
+	log.Printf("sse example server listening on %s%s", *addr, *path)
+	if err := exampleutil.Run(app); err != nil {
+		log.Fatal(err)
+	}
+}
