@@ -22,6 +22,7 @@ type DispatchMode uint8
 const (
 	DispatchSync DispatchMode = iota
 	DispatchAsync
+	DispatchInline
 )
 
 type RouterConfig struct {
@@ -35,6 +36,7 @@ type RouterConfig struct {
 
 type route struct {
 	handler Handler
+	wrapped Handler
 	mode    DispatchMode
 }
 
@@ -76,6 +78,10 @@ func NewRouter(config ...RouterConfig) *Router {
 func (r *Router) Use(middlewares ...Middleware) {
 	r.mu.Lock()
 	r.middlewares = append(r.middlewares, middlewares...)
+	for msgID, rt := range r.routes {
+		rt.wrapped = r.wrap(rt.handler)
+		r.routes[msgID] = rt
+	}
 	r.mu.Unlock()
 }
 
@@ -91,12 +97,15 @@ func (r *Router) HandleAsync(msgID uint32, h Handler) {
 	r.handle(msgID, h, DispatchAsync)
 }
 
+func (r *Router) HandleInline(msgID uint32, h Handler) {
+	r.handle(msgID, h, DispatchInline)
+}
+
 func (r *Router) Dispatch(ctx Context) error {
 	msg := ctx.Message()
 
 	r.mu.RLock()
 	rt := r.routes[msg.ID]
-	middlewares := append([]Middleware(nil), r.middlewares...)
 	r.mu.RUnlock()
 
 	if rt.handler == nil {
@@ -104,9 +113,10 @@ func (r *Router) Dispatch(ctx Context) error {
 		return ErrNoHandler
 	}
 
-	h := rt.handler
-	for i := len(middlewares) - 1; i >= 0; i-- {
-		h = middlewares[i](h)
+	h := rt.wrapped
+
+	if rt.mode == DispatchInline {
+		return r.executeInline(ctx, h)
 	}
 
 	task := dispatchTask{
@@ -169,8 +179,33 @@ func (r *Router) handle(msgID uint32, h Handler, mode DispatchMode) {
 		r.startAsyncWorkers()
 	}
 	r.mu.Lock()
-	r.routes[msgID] = route{handler: h, mode: mode}
+	r.routes[msgID] = route{handler: h, wrapped: r.wrap(h), mode: mode}
 	r.mu.Unlock()
+}
+
+func (r *Router) wrap(h Handler) Handler {
+	for i := len(r.middlewares) - 1; i >= 0; i-- {
+		h = r.middlewares[i](h)
+	}
+	return h
+}
+
+func (r *Router) executeInline(ctx Context, h Handler) (err error) {
+	if r.closed() {
+		_ = ctx.Error(ErrRouterClosed.Error())
+		return ErrRouterClosed
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("handler panic: %v", recovered)
+			_ = ctx.Error(err.Error())
+		}
+	}()
+	if err := h(ctx); err != nil {
+		_ = ctx.Error(err.Error())
+		return err
+	}
+	return nil
 }
 
 func (r *Router) submitAsync(task dispatchTask) error {
