@@ -385,10 +385,11 @@ func startHTTPBenchmarkServer(b *testing.B, tlsEnabled bool) (string, func(), *h
 
 	addr := "127.0.0.1:" + freeTCPPort(b)
 	config := httpx.Config{
-		Addr:         addr,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  30 * time.Second,
+		Addr:            addr,
+		ReadTimeout:     10 * time.Second,
+		WriteTimeout:    10 * time.Second,
+		IdleTimeout:     30 * time.Second,
+		ShutdownTimeout: 500 * time.Millisecond,
 	}
 	client := &http.Client{
 		Timeout: 10 * time.Second,
@@ -435,6 +436,7 @@ func startHTTPBenchmarkServer(b *testing.B, tlsEnabled bool) (string, func(), *h
 
 	stop := func() {
 		cancel()
+		client.CloseIdleConnections()
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer shutdownCancel()
 		_ = endpoint.Shutdown(shutdownCtx)

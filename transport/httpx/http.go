@@ -2,25 +2,27 @@ package httpx
 
 import (
 	"context"
-	"encoding/json"
+	"crypto/tls"
 	"io"
 	"net/http"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	hertzapp "github.com/cloudwego/hertz/pkg/app"
+	hertzserver "github.com/cloudwego/hertz/pkg/app/server"
+	"github.com/cloudwego/hertz/pkg/common/config"
+	"github.com/cloudwego/hertz/pkg/common/hlog"
 )
 
 const (
 	DefaultAddr            = ":8080"
 	DefaultShutdownTimeout = 5 * time.Second
-	copyBufferSize         = 32 * 1024
 )
 
-var copyBufferPool = sync.Pool{
-	New: func() interface{} {
-		buf := make([]byte, copyBufferSize)
-		return &buf
-	},
+func init() {
+	hlog.SetLevel(hlog.LevelWarn)
 }
 
 type Config struct {
@@ -42,8 +44,7 @@ type compiledRoutes map[string]map[string]Handler
 
 type Endpoint struct {
 	config Config
-	mux    *http.ServeMux
-	server *http.Server
+	server *hertzserver.Hertz
 
 	mu          sync.RWMutex
 	routes      map[string]map[string]Handler
@@ -56,7 +57,6 @@ func New(config Config) *Endpoint {
 	config = normalizeConfig(config)
 	e := &Endpoint{
 		config: config,
-		mux:    http.NewServeMux(),
 		routes: make(map[string]map[string]Handler),
 	}
 	e.compiled.Store(compiledRoutes{})
@@ -101,7 +101,6 @@ func (e *Endpoint) Handle(method, path string, h Handler) *Endpoint {
 	e.mu.Lock()
 	if e.routes[path] == nil {
 		e.routes[path] = make(map[string]Handler)
-		e.mux.HandleFunc(path, e.servePath(path))
 	}
 	e.routes[path][method] = h
 	e.rebuildCompiledLocked()
@@ -110,43 +109,82 @@ func (e *Endpoint) Handle(method, path string, h Handler) *Endpoint {
 }
 
 func (e *Endpoint) ListenAndServe(ctx context.Context) error {
-	e.server = &http.Server{
-		Addr:         e.config.Addr,
-		Handler:      e.mux,
-		ReadTimeout:  e.config.ReadTimeout,
-		WriteTimeout: e.config.WriteTimeout,
-		IdleTimeout:  e.config.IdleTimeout,
+	server, err := e.buildServer()
+	if err != nil {
+		return err
 	}
+	e.mu.Lock()
+	e.server = server
+	e.mu.Unlock()
+
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), e.config.ShutdownTimeout)
 		defer cancel()
 		_ = e.Shutdown(shutdownCtx)
 	}()
-	if e.config.TLS {
-		return ignoreServerClosed(e.server.ListenAndServeTLS(e.config.CertFile, e.config.KeyFile))
-	}
-	return ignoreServerClosed(e.server.ListenAndServe())
+	return server.Run()
 }
 
 func (e *Endpoint) Shutdown(ctx context.Context) error {
-	if e.server == nil {
+	e.mu.RLock()
+	server := e.server
+	e.mu.RUnlock()
+	if server == nil {
 		return nil
 	}
-	return e.server.Shutdown(ctx)
+	return server.Shutdown(ctx)
 }
 
-func (e *Endpoint) servePath(path string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		h := e.lookupHandler(path, r.Method)
+func (e *Endpoint) buildServer() (*hertzserver.Hertz, error) {
+	options := []config.Option{
+		hertzserver.WithHostPorts(e.config.Addr),
+		hertzserver.WithHandleMethodNotAllowed(true),
+		hertzserver.WithDisablePrintRoute(true),
+	}
+	if e.config.ReadTimeout > 0 {
+		options = append(options, hertzserver.WithReadTimeout(e.config.ReadTimeout))
+	}
+	if e.config.WriteTimeout > 0 {
+		options = append(options, hertzserver.WithWriteTimeout(e.config.WriteTimeout))
+	}
+	if e.config.IdleTimeout > 0 {
+		options = append(options, hertzserver.WithIdleTimeout(e.config.IdleTimeout))
+	}
+	if e.config.ShutdownTimeout > 0 {
+		options = append(options, hertzserver.WithExitWaitTime(e.config.ShutdownTimeout))
+	}
+	if e.config.TLS {
+		cert, err := tls.LoadX509KeyPair(e.config.CertFile, e.config.KeyFile)
+		if err != nil {
+			return nil, err
+		}
+		options = append(options, hertzserver.WithTLS(&tls.Config{Certificates: []tls.Certificate{cert}}))
+	}
+
+	server := hertzserver.New(options...)
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	for path, methods := range e.routes {
+		for method := range methods {
+			server.Handle(method, path, e.servePath(path))
+		}
+	}
+	return server, nil
+}
+
+func (e *Endpoint) servePath(path string) hertzapp.HandlerFunc {
+	return func(_ context.Context, hctx *hertzapp.RequestContext) {
+		method := string(hctx.Request.Header.Method())
+		h := e.lookupHandler(path, method)
 		if h == nil {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			hctx.String(http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		ctx := e.acquireContext(w, r)
+		ctx := e.acquireContext(hctx)
 		defer e.releaseContext(ctx)
 		if err := h(ctx); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			hctx.String(http.StatusInternalServerError, err.Error())
 		}
 	}
 }
@@ -182,29 +220,81 @@ func wrapMiddleware(h Handler, middlewares []Middleware) Handler {
 	return h
 }
 
-func (e *Endpoint) acquireContext(w http.ResponseWriter, r *http.Request) *Context {
+func (e *Endpoint) acquireContext(hctx *hertzapp.RequestContext) *Context {
 	ctx := e.contextPool.Get().(*Context)
-	ctx.ResponseWriter = w
-	ctx.Request = r
+	ctx.hctx = hctx
+	ctx.Request = ctx.buildRequest(hctx)
 	return ctx
 }
 
 func (e *Endpoint) releaseContext(ctx *Context) {
-	ctx.ResponseWriter = nil
+	ctx.hctx = nil
 	ctx.Request = nil
+	ctx.header = nil
+	ctx.status = 0
+	ctx.wroteHeader = false
+	ctx.request = http.Request{}
+	ctx.requestURL = url.URL{}
 	e.contextPool.Put(ctx)
 }
 
 type Context struct {
-	http.ResponseWriter
 	Request *http.Request
+
+	hctx        *hertzapp.RequestContext
+	header      http.Header
+	status      int
+	wroteHeader bool
+	request     http.Request
+	requestURL  url.URL
+}
+
+func (c *Context) buildRequest(hctx *hertzapp.RequestContext) *http.Request {
+	uri := hctx.URI()
+	c.requestURL.Path = string(uri.Path())
+	c.requestURL.RawQuery = string(uri.QueryString())
+	c.request.Method = string(hctx.Request.Header.Method())
+	c.request.URL = &c.requestURL
+	c.request.Host = string(uri.Host())
+	c.request.ContentLength = int64(len(hctx.Request.Body()))
+	return &c.request
+}
+
+func (c *Context) Header() http.Header {
+	if c.header == nil {
+		c.header = make(http.Header)
+	}
+	return c.header
+}
+
+func (c *Context) WriteHeader(status int) {
+	if c.wroteHeader {
+		return
+	}
+	c.wroteHeader = true
+	c.status = status
+	c.applyHeaders()
+	c.hctx.SetStatusCode(status)
+}
+
+func (c *Context) Write(body []byte) (int, error) {
+	if !c.wroteHeader {
+		c.WriteHeader(http.StatusOK)
+	}
+	c.hctx.Response.AppendBody(body)
+	return len(body), nil
+}
+
+func (c *Context) applyHeaders() {
+	for key, values := range c.header {
+		for _, value := range values {
+			c.hctx.Response.Header.Set(key, value)
+		}
+	}
 }
 
 func (c *Context) Body() ([]byte, error) {
-	if c.Request.Body == nil {
-		return nil, nil
-	}
-	return io.ReadAll(c.Request.Body)
+	return c.hctx.Body()
 }
 
 func (c *Context) Bytes(status int, contentType string, body []byte) error {
@@ -215,99 +305,50 @@ func (c *Context) Bytes(status int, contentType string, body []byte) error {
 	if len(body) == 0 {
 		return nil
 	}
-	_, err := c.ResponseWriter.Write(body)
-	return err
+	c.hctx.Response.SetBody(body)
+	return nil
 }
 
 func (c *Context) Stream(status int, contentType string, reader io.Reader) error {
 	if contentType != "" {
 		c.Header().Set("Content-Type", contentType)
 	}
+	c.WriteHeader(status)
 	if reader == nil {
-		c.WriteHeader(status)
 		return nil
 	}
-	writer := statusResponseWriter{
-		ResponseWriter: c.ResponseWriter,
-		status:         status,
-	}
-	buf := acquireCopyBuffer()
-	defer releaseCopyBuffer(buf)
-	_, err := io.CopyBuffer(&writer, reader, *buf)
-	writer.finish()
-	return err
+	c.hctx.SetBodyStream(reader, -1)
+	return nil
 }
 
 func (c *Context) CopyBody(status int, contentType string) error {
-	if c.Request.Body == nil {
-		return c.Bytes(status, contentType, nil)
+	body, err := c.Body()
+	if err != nil {
+		return err
 	}
-	if c.Request.ContentLength >= 0 && c.Request.ContentLength <= copyBufferSize {
-		if c.Request.ContentLength == 0 {
-			return c.Bytes(status, contentType, nil)
-		}
-		buf := acquireCopyBuffer()
-		defer releaseCopyBuffer(buf)
-		body := (*buf)[:int(c.Request.ContentLength)]
-		if _, err := io.ReadFull(c.Request.Body, body); err != nil {
-			return err
-		}
-		return c.Bytes(status, contentType, body)
+	if contentType != "" {
+		c.Header().Set("Content-Type", contentType)
 	}
-	return c.Stream(status, contentType, c.Request.Body)
+	c.WriteHeader(status)
+	c.hctx.Response.SetBodyRaw(body)
+	return nil
 }
 
 func (c *Context) Text(status int, text string) error {
 	c.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	c.WriteHeader(status)
-	_, err := io.WriteString(c.ResponseWriter, text)
-	return err
-}
-
-type statusResponseWriter struct {
-	http.ResponseWriter
-	status int
-	wrote  bool
-}
-
-func (w *statusResponseWriter) Write(p []byte) (int, error) {
-	if !w.wrote {
-		w.WriteHeader(w.status)
-	}
-	return w.ResponseWriter.Write(p)
-}
-
-func (w *statusResponseWriter) WriteHeader(status int) {
-	if w.wrote {
-		return
-	}
-	w.wrote = true
-	w.ResponseWriter.WriteHeader(status)
-}
-
-func (w *statusResponseWriter) finish() {
-	if !w.wrote {
-		w.WriteHeader(w.status)
-	}
-}
-
-func acquireCopyBuffer() *[]byte {
-	return copyBufferPool.Get().(*[]byte)
-}
-
-func releaseCopyBuffer(buf *[]byte) {
-	*buf = (*buf)[:cap(*buf)]
-	copyBufferPool.Put(buf)
+	c.hctx.Response.SetBodyString(text)
+	return nil
 }
 
 func (c *Context) JSON(status int, value interface{}) error {
-	c.Header().Set("Content-Type", "application/json; charset=utf-8")
-	c.WriteHeader(status)
-	return json.NewEncoder(c.ResponseWriter).Encode(value)
+	c.applyHeaders()
+	c.hctx.JSON(status, value)
+	return nil
 }
 
 func (c *Context) Query(key string) string {
-	return c.Request.URL.Query().Get(key)
+	return string(c.hctx.QueryArgs().Peek(key))
 }
 
 func normalizeConfig(config Config) Config {
@@ -318,11 +359,4 @@ func normalizeConfig(config Config) Config {
 		config.ShutdownTimeout = DefaultShutdownTimeout
 	}
 	return config
-}
-
-func ignoreServerClosed(err error) error {
-	if err == http.ErrServerClosed {
-		return nil
-	}
-	return err
 }
