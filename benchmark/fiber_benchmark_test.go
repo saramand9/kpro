@@ -18,6 +18,16 @@ func BenchmarkFiberHTTP_Echo(b *testing.B) {
 	}
 }
 
+func BenchmarkFiberHTTP_Echo_Concurrent(b *testing.B) {
+	for _, size := range benchmarkPayloadSizes {
+		for _, workers := range benchmarkConcurrentWorkers {
+			b.Run(concurrentPayloadName(size, workers), func(b *testing.B) {
+				benchmarkFiberHTTPEchoConcurrent(b, size, workers)
+			})
+		}
+	}
+}
+
 func benchmarkFiberHTTPEcho(b *testing.B, payloadSize int) {
 	addr, stop, client := startFiberHTTPBenchmarkServer(b)
 	defer stop()
@@ -50,6 +60,15 @@ func benchmarkFiberHTTPEcho(b *testing.B, payloadSize int) {
 	reportBenchmarkMetrics(b, started, payloadSize)
 }
 
+func benchmarkFiberHTTPEchoConcurrent(b *testing.B, payloadSize, workers int) {
+	addr, stop, client := startFiberHTTPBenchmarkServer(b)
+	defer stop()
+
+	payload := bytes.Repeat([]byte("x"), payloadSize)
+	url := "http://" + addr + "/echo"
+	benchmarkHTTPPostEchoConcurrent(b, client, url, payload, workers)
+}
+
 func startFiberHTTPBenchmarkServer(b *testing.B) (string, func(), *http.Client) {
 	b.Helper()
 
@@ -75,6 +94,7 @@ func startFiberHTTPBenchmarkServer(b *testing.B) (string, func(), *http.Client) 
 		},
 	}
 	stop := func() {
+		client.CloseIdleConnections()
 		_ = app.ShutdownWithTimeout(3 * time.Second)
 		select {
 		case <-errCh:
