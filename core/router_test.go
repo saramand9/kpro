@@ -201,3 +201,94 @@ func (s *fakeSession) waitForMessage(t *testing.T) Message {
 	}
 	return Message{}
 }
+
+func TestRouterInlineHandlerRunsBeforeDispatchReturns(t *testing.T) {
+	router := NewRouter(RouterConfig{
+		SyncQueueSize:         4,
+		AsyncWorkers:          1,
+		AsyncQueueSize:        4,
+		MaxInflightPerSession: 4,
+		SessionIdleTimeout:    time.Minute,
+	})
+	defer func() {
+		if err := router.Shutdown(context.Background()); err != nil {
+			t.Fatalf("shutdown router: %v", err)
+		}
+	}()
+
+	runs := 0
+	router.HandleInline(10, func(ctx Context) error {
+		runs++
+		return ctx.Reply(ctx.Message().ID, []byte("ok"))
+	})
+
+	session := newFakeSession(1)
+	if err := router.Dispatch(NewContext(session, Message{ID: 10, Seq: 1})); err != nil {
+		t.Fatalf("dispatch inline: %v", err)
+	}
+	if runs != 1 {
+		t.Fatalf("inline handler runs=%d, want 1 before dispatch returns", runs)
+	}
+	msg := session.waitForMessage(t)
+	if msg.ID != 10 || msg.Seq != 1 || string(msg.Data) != "ok" {
+		t.Fatalf("unexpected inline reply: id=%d seq=%d data=%q", msg.ID, msg.Seq, string(msg.Data))
+	}
+}
+
+func TestBaseContextValuesAreLazy(t *testing.T) {
+	ctx := NewContext(newFakeSession(1), Message{ID: 10})
+	if ctx.values != nil {
+		t.Fatal("new context allocated values map before Set")
+	}
+	if value, ok := ctx.Get("missing"); ok || value != nil {
+		t.Fatalf("unexpected missing value: value=%v ok=%v", value, ok)
+	}
+	ctx.Set("key", "value")
+	if ctx.values == nil {
+		t.Fatal("Set did not allocate values map")
+	}
+	value, ok := ctx.Get("key")
+	if !ok || value != "value" {
+		t.Fatalf("unexpected stored value: value=%v ok=%v", value, ok)
+	}
+}
+
+func TestRouterUseAfterHandleRebuildsMiddlewareChain(t *testing.T) {
+	router := NewRouter(RouterConfig{
+		SyncQueueSize:         4,
+		AsyncWorkers:          1,
+		AsyncQueueSize:        4,
+		MaxInflightPerSession: 4,
+		SessionIdleTimeout:    time.Minute,
+	})
+	defer func() {
+		if err := router.Shutdown(context.Background()); err != nil {
+			t.Fatalf("shutdown router: %v", err)
+		}
+	}()
+
+	called := make(chan struct{}, 1)
+	router.HandleInline(10, func(ctx Context) error {
+		value, ok := ctx.Get("middleware")
+		if !ok || value != "applied" {
+			t.Fatalf("middleware value not applied: value=%v ok=%v", value, ok)
+		}
+		called <- struct{}{}
+		return nil
+	})
+	router.Use(func(next Handler) Handler {
+		return func(ctx Context) error {
+			ctx.Set("middleware", "applied")
+			return next(ctx)
+		}
+	})
+
+	if err := router.Dispatch(NewContext(newFakeSession(1), Message{ID: 10, Seq: 1})); err != nil {
+		t.Fatalf("dispatch inline: %v", err)
+	}
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Fatal("handler was not called")
+	}
+}

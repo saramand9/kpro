@@ -26,7 +26,6 @@ func NewContext(session Session, message Message) *BaseContext {
 	return &BaseContext{
 		session: session,
 		message: message,
-		values:  make(map[string]interface{}),
 	}
 }
 
@@ -70,6 +69,9 @@ func (c *BaseContext) Error(text string) error {
 }
 
 func (c *BaseContext) Set(key string, value interface{}) {
+	if c.values == nil {
+		c.values = make(map[string]interface{})
+	}
 	c.values[key] = value
 }
 
