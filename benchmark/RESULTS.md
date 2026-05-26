@@ -136,3 +136,52 @@ Notes:
 - KPro HTTP now uses `CopyBody` for this echo benchmark.
 - Compared with the previous KPro run, 64B QPS improved by about 6% and 1024B QPS improved by about 21%.
 - In this run Fiber is still about 5% higher QPS for 64B, while 1024B is within about 2%.
+
+## 2026-05-26 Hertz-backed KPro HTTP comparison
+
+Environment:
+
+```text
+goos: windows
+goarch: amd64
+pkg: github.com/saramand9/bignet/kpro/benchmark
+cpu: Intel(R) Core(TM) i5-14400
+```
+
+Command:
+
+```powershell
+go test .\benchmark -bench "Benchmark(HTTP_Echo|FiberHTTP_Echo)$" -benchmem -benchtime=5s -count=3
+```
+
+Result:
+
+```text
+BenchmarkFiberHTTP_Echo/64B-16         	   70846	     76518 ns/op	   0.84 MB/s	     13069 qps	    5708 B/op	      60 allocs/op
+BenchmarkFiberHTTP_Echo/64B-16         	   79186	     81215 ns/op	   0.79 MB/s	     12313 qps	    5692 B/op	      60 allocs/op
+BenchmarkFiberHTTP_Echo/64B-16         	   76922	     79944 ns/op	   0.80 MB/s	     12509 qps	    5714 B/op	      60 allocs/op
+BenchmarkFiberHTTP_Echo/1024B-16       	   67494	     98233 ns/op	  10.42 MB/s	     10180 qps	    8178 B/op	      63 allocs/op
+BenchmarkFiberHTTP_Echo/1024B-16       	   70203	     91602 ns/op	  11.18 MB/s	     10917 qps	    8154 B/op	      63 allocs/op
+BenchmarkFiberHTTP_Echo/1024B-16       	   61372	    143981 ns/op	   7.11 MB/s	      6945 qps	    8126 B/op	      63 allocs/op
+BenchmarkHTTP_Echo/64B-16              	   65098	     88542 ns/op	   0.72 MB/s	     11294 qps	    6191 B/op	      68 allocs/op
+BenchmarkHTTP_Echo/64B-16              	   79614	     77504 ns/op	   0.83 MB/s	     12903 qps	    6162 B/op	      68 allocs/op
+BenchmarkHTTP_Echo/64B-16              	   72255	     80747 ns/op	   0.79 MB/s	     12384 qps	    6167 B/op	      68 allocs/op
+BenchmarkHTTP_Echo/1024B-16            	   69980	     85853 ns/op	  11.93 MB/s	     11648 qps	    8668 B/op	      71 allocs/op
+BenchmarkHTTP_Echo/1024B-16            	   70398	     85295 ns/op	  12.01 MB/s	     11724 qps	    8632 B/op	      71 allocs/op
+BenchmarkHTTP_Echo/1024B-16            	   68784	     85065 ns/op	  12.04 MB/s	     11756 qps	    8638 B/op	      71 allocs/op
+```
+
+Average summary:
+
+```text
+Fiber HTTP 64B     79,226 ns/op    12,630 qps    5,705 B/op    60 allocs/op
+KPro HTTP 64B      82,264 ns/op    12,194 qps    6,173 B/op    68 allocs/op
+Fiber HTTP 1024B  111,272 ns/op     9,347 qps    8,153 B/op    63 allocs/op
+KPro HTTP 1024B    85,404 ns/op    11,709 qps    8,646 B/op    71 allocs/op
+```
+
+Notes:
+
+- KPro `httpx` is backed by Hertz in this run.
+- On Windows, Hertz reports the standard network library; netpoll is not active here.
+- Compared with the previous optimized KPro run, 64B QPS is about 4% higher and 1024B QPS is about 13% higher.

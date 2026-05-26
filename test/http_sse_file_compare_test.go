@@ -104,7 +104,7 @@ func runHTTPFileTrace(t *testing.T, tlsEnabled bool) {
 	clientResponses := newJSONTraceLog(t, filepath.Join(trace.dir, "client_received.ndjson"))
 
 	addr := "127.0.0.1:" + freeTCPPort(t)
-	config := httpx.Config{Addr: addr}
+	config := httpx.Config{Addr: addr, ShutdownTimeout: 500 * time.Millisecond}
 	cleanup := func() {}
 	scheme := "http"
 	client := &http.Client{Timeout: 3 * time.Second}
@@ -157,6 +157,7 @@ func runHTTPFileTrace(t *testing.T, tlsEnabled bool) {
 	}()
 	defer func() {
 		cancel()
+		client.CloseIdleConnections()
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer shutdownCancel()
 		_ = endpoint.Shutdown(shutdownCtx)
