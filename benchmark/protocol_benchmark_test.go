@@ -23,6 +23,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,6 +38,7 @@ import (
 )
 
 var benchmarkPayloadSizes = []int{64, 1024}
+var benchmarkConcurrentWorkers = []int{16, 64}
 
 func BenchmarkTCP_Echo(b *testing.B) {
 	for _, size := range benchmarkPayloadSizes {
@@ -66,6 +69,16 @@ func BenchmarkHTTP_Echo(b *testing.B) {
 		b.Run(payloadName(size), func(b *testing.B) {
 			benchmarkHTTPEcho(b, size, false)
 		})
+	}
+}
+
+func BenchmarkHTTP_Echo_Concurrent(b *testing.B) {
+	for _, size := range benchmarkPayloadSizes {
+		for _, workers := range benchmarkConcurrentWorkers {
+			b.Run(concurrentPayloadName(size, workers), func(b *testing.B) {
+				benchmarkHTTPEchoConcurrent(b, size, workers, false)
+			})
+		}
 	}
 }
 
@@ -224,6 +237,15 @@ func benchmarkHTTPEcho(b *testing.B, payloadSize int, tlsEnabled bool) {
 	reportBenchmarkMetrics(b, started, payloadSize)
 }
 
+func benchmarkHTTPEchoConcurrent(b *testing.B, payloadSize, workers int, tlsEnabled bool) {
+	addr, stop, client, scheme := startHTTPBenchmarkServer(b, tlsEnabled)
+	defer stop()
+
+	payload := bytes.Repeat([]byte("x"), payloadSize)
+	url := scheme + "://" + addr + "/echo"
+	benchmarkHTTPPostEchoConcurrent(b, client, url, payload, workers)
+}
+
 func benchmarkSSEEvents(b *testing.B, payloadSize int) {
 	addr, stop, start := startSSEBenchmarkServer(b, payloadSize)
 	defer stop()
@@ -254,6 +276,70 @@ func benchmarkSSEEvents(b *testing.B, payloadSize int) {
 		}
 	}
 	reportBenchmarkMetrics(b, started, payloadSize)
+}
+
+func benchmarkHTTPPostEchoConcurrent(b *testing.B, client *http.Client, url string, payload []byte, workers int) {
+	b.Helper()
+	if workers <= 0 {
+		b.Fatal("workers must be positive")
+	}
+
+	b.SetBytes(int64(len(payload)))
+	b.ReportAllocs()
+
+	var next uint64
+	var failed atomic.Bool
+	var firstErr atomic.Value
+	storeErr := func(format string, args ...interface{}) {
+		if failed.CompareAndSwap(false, true) {
+			firstErr.Store(fmt.Sprintf(format, args...))
+		}
+	}
+
+	started := startBenchmarkTimer(b)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for worker := 0; worker < workers; worker++ {
+		go func() {
+			defer wg.Done()
+			for {
+				if failed.Load() {
+					return
+				}
+				i := int(atomic.AddUint64(&next, 1)) - 1
+				if i >= b.N {
+					return
+				}
+				req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+				if err != nil {
+					storeErr("create HTTP request: %v", err)
+					return
+				}
+				req.Header.Set("Content-Type", "text/plain")
+				resp, err := client.Do(req)
+				if err != nil {
+					storeErr("do HTTP request: %v", err)
+					return
+				}
+				body, err := io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				if err != nil {
+					storeErr("read HTTP response: %v", err)
+					return
+				}
+				if resp.StatusCode != http.StatusOK || len(body) != len(payload) {
+					storeErr("unexpected HTTP response: status=%d len=%d", resp.StatusCode, len(body))
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	reportBenchmarkMetrics(b, started, len(payload))
+
+	if value := firstErr.Load(); value != nil {
+		b.Fatal(value.(string))
+	}
 }
 
 func startBenchmarkTimer(b *testing.B) time.Time {
@@ -390,6 +476,7 @@ func startHTTPBenchmarkServer(b *testing.B, tlsEnabled bool) (string, func(), *h
 		WriteTimeout:    10 * time.Second,
 		IdleTimeout:     30 * time.Second,
 		ShutdownTimeout: 500 * time.Millisecond,
+		FastContext:     true,
 	}
 	client := &http.Client{
 		Timeout: 10 * time.Second,
@@ -779,6 +866,10 @@ func waitForTLSServer(tb testing.TB, addr string) {
 
 func payloadName(size int) string {
 	return fmt.Sprintf("%dB", size)
+}
+
+func concurrentPayloadName(size, workers int) string {
+	return fmt.Sprintf("%dB/%dc", size, workers)
 }
 
 func benchmarkSelfSignedCert() (string, string, func(), error) {

@@ -2,7 +2,7 @@ package httpx
 
 import (
 	"context"
-	"crypto/tls"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/url"
@@ -10,20 +10,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	hertzapp "github.com/cloudwego/hertz/pkg/app"
-	hertzserver "github.com/cloudwego/hertz/pkg/app/server"
-	"github.com/cloudwego/hertz/pkg/common/config"
-	"github.com/cloudwego/hertz/pkg/common/hlog"
+	"github.com/valyala/fasthttp"
 )
 
 const (
 	DefaultAddr            = ":8080"
 	DefaultShutdownTimeout = 5 * time.Second
 )
-
-func init() {
-	hlog.SetLevel(hlog.LevelWarn)
-}
 
 type Config struct {
 	Addr            string
@@ -34,6 +27,7 @@ type Config struct {
 	WriteTimeout    time.Duration
 	IdleTimeout     time.Duration
 	ShutdownTimeout time.Duration
+	FastContext     bool
 }
 
 type Handler func(*Context) error
@@ -44,7 +38,7 @@ type compiledRoutes map[string]map[string]Handler
 
 type Endpoint struct {
 	config Config
-	server *hertzserver.Hertz
+	server *fasthttp.Server
 
 	mu          sync.RWMutex
 	routes      map[string]map[string]Handler
@@ -109,10 +103,7 @@ func (e *Endpoint) Handle(method, path string, h Handler) *Endpoint {
 }
 
 func (e *Endpoint) ListenAndServe(ctx context.Context) error {
-	server, err := e.buildServer()
-	if err != nil {
-		return err
-	}
+	server := e.buildServer()
 	e.mu.Lock()
 	e.server = server
 	e.mu.Unlock()
@@ -123,7 +114,10 @@ func (e *Endpoint) ListenAndServe(ctx context.Context) error {
 		defer cancel()
 		_ = e.Shutdown(shutdownCtx)
 	}()
-	return server.Run()
+	if e.config.TLS {
+		return server.ListenAndServeTLS(e.config.Addr, e.config.CertFile, e.config.KeyFile)
+	}
+	return server.ListenAndServe(e.config.Addr)
 }
 
 func (e *Endpoint) Shutdown(ctx context.Context) error {
@@ -133,58 +127,43 @@ func (e *Endpoint) Shutdown(ctx context.Context) error {
 	if server == nil {
 		return nil
 	}
-	return server.Shutdown(ctx)
+	return server.ShutdownWithContext(ctx)
 }
 
-func (e *Endpoint) buildServer() (*hertzserver.Hertz, error) {
-	options := []config.Option{
-		hertzserver.WithHostPorts(e.config.Addr),
-		hertzserver.WithHandleMethodNotAllowed(true),
-		hertzserver.WithDisablePrintRoute(true),
+func (e *Endpoint) buildServer() *fasthttp.Server {
+	return &fasthttp.Server{
+		Handler:               e.serve,
+		ReadTimeout:           e.config.ReadTimeout,
+		WriteTimeout:          e.config.WriteTimeout,
+		IdleTimeout:           e.config.IdleTimeout,
+		NoDefaultServerHeader: true,
 	}
-	if e.config.ReadTimeout > 0 {
-		options = append(options, hertzserver.WithReadTimeout(e.config.ReadTimeout))
-	}
-	if e.config.WriteTimeout > 0 {
-		options = append(options, hertzserver.WithWriteTimeout(e.config.WriteTimeout))
-	}
-	if e.config.IdleTimeout > 0 {
-		options = append(options, hertzserver.WithIdleTimeout(e.config.IdleTimeout))
-	}
-	if e.config.ShutdownTimeout > 0 {
-		options = append(options, hertzserver.WithExitWaitTime(e.config.ShutdownTimeout))
-	}
-	if e.config.TLS {
-		cert, err := tls.LoadX509KeyPair(e.config.CertFile, e.config.KeyFile)
-		if err != nil {
-			return nil, err
-		}
-		options = append(options, hertzserver.WithTLS(&tls.Config{Certificates: []tls.Certificate{cert}}))
-	}
-
-	server := hertzserver.New(options...)
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	for path, methods := range e.routes {
-		for method := range methods {
-			server.Handle(method, path, e.servePath(path))
-		}
-	}
-	return server, nil
 }
 
-func (e *Endpoint) servePath(path string) hertzapp.HandlerFunc {
-	return func(_ context.Context, hctx *hertzapp.RequestContext) {
-		method := string(hctx.Request.Header.Method())
-		h := e.lookupHandler(path, method)
-		if h == nil {
-			hctx.String(http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-		ctx := e.acquireContext(hctx)
+func (e *Endpoint) serve(fctx *fasthttp.RequestCtx) {
+	routes, _ := e.compiled.Load().(compiledRoutes)
+	methods := routes[string(fctx.Path())]
+	if methods == nil {
+		fctx.SetStatusCode(http.StatusNotFound)
+		fctx.SetBodyString("not found")
+		return
+	}
+	h := methods[string(fctx.Method())]
+	if h == nil {
+		fctx.SetStatusCode(http.StatusMethodNotAllowed)
+		fctx.SetBodyString("method not allowed")
+		return
+	}
+	e.serveHandler(h)(fctx)
+}
+
+func (e *Endpoint) serveHandler(h Handler) fasthttp.RequestHandler {
+	return func(fctx *fasthttp.RequestCtx) {
+		ctx := e.acquireContext(fctx)
 		defer e.releaseContext(ctx)
 		if err := h(ctx); err != nil {
-			hctx.String(http.StatusInternalServerError, err.Error())
+			fctx.SetStatusCode(http.StatusInternalServerError)
+			fctx.SetBodyString(err.Error())
 		}
 	}
 }
@@ -220,15 +199,17 @@ func wrapMiddleware(h Handler, middlewares []Middleware) Handler {
 	return h
 }
 
-func (e *Endpoint) acquireContext(hctx *hertzapp.RequestContext) *Context {
+func (e *Endpoint) acquireContext(fctx *fasthttp.RequestCtx) *Context {
 	ctx := e.contextPool.Get().(*Context)
-	ctx.hctx = hctx
-	ctx.Request = ctx.buildRequest(hctx)
+	ctx.fctx = fctx
+	if !e.config.FastContext {
+		ctx.Request = ctx.buildRequest(fctx)
+	}
 	return ctx
 }
 
 func (e *Endpoint) releaseContext(ctx *Context) {
-	ctx.hctx = nil
+	ctx.fctx = nil
 	ctx.Request = nil
 	ctx.header = nil
 	ctx.status = 0
@@ -241,7 +222,7 @@ func (e *Endpoint) releaseContext(ctx *Context) {
 type Context struct {
 	Request *http.Request
 
-	hctx        *hertzapp.RequestContext
+	fctx        *fasthttp.RequestCtx
 	header      http.Header
 	status      int
 	wroteHeader bool
@@ -249,14 +230,14 @@ type Context struct {
 	requestURL  url.URL
 }
 
-func (c *Context) buildRequest(hctx *hertzapp.RequestContext) *http.Request {
-	uri := hctx.URI()
+func (c *Context) buildRequest(fctx *fasthttp.RequestCtx) *http.Request {
+	uri := fctx.URI()
 	c.requestURL.Path = string(uri.Path())
 	c.requestURL.RawQuery = string(uri.QueryString())
-	c.request.Method = string(hctx.Request.Header.Method())
+	c.request.Method = string(fctx.Method())
 	c.request.URL = &c.requestURL
-	c.request.Host = string(uri.Host())
-	c.request.ContentLength = int64(len(hctx.Request.Body()))
+	c.request.Host = string(fctx.Host())
+	c.request.ContentLength = int64(len(fctx.Request.Body()))
 	return &c.request
 }
 
@@ -274,50 +255,85 @@ func (c *Context) WriteHeader(status int) {
 	c.wroteHeader = true
 	c.status = status
 	c.applyHeaders()
-	c.hctx.SetStatusCode(status)
+	c.fctx.SetStatusCode(status)
 }
 
 func (c *Context) Write(body []byte) (int, error) {
 	if !c.wroteHeader {
 		c.WriteHeader(http.StatusOK)
 	}
-	c.hctx.Response.AppendBody(body)
+	c.fctx.Response.AppendBody(body)
 	return len(body), nil
 }
 
 func (c *Context) applyHeaders() {
 	for key, values := range c.header {
 		for _, value := range values {
-			c.hctx.Response.Header.Set(key, value)
+			c.fctx.Response.Header.Set(key, value)
 		}
 	}
 }
 
+func (c *Context) setContentType(contentType string) {
+	if contentType == "" {
+		return
+	}
+	if c.header == nil {
+		c.fctx.SetContentType(contentType)
+		return
+	}
+	c.header.Set("Content-Type", contentType)
+}
+
 func (c *Context) Body() ([]byte, error) {
-	return c.hctx.Body()
+	return c.fctx.Request.Body(), nil
+}
+
+func (c *Context) Method() string {
+	return string(c.MethodBytes())
+}
+
+func (c *Context) MethodBytes() []byte {
+	return c.fctx.Method()
+}
+
+func (c *Context) Path() string {
+	return string(c.PathBytes())
+}
+
+func (c *Context) PathBytes() []byte {
+	return c.fctx.Path()
+}
+
+func (c *Context) RawQuery() string {
+	return string(c.fctx.URI().QueryString())
+}
+
+func (c *Context) Host() string {
+	return string(c.fctx.Host())
+}
+
+func (c *Context) ContentLength() int {
+	return len(c.fctx.Request.Body())
 }
 
 func (c *Context) Bytes(status int, contentType string, body []byte) error {
-	if contentType != "" {
-		c.Header().Set("Content-Type", contentType)
-	}
+	c.setContentType(contentType)
 	c.WriteHeader(status)
 	if len(body) == 0 {
 		return nil
 	}
-	c.hctx.Response.SetBody(body)
+	c.fctx.SetBody(body)
 	return nil
 }
 
 func (c *Context) Stream(status int, contentType string, reader io.Reader) error {
-	if contentType != "" {
-		c.Header().Set("Content-Type", contentType)
-	}
+	c.setContentType(contentType)
 	c.WriteHeader(status)
 	if reader == nil {
 		return nil
 	}
-	c.hctx.SetBodyStream(reader, -1)
+	c.fctx.SetBodyStream(reader, -1)
 	return nil
 }
 
@@ -326,29 +342,32 @@ func (c *Context) CopyBody(status int, contentType string) error {
 	if err != nil {
 		return err
 	}
-	if contentType != "" {
-		c.Header().Set("Content-Type", contentType)
-	}
+	c.setContentType(contentType)
 	c.WriteHeader(status)
-	c.hctx.Response.SetBodyRaw(body)
+	c.fctx.Response.SetBodyRaw(body)
 	return nil
 }
 
 func (c *Context) Text(status int, text string) error {
-	c.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	c.setContentType("text/plain; charset=utf-8")
 	c.WriteHeader(status)
-	c.hctx.Response.SetBodyString(text)
+	c.fctx.SetBodyString(text)
 	return nil
 }
 
 func (c *Context) JSON(status int, value interface{}) error {
-	c.applyHeaders()
-	c.hctx.JSON(status, value)
+	body, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	c.setContentType("application/json; charset=utf-8")
+	c.WriteHeader(status)
+	c.fctx.SetBody(body)
 	return nil
 }
 
 func (c *Context) Query(key string) string {
-	return string(c.hctx.QueryArgs().Peek(key))
+	return string(c.fctx.QueryArgs().Peek(key))
 }
 
 func normalizeConfig(config Config) Config {
