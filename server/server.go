@@ -18,7 +18,8 @@ import (
 var ErrNoTransports = errors.New("no transports registered")
 
 type Config struct {
-	Name string
+	Name   string
+	Router core.RouterConfig
 }
 
 type Server struct {
@@ -46,7 +47,7 @@ func New(config ...Config) *Server {
 func (s *Server) Mount(transport transport.Server) *Endpoint {
 	endpoint := &Endpoint{
 		transport: transport,
-		router:    core.NewRouter(),
+		router:    core.NewRouter(s.config.Router),
 	}
 	s.mu.Lock()
 	s.runners = append(s.runners, endpoint)
@@ -203,6 +204,16 @@ func (e *Endpoint) Handle(msgID uint32, h core.Handler) *Endpoint {
 	return e
 }
 
+func (e *Endpoint) HandleSync(msgID uint32, h core.Handler) *Endpoint {
+	e.router.HandleSync(msgID, h)
+	return e
+}
+
+func (e *Endpoint) HandleAsync(msgID uint32, h core.Handler) *Endpoint {
+	e.router.HandleAsync(msgID, h)
+	return e
+}
+
 func (e *Endpoint) Name() string {
 	return e.transport.Name()
 }
@@ -212,5 +223,10 @@ func (e *Endpoint) ListenAndServe(ctx context.Context) error {
 }
 
 func (e *Endpoint) Shutdown(ctx context.Context) error {
-	return e.transport.Shutdown(ctx)
+	transportErr := e.transport.Shutdown(ctx)
+	routerErr := e.router.Shutdown(ctx)
+	if transportErr != nil {
+		return transportErr
+	}
+	return routerErr
 }

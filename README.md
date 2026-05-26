@@ -29,6 +29,30 @@ There is also a legacy production TCP baseline in the root `kpro` package. The u
 
 ## Architecture
 
+High-level structure:
+
+```mermaid
+flowchart TD
+    App[server.Server] --> TCP[transport/tcp]
+    App --> UDP[transport/udp]
+    App --> WS[transport/websocket]
+    App --> HTTP[transport/httpx]
+    App --> SSE[transport/sse]
+    App --> KCP[transport/kcp placeholder]
+
+    TCP --> Protocol[protocol.KProV1]
+    UDP --> Protocol
+    WS --> Protocol
+
+    Protocol --> Message[core.Message]
+    Message --> Middleware[core.Middleware]
+    Middleware --> Router[core.Router]
+    Router --> Handler[Business Handler]
+
+    HTTP --> HTTPRouter[method + path router]
+    SSE --> SSEHandler[SSE stream handler]
+```
+
 ```text
 cmd/
   kpro-client/             TCP benchmark client
@@ -66,6 +90,24 @@ server/
 
 The core runtime path for Message-based transports is:
 
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Transport
+    participant Protocol
+    participant Router
+    participant Handler
+
+    Client->>Transport: bytes / datagram / WebSocket message
+    Transport->>Protocol: raw payload
+    Protocol->>Router: core.Message
+    Router->>Handler: core.Context
+    Handler->>Router: ctx.Reply()
+    Router->>Protocol: response Message
+    Protocol->>Transport: encoded response
+    Transport->>Client: response
+```
+
 ```text
 TCP / UDP / WebSocket
   -> transport reads bytes, datagram or WebSocket message
@@ -79,6 +121,17 @@ TCP / UDP / WebSocket
 ```
 
 HTTP, HTTPS and SSE intentionally do not force themselves into the `Message.ID` router:
+
+```mermaid
+flowchart LR
+    HTTPClient[HTTP Client] --> HTTPRouter[method + path router]
+    HTTPRouter --> HTTPHandler[httpx.Context handler]
+    HTTPHandler --> HTTPResponse[Text / JSON response]
+
+    SSEClient[SSE Client] --> SSEEndpoint[SSE endpoint]
+    SSEEndpoint --> SSEContext[sse.Context]
+    SSEContext --> Events[Send event stream]
+```
 
 ```text
 HTTP / HTTPS
@@ -212,6 +265,21 @@ Invoke-RestMethod -Uri http://127.0.0.1:8080/health
 Invoke-RestMethod -Uri http://127.0.0.1:8080/echo -Method Post -Body "hello" -ContentType "text/plain"
 ```
 
+## Examples
+
+Standalone examples live under [examples/](examples/). Each protocol has a server and client:
+
+```text
+examples/tcp/server          examples/tcp/client
+examples/udp/server          examples/udp/client
+examples/websocket/server    examples/websocket/client
+examples/http/server         examples/http/client
+examples/https/server        examples/https/client
+examples/sse/server          examples/sse/client
+```
+
+See [examples/README.md](examples/README.md) for startup commands.
+
 ## Legacy TCP Server
 
 The root package also contains the earlier production-oriented TCP baseline:
@@ -241,6 +309,7 @@ This path is useful for TCP load validation. The universal server path is the fr
 - SSE is one-way server push and has its own `sse.Context`.
 - KCP is intentionally a placeholder until the concrete KCP implementation is selected.
 - The framework avoids exposing a Netty-style pipeline API. The public model is `Protocol + Middleware + Router + Handler`.
+- More detailed call-flow diagrams are in [docs/call-flow.md](docs/call-flow.md).
 
 ## Test
 
