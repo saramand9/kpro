@@ -1,0 +1,33 @@
+package app
+
+import (
+	"github.com/saramand9/bignet/kpro/examples/websocket-modular/server/internal/modules/echo"
+	"github.com/saramand9/bignet/kpro/middleware"
+	"github.com/saramand9/bignet/kpro/protocol"
+	"github.com/saramand9/bignet/kpro/server"
+	"github.com/saramand9/bignet/kpro/transport/websocket"
+)
+
+type Config struct {
+	Addr string
+	Path string
+}
+
+type MessageModule interface {
+	RegisterMessage(*server.Endpoint)
+}
+
+func RegisterRoutes(app *server.Server, cfg Config) {
+	endpoint := app.WebSocket(cfg.Addr, cfg.Path, websocket.Config{
+		Protocol:   protocol.KProV1(),
+		MaxMessage: 64 * 1024,
+	}).Use(middleware.Recover(), middleware.MaxPayload(64*1024))
+
+	registerMessages(endpoint, echo.Module{})
+}
+
+func registerMessages(endpoint *server.Endpoint, modules ...MessageModule) {
+	for _, module := range modules {
+		module.RegisterMessage(endpoint)
+	}
+}
