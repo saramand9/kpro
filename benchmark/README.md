@@ -36,4 +36,6 @@ BenchmarkFiberHTTP_Echo
 BenchmarkSSE_Events
 ```
 
+`BenchmarkHTTP_Echo` and `BenchmarkHTTPS_Echo` use KPro `httpx`, which is backed by Hertz.
+
 KCP is not benchmarked because `transport/kcp` is not implemented.
