@@ -174,6 +174,10 @@ func (s *session) RemoteAddr() net.Addr {
 	return s.raw.RemoteAddr()
 }
 
+func (s *session) Done() <-chan struct{} {
+	return s.done
+}
+
 func (s *session) Send(msg core.Message) error {
 	packet, err := s.server.config.Protocol.EncodePacket(msg)
 	if err != nil {
