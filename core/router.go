@@ -22,7 +22,6 @@ type DispatchMode uint8
 const (
 	DispatchSync DispatchMode = iota
 	DispatchAsync
-	DispatchInline
 )
 
 type RouterConfig struct {
@@ -97,10 +96,6 @@ func (r *Router) HandleAsync(msgID uint32, h Handler) {
 	r.handle(msgID, h, DispatchAsync)
 }
 
-func (r *Router) HandleInline(msgID uint32, h Handler) {
-	r.handle(msgID, h, DispatchInline)
-}
-
 func (r *Router) Dispatch(ctx Context) error {
 	msg := ctx.Message()
 
@@ -115,10 +110,6 @@ func (r *Router) Dispatch(ctx Context) error {
 	}
 
 	h := rt.wrapped
-
-	if rt.mode == DispatchInline {
-		return r.executeInline(ctx, h)
-	}
 
 	task := dispatchTask{
 		ctx:     ctx,
@@ -194,25 +185,6 @@ func (r *Router) wrap(h Handler) Handler {
 		h = r.middlewares[i](h)
 	}
 	return h
-}
-
-func (r *Router) executeInline(ctx Context, h Handler) (err error) {
-	defer releaseContext(ctx)
-	if r.closed() {
-		_ = ctx.Error(ErrRouterClosed.Error())
-		return ErrRouterClosed
-	}
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			err = fmt.Errorf("handler panic: %v", recovered)
-			_ = ctx.Error(err.Error())
-		}
-	}()
-	if err := h(ctx); err != nil {
-		_ = ctx.Error(err.Error())
-		return err
-	}
-	return nil
 }
 
 func (r *Router) submitAsync(task dispatchTask) error {

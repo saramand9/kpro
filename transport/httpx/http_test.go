@@ -33,7 +33,15 @@ func TestContextBytes(t *testing.T) {
 func TestContextCopyBody(t *testing.T) {
 	endpoint := New(Config{})
 	endpoint.Post("/echo", func(ctx *Context) error {
-		return ctx.CopyBody(http.StatusOK, "text/plain")
+		body, err := ctx.Body()
+		if err != nil {
+			return err
+		}
+		if err := ctx.CopyBody(http.StatusOK, "text/plain"); err != nil {
+			return err
+		}
+		body[0] = 'X'
+		return nil
 	})
 
 	resp := executeTestRequest(endpoint, http.MethodPost, "/echo", "payload")
@@ -63,7 +71,7 @@ func TestContextCopyBodyFastContentTypeSkipsHeaderMap(t *testing.T) {
 	resp := executeTestRequest(endpoint, http.MethodPost, "/echo", "payload")
 
 	if allocatedHeaderMap {
-		t.Fatal("CopyBody fast content type should not allocate compatibility header map")
+		t.Fatal("CopyBody should not allocate compatibility header map")
 	}
 	if got := string(resp.Response.Header.Peek("Content-Type")); got != "text/plain" {
 		t.Fatalf("content type = %q", got)
@@ -145,38 +153,20 @@ func TestRouteMethodNotAllowed(t *testing.T) {
 	}
 }
 
-func TestContextRequestCompatibility(t *testing.T) {
+func TestContextFastAccessors(t *testing.T) {
 	endpoint := New(Config{})
 	endpoint.Get("/inspect", func(ctx *Context) error {
-		if ctx.Request.Method != http.MethodGet {
-			t.Fatalf("method = %q", ctx.Request.Method)
-		}
-		if ctx.Request.URL.Path != "/inspect" {
-			t.Fatalf("path = %q", ctx.Request.URL.Path)
-		}
-		if got := ctx.Query("name"); got != "kpro" {
-			t.Fatalf("query = %q", got)
-		}
-		return ctx.Text(http.StatusOK, "ok")
-	})
-
-	resp := executeTestRequest(endpoint, http.MethodGet, "/inspect?name=kpro", "")
-	if resp.Response.StatusCode() != http.StatusOK {
-		t.Fatalf("status = %d, want %d", resp.Response.StatusCode(), http.StatusOK)
-	}
-}
-
-func TestFastContextSkipsRequestCompatibility(t *testing.T) {
-	endpoint := New(Config{FastContext: true})
-	endpoint.Get("/inspect", func(ctx *Context) error {
-		if ctx.Request != nil {
-			t.Fatal("Request should be nil in FastContext mode")
-		}
 		if got := ctx.Method(); got != http.MethodGet {
 			t.Fatalf("method = %q", got)
 		}
+		if got := string(ctx.MethodBytes()); got != http.MethodGet {
+			t.Fatalf("method bytes = %q", got)
+		}
 		if got := ctx.Path(); got != "/inspect" {
 			t.Fatalf("path = %q", got)
+		}
+		if got := string(ctx.PathBytes()); got != "/inspect" {
+			t.Fatalf("path bytes = %q", got)
 		}
 		if got := ctx.RawQuery(); got != "name=kpro" {
 			t.Fatalf("raw query = %q", got)

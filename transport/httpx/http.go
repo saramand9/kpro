@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,7 +26,7 @@ type Config struct {
 	WriteTimeout    time.Duration
 	IdleTimeout     time.Duration
 	ShutdownTimeout time.Duration
-	FastContext     bool
+	Logger          fasthttp.Logger
 }
 
 type Handler func(*Context) error
@@ -44,7 +43,6 @@ type Endpoint struct {
 	routes      map[string]map[string]Handler
 	middlewares []Middleware
 	compiled    atomic.Value
-	contextPool sync.Pool
 }
 
 func New(config Config) *Endpoint {
@@ -54,9 +52,6 @@ func New(config Config) *Endpoint {
 		routes: make(map[string]map[string]Handler),
 	}
 	e.compiled.Store(compiledRoutes{})
-	e.contextPool.New = func() interface{} {
-		return new(Context)
-	}
 	return e
 }
 
@@ -137,6 +132,7 @@ func (e *Endpoint) buildServer() *fasthttp.Server {
 		WriteTimeout:          e.config.WriteTimeout,
 		IdleTimeout:           e.config.IdleTimeout,
 		NoDefaultServerHeader: true,
+		Logger:                e.config.Logger,
 	}
 }
 
@@ -159,8 +155,7 @@ func (e *Endpoint) serve(fctx *fasthttp.RequestCtx) {
 
 func (e *Endpoint) serveHandler(h Handler) fasthttp.RequestHandler {
 	return func(fctx *fasthttp.RequestCtx) {
-		ctx := e.acquireContext(fctx)
-		defer e.releaseContext(ctx)
+		ctx := &Context{fctx: fctx}
 		if err := h(ctx); err != nil {
 			fctx.SetStatusCode(http.StatusInternalServerError)
 			fctx.SetBodyString(err.Error())
@@ -199,46 +194,16 @@ func wrapMiddleware(h Handler, middlewares []Middleware) Handler {
 	return h
 }
 
-func (e *Endpoint) acquireContext(fctx *fasthttp.RequestCtx) *Context {
-	ctx := e.contextPool.Get().(*Context)
-	ctx.fctx = fctx
-	if !e.config.FastContext {
-		ctx.Request = ctx.buildRequest(fctx)
-	}
-	return ctx
-}
-
-func (e *Endpoint) releaseContext(ctx *Context) {
-	ctx.fctx = nil
-	ctx.Request = nil
-	ctx.header = nil
-	ctx.status = 0
-	ctx.wroteHeader = false
-	ctx.request = http.Request{}
-	ctx.requestURL = url.URL{}
-	e.contextPool.Put(ctx)
-}
-
+// Context is backed by fasthttp and exposes fast request accessors instead of a
+// net/http compatibility request. Context objects are not pooled, but byte
+// slices returned by Body, MethodBytes, and PathBytes still reference
+// request-owned memory and should be used only while the handler is running.
+// Copy data first before retaining it in background work.
 type Context struct {
-	Request *http.Request
-
 	fctx        *fasthttp.RequestCtx
 	header      http.Header
 	status      int
 	wroteHeader bool
-	request     http.Request
-	requestURL  url.URL
-}
-
-func (c *Context) buildRequest(fctx *fasthttp.RequestCtx) *http.Request {
-	uri := fctx.URI()
-	c.requestURL.Path = string(uri.Path())
-	c.requestURL.RawQuery = string(uri.QueryString())
-	c.request.Method = string(fctx.Method())
-	c.request.URL = &c.requestURL
-	c.request.Host = string(fctx.Host())
-	c.request.ContentLength = int64(len(fctx.Request.Body()))
-	return &c.request
 }
 
 func (c *Context) Header() http.Header {
@@ -337,6 +302,8 @@ func (c *Context) Stream(status int, contentType string, reader io.Reader) error
 	return nil
 }
 
+// CopyBody copies the current request body into the response.
+// Use Body directly only when the handler consumes the data before returning.
 func (c *Context) CopyBody(status int, contentType string) error {
 	body, err := c.Body()
 	if err != nil {
@@ -344,7 +311,12 @@ func (c *Context) CopyBody(status int, contentType string) error {
 	}
 	c.setContentType(contentType)
 	c.WriteHeader(status)
-	c.fctx.Response.SetBodyRaw(body)
+	if len(body) == 0 {
+		return nil
+	}
+	copied := make([]byte, len(body))
+	copy(copied, body)
+	c.fctx.Response.SetBodyRaw(copied)
 	return nil
 }
 

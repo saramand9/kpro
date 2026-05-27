@@ -12,6 +12,13 @@ Run a quick smoke benchmark:
 go test .\benchmark -bench . -benchmem -benchtime=100x
 ```
 
+Run external comparison benchmarks:
+
+```powershell
+cd .\benchmark\compare
+go test . -bench . -benchmem
+```
+
 The benchmark output includes:
 
 ```text
@@ -33,12 +40,12 @@ BenchmarkWebSocket_Echo
 BenchmarkHTTP_Echo
 BenchmarkHTTP_Echo_Concurrent
 BenchmarkHTTPS_Echo
-BenchmarkFiberHTTP_Echo
-BenchmarkFiberHTTP_Echo_Concurrent
 BenchmarkSSE_Events
 ```
 
 `BenchmarkHTTP_Echo` and `BenchmarkHTTPS_Echo` use KPro `httpx`, which is backed by fasthttp.
 Concurrent HTTP benchmarks run the same `POST /echo` workload with 16 and 64 workers.
+Fiber and gnet comparison benchmarks live in `benchmark/compare` so their dependencies do not enter the main kpro module.
+That module includes KPro-vs-Fiber HTTP echo and KPro-vs-gnet TCP echo comparisons.
 
 KCP is not benchmarked because `transport/kcp` is not implemented.
