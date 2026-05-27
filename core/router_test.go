@@ -292,3 +292,18 @@ func TestRouterUseAfterHandleRebuildsMiddlewareChain(t *testing.T) {
 		t.Fatal("handler was not called")
 	}
 }
+
+func TestAcquireContextIsResetOnRelease(t *testing.T) {
+	ctx := AcquireContext(newFakeSession(1), Message{ID: 10, Seq: 1})
+	ctx.Set("key", "value")
+	releaseContext(ctx)
+
+	reused := AcquireContext(newFakeSession(2), Message{ID: 11, Seq: 2})
+	defer releaseContext(reused)
+	if reused.ConnID() != 2 || reused.Message().ID != 11 || reused.Message().Seq != 2 {
+		t.Fatalf("pooled context was not reset: conn=%d msg=%+v", reused.ConnID(), reused.Message())
+	}
+	if value, ok := reused.Get("key"); ok || value != nil {
+		t.Fatalf("pooled context leaked value: value=%v ok=%v", value, ok)
+	}
+}

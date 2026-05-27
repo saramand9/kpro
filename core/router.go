@@ -110,6 +110,7 @@ func (r *Router) Dispatch(ctx Context) error {
 
 	if rt.handler == nil {
 		_ = ctx.Error(ErrNoHandler.Error())
+		releaseContext(ctx)
 		return ErrNoHandler
 	}
 
@@ -124,12 +125,17 @@ func (r *Router) Dispatch(ctx Context) error {
 		handler: h,
 		session: r.sessionFor(ctx.Session()),
 	}
+	var err error
 	switch rt.mode {
 	case DispatchAsync:
-		return r.submitAsync(task)
+		err = r.submitAsync(task)
 	default:
-		return task.session.enqueue(task)
+		err = task.session.enqueue(task)
 	}
+	if err != nil {
+		releaseContext(ctx)
+	}
+	return err
 }
 
 func (r *Router) Close() {
@@ -191,6 +197,7 @@ func (r *Router) wrap(h Handler) Handler {
 }
 
 func (r *Router) executeInline(ctx Context, h Handler) (err error) {
+	defer releaseContext(ctx)
 	if r.closed() {
 		_ = ctx.Error(ErrRouterClosed.Error())
 		return ErrRouterClosed
@@ -250,6 +257,7 @@ func (r *Router) asyncWorker() {
 }
 
 func (r *Router) execute(task dispatchTask) {
+	defer releaseContext(task.ctx)
 	defer task.session.release()
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -419,6 +427,7 @@ func (s *sessionExecutor) close() {
 				s.inflight--
 			}
 			_ = task.ctx.Error(ErrRouterClosed.Error())
+			releaseContext(task.ctx)
 		default:
 			s.mu.Unlock()
 			s.router.removeSession(s)
