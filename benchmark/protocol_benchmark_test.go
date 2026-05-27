@@ -476,7 +476,6 @@ func startHTTPBenchmarkServer(b *testing.B, tlsEnabled bool) (string, func(), *h
 		WriteTimeout:    10 * time.Second,
 		IdleTimeout:     30 * time.Second,
 		ShutdownTimeout: 500 * time.Millisecond,
-		FastContext:     true,
 	}
 	client := &http.Client{
 		Timeout: 10 * time.Second,

@@ -28,20 +28,12 @@ func (KProV1Protocol) Read(r io.Reader, maxBodySize uint32) (ReadResult, error) 
 	if _, err := io.ReadFull(r, header[:]); err != nil {
 		return ReadResult{}, err
 	}
-	if binary.BigEndian.Uint16(header[0:2]) != FrameMagic {
-		return ReadResult{}, ErrBadMagic
+	msg, length, err := decodeHeader(header[:])
+	if err != nil {
+		return ReadResult{}, err
 	}
-	if header[2] != FrameVersion {
-		return ReadResult{}, ErrBadVersion
-	}
-	length := binary.BigEndian.Uint32(header[16:20])
 	if length > maxBodySize {
 		return ReadResult{}, ErrFrameTooLarge
-	}
-	msg := core.Message{
-		Flags: header[3],
-		ID:    binary.BigEndian.Uint32(header[4:8]),
-		Seq:   binary.BigEndian.Uint64(header[8:16]),
 	}
 	if length > 0 {
 		msg.Data = make([]byte, int(length))
@@ -72,26 +64,49 @@ func (KProV1Protocol) Encode(msg core.Message) ([]byte, error) {
 }
 
 func (k KProV1Protocol) DecodePacket(data []byte) (core.Message, error) {
-	result, err := k.Read(newBytesReader(data), uint32(len(data)))
-	return result.Message, err
+	if len(data) < FrameHeaderSize {
+		if len(data) == 0 {
+			return core.Message{}, io.EOF
+		}
+		return core.Message{}, io.ErrUnexpectedEOF
+	}
+	msg, length, err := decodeHeader(data[:FrameHeaderSize])
+	if err != nil {
+		return core.Message{}, err
+	}
+	if uint64(length) > uint64(len(data)) {
+		return core.Message{}, ErrFrameTooLarge
+	}
+	available := len(data) - FrameHeaderSize
+	if uint64(length) > uint64(available) {
+		if available == 0 {
+			return core.Message{}, io.EOF
+		}
+		return core.Message{}, io.ErrUnexpectedEOF
+	}
+	end := FrameHeaderSize + int(length)
+	if length > 0 {
+		msg.Data = make([]byte, int(length))
+		copy(msg.Data, data[FrameHeaderSize:end])
+	}
+	return msg, nil
 }
 
 func (k KProV1Protocol) EncodePacket(msg core.Message) ([]byte, error) {
 	return k.Encode(msg)
 }
 
-type bytesReader []byte
-
-func (r *bytesReader) Read(p []byte) (int, error) {
-	if len(*r) == 0 {
-		return 0, io.EOF
+func decodeHeader(header []byte) (core.Message, uint32, error) {
+	if binary.BigEndian.Uint16(header[0:2]) != FrameMagic {
+		return core.Message{}, 0, ErrBadMagic
 	}
-	n := copy(p, *r)
-	*r = (*r)[n:]
-	return n, nil
-}
-
-func newBytesReader(data []byte) *bytesReader {
-	r := bytesReader(data)
-	return &r
+	if header[2] != FrameVersion {
+		return core.Message{}, 0, ErrBadVersion
+	}
+	msg := core.Message{
+		Flags: header[3],
+		ID:    binary.BigEndian.Uint32(header[4:8]),
+		Seq:   binary.BigEndian.Uint64(header[8:16]),
+	}
+	return msg, binary.BigEndian.Uint32(header[16:20]), nil
 }

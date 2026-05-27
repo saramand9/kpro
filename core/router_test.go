@@ -202,39 +202,6 @@ func (s *fakeSession) waitForMessage(t *testing.T) Message {
 	return Message{}
 }
 
-func TestRouterInlineHandlerRunsBeforeDispatchReturns(t *testing.T) {
-	router := NewRouter(RouterConfig{
-		SyncQueueSize:         4,
-		AsyncWorkers:          1,
-		AsyncQueueSize:        4,
-		MaxInflightPerSession: 4,
-		SessionIdleTimeout:    time.Minute,
-	})
-	defer func() {
-		if err := router.Shutdown(context.Background()); err != nil {
-			t.Fatalf("shutdown router: %v", err)
-		}
-	}()
-
-	runs := 0
-	router.HandleInline(10, func(ctx Context) error {
-		runs++
-		return ctx.Reply(ctx.Message().ID, []byte("ok"))
-	})
-
-	session := newFakeSession(1)
-	if err := router.Dispatch(NewContext(session, Message{ID: 10, Seq: 1})); err != nil {
-		t.Fatalf("dispatch inline: %v", err)
-	}
-	if runs != 1 {
-		t.Fatalf("inline handler runs=%d, want 1 before dispatch returns", runs)
-	}
-	msg := session.waitForMessage(t)
-	if msg.ID != 10 || msg.Seq != 1 || string(msg.Data) != "ok" {
-		t.Fatalf("unexpected inline reply: id=%d seq=%d data=%q", msg.ID, msg.Seq, string(msg.Data))
-	}
-}
-
 func TestBaseContextValuesAreLazy(t *testing.T) {
 	ctx := NewContext(newFakeSession(1), Message{ID: 10})
 	if ctx.values != nil {
@@ -268,7 +235,7 @@ func TestRouterUseAfterHandleRebuildsMiddlewareChain(t *testing.T) {
 	}()
 
 	called := make(chan struct{}, 1)
-	router.HandleInline(10, func(ctx Context) error {
+	router.HandleSync(10, func(ctx Context) error {
 		value, ok := ctx.Get("middleware")
 		if !ok || value != "applied" {
 			t.Fatalf("middleware value not applied: value=%v ok=%v", value, ok)
@@ -284,7 +251,7 @@ func TestRouterUseAfterHandleRebuildsMiddlewareChain(t *testing.T) {
 	})
 
 	if err := router.Dispatch(NewContext(newFakeSession(1), Message{ID: 10, Seq: 1})); err != nil {
-		t.Fatalf("dispatch inline: %v", err)
+		t.Fatalf("dispatch sync: %v", err)
 	}
 	select {
 	case <-called:
@@ -293,17 +260,54 @@ func TestRouterUseAfterHandleRebuildsMiddlewareChain(t *testing.T) {
 	}
 }
 
-func TestAcquireContextIsResetOnRelease(t *testing.T) {
+func TestAcquireContextReturnsFreshContext(t *testing.T) {
 	ctx := AcquireContext(newFakeSession(1), Message{ID: 10, Seq: 1})
 	ctx.Set("key", "value")
-	releaseContext(ctx)
 
-	reused := AcquireContext(newFakeSession(2), Message{ID: 11, Seq: 2})
-	defer releaseContext(reused)
-	if reused.ConnID() != 2 || reused.Message().ID != 11 || reused.Message().Seq != 2 {
-		t.Fatalf("pooled context was not reset: conn=%d msg=%+v", reused.ConnID(), reused.Message())
+	fresh := AcquireContext(newFakeSession(2), Message{ID: 11, Seq: 2})
+	if fresh == ctx {
+		t.Fatal("AcquireContext reused context object")
 	}
-	if value, ok := reused.Get("key"); ok || value != nil {
-		t.Fatalf("pooled context leaked value: value=%v ok=%v", value, ok)
+	if fresh.ConnID() != 2 || fresh.Message().ID != 11 || fresh.Message().Seq != 2 {
+		t.Fatalf("fresh context was not initialized: conn=%d msg=%+v", fresh.ConnID(), fresh.Message())
+	}
+	if value, ok := fresh.Get("key"); ok || value != nil {
+		t.Fatalf("fresh context leaked value: value=%v ok=%v", value, ok)
+	}
+}
+
+func TestCloneContextIsolatesMutableMessageData(t *testing.T) {
+	session := newFakeSession(1)
+	ctx := AcquireContext(session, Message{
+		ID:      10,
+		Seq:     1,
+		Data:    []byte("payload"),
+		Headers: map[string]string{"trace": "abc"},
+		Meta:    map[string]interface{}{"attempt": 1},
+	})
+	ctx.Set("middleware", "applied")
+
+	cloned := CloneContext(ctx)
+
+	msg := ctx.Message()
+	msg.Data[0] = 'X'
+	msg.Headers["trace"] = "mutated"
+	msg.Meta["attempt"] = 2
+
+	if cloned.Session() != session {
+		t.Fatal("cloned context did not keep session")
+	}
+	clonedMsg := cloned.Message()
+	if clonedMsg.ID != 10 || clonedMsg.Seq != 1 || string(clonedMsg.Data) != "payload" {
+		t.Fatalf("unexpected cloned message: id=%d seq=%d data=%q", clonedMsg.ID, clonedMsg.Seq, string(clonedMsg.Data))
+	}
+	if clonedMsg.Headers["trace"] != "abc" {
+		t.Fatalf("cloned headers were not isolated: %q", clonedMsg.Headers["trace"])
+	}
+	if clonedMsg.Meta["attempt"] != 1 {
+		t.Fatalf("cloned meta was not isolated: %v", clonedMsg.Meta["attempt"])
+	}
+	if value, ok := cloned.Get("middleware"); !ok || value != "applied" {
+		t.Fatalf("cloned values missing: value=%v ok=%v", value, ok)
 	}
 }

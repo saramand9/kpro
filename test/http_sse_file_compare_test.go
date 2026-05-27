@@ -126,10 +126,10 @@ func runHTTPFileTrace(t *testing.T, tlsEnabled bool) {
 
 	endpoint := httpx.New(config)
 	endpoint.Get("/health", func(ctx *httpx.Context) error {
-		if err := serverRequests.append(httpTraceRecord{Method: ctx.Request.Method, Path: ctx.Request.URL.Path}); err != nil {
+		if err := serverRequests.append(httpTraceRecord{Method: ctx.Method(), Path: ctx.Path()}); err != nil {
 			return err
 		}
-		record := httpTraceRecord{Method: ctx.Request.Method, Path: ctx.Request.URL.Path, Status: http.StatusOK, Response: "ok\n"}
+		record := httpTraceRecord{Method: ctx.Method(), Path: ctx.Path(), Status: http.StatusOK, Response: "ok\n"}
 		if err := serverResponses.append(record); err != nil {
 			return err
 		}
@@ -140,10 +140,10 @@ func runHTTPFileTrace(t *testing.T, tlsEnabled bool) {
 		if err != nil {
 			return err
 		}
-		if err := serverRequests.append(httpTraceRecord{Method: ctx.Request.Method, Path: ctx.Request.URL.Path, Payload: string(body)}); err != nil {
+		if err := serverRequests.append(httpTraceRecord{Method: ctx.Method(), Path: ctx.Path(), Payload: string(body)}); err != nil {
 			return err
 		}
-		record := httpTraceRecord{Method: ctx.Request.Method, Path: ctx.Request.URL.Path, Payload: string(body), Status: http.StatusOK, Response: string(body)}
+		record := httpTraceRecord{Method: ctx.Method(), Path: ctx.Path(), Payload: string(body), Status: http.StatusOK, Response: string(body)}
 		if err := serverResponses.append(record); err != nil {
 			return err
 		}

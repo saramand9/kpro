@@ -219,7 +219,7 @@ BenchmarkHTTP_Echo_Concurrent/1024B/64c-16            	  468049	     15365 ns/op
 Notes:
 
 - Concurrent benchmarks use the same `POST /echo` payload validation as the sequential HTTP benchmarks.
-- KPro `httpx` runs with `FastContext` enabled in this benchmark.
+- This historical run used the old HTTP compatibility-skipping context option.
 - At 64 workers, KPro reached about 71k qps for 64B and 65k qps for 1024B on this Windows run.
 
 ## 2026-05-26 HTTP content-type fast path check

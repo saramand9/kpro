@@ -71,9 +71,7 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 				return err
 			}
 		}
-		packet := make([]byte, n)
-		copy(packet, buf[:n])
-		msg, err := s.config.Protocol.DecodePacket(packet)
+		msg, err := s.config.Protocol.DecodePacket(buf[:n])
 		if err != nil {
 			continue
 		}
