@@ -86,7 +86,7 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 			_ = session.Send(core.Message{ID: core.MsgPong, Seq: msg.Seq})
 			continue
 		}
-		_ = handler(core.NewContext(session, msg))
+		_ = handler(core.AcquireContext(session, msg))
 	}
 }
 
