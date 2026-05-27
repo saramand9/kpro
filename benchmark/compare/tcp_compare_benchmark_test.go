@@ -1,4 +1,4 @@
-package benchmark
+package compare
 
 import (
 	"context"
@@ -167,7 +167,7 @@ func startKProTCPCompareServer(b *testing.B, mode core.DispatchMode) (string, fu
 	if mode == core.DispatchAsync {
 		router.HandleAsync(core.MsgEcho, handler)
 	} else {
-		router.HandleInline(core.MsgEcho, handler)
+		router.HandleSync(core.MsgEcho, handler)
 	}
 
 	transport := tcp.New(tcp.Config{
