@@ -181,7 +181,7 @@ func (s *session) readLoop(handler core.Handler) {
 			_ = s.Send(core.Message{ID: core.MsgPong, Seq: msg.Seq})
 			continue
 		}
-		_ = handler(core.NewContext(s, msg))
+		_ = handler(core.AcquireContext(s, msg))
 	}
 }
 
@@ -204,7 +204,6 @@ func (s *session) writeLoop() {
 		}
 	}
 }
-
 func normalizeConfig(config Config) Config {
 	if config.Addr == "" {
 		config.Addr = DefaultAddr

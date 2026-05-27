@@ -1,5 +1,7 @@
 package core
 
+import "sync"
+
 type Handler func(Context) error
 
 type Middleware func(Handler) Handler
@@ -20,6 +22,13 @@ type BaseContext struct {
 	session Session
 	message Message
 	values  map[string]interface{}
+	pooled  bool
+}
+
+var baseContextPool = sync.Pool{
+	New: func() interface{} {
+		return &BaseContext{}
+	},
 }
 
 func NewContext(session Session, message Message) *BaseContext {
@@ -27,6 +36,34 @@ func NewContext(session Session, message Message) *BaseContext {
 		session: session,
 		message: message,
 	}
+}
+
+func AcquireContext(session Session, message Message) *BaseContext {
+	ctx := baseContextPool.Get().(*BaseContext)
+	ctx.session = session
+	ctx.message = message
+	ctx.pooled = true
+	return ctx
+}
+
+func releaseContext(ctx Context) {
+	base, ok := ctx.(*BaseContext)
+	if !ok || !base.pooled {
+		return
+	}
+	base.reset()
+	baseContextPool.Put(base)
+}
+
+func (c *BaseContext) reset() {
+	c.session = nil
+	c.message = Message{}
+	if c.values != nil {
+		for key := range c.values {
+			delete(c.values, key)
+		}
+	}
+	c.pooled = false
 }
 
 func (c *BaseContext) Session() Session {
