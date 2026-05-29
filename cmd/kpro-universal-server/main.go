@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/bignet/kpro/internal/yokalog"
 	"github.com/saramand9/bignet/kpro/middleware"
 	"github.com/saramand9/bignet/kpro/protocol"
 	"github.com/saramand9/bignet/kpro/server"
@@ -17,6 +18,7 @@ import (
 	"github.com/saramand9/bignet/kpro/transport/sse"
 	"github.com/saramand9/bignet/kpro/transport/tcp"
 	"github.com/saramand9/bignet/kpro/transport/udp"
+	"go.uber.org/zap"
 )
 
 func main() {
@@ -25,7 +27,25 @@ func main() {
 	wsAddr := flag.String("ws", ":8091", "websocket listen address")
 	httpAddr := flag.String("http", ":8080", "http listen address")
 	sseAddr := flag.String("sse", ":8081", "sse listen address")
+	defaultLog := yokalog.DefaultConfig("kpro-universal")
+	logLevel := flag.String("log-level", defaultLog.Level, "log level: debug, info, warn, error, dpanic, panic, fatal")
+	logFile := flag.String("log-file", defaultLog.FileName, "log file path")
+	logMaxSize := flag.Int("log-max-size", defaultLog.MaxSize, "log max size in MB")
+	logMaxBackups := flag.Int("log-max-backups", defaultLog.MaxBackups, "log max backup files")
+	logMaxAge := flag.Int("log-max-age", defaultLog.MaxAge, "log max age in days")
 	flag.Parse()
+
+	logger, cleanup, err := yokalog.Init(yokalog.Config{
+		Level:      *logLevel,
+		FileName:   *logFile,
+		MaxSize:    *logMaxSize,
+		MaxBackups: *logMaxBackups,
+		MaxAge:     *logMaxAge,
+	})
+	if err != nil {
+		log.Fatalf("init yokaman logger: %v", err)
+	}
+	defer cleanup()
 
 	app := server.New(server.Config{Name: "kpro-universal"})
 
@@ -81,12 +101,20 @@ func main() {
 		<-ch
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		logger.Info("shutdown requested")
 		_ = app.Shutdown(ctx)
 	}()
 
-	log.Printf("universal server listening tcp=%s udp=%s ws=%s http=%s sse=%s", *tcpAddr, *udpAddr, *wsAddr, *httpAddr, *sseAddr)
+	logger.Info("universal server listening",
+		zap.String("tcp", *tcpAddr),
+		zap.String("udp", *udpAddr),
+		zap.String("ws", *wsAddr),
+		zap.String("http", *httpAddr),
+		zap.String("sse", *sseAddr),
+		zap.String("log_file", *logFile),
+	)
 	if err := app.ListenAndServe(); err != nil {
-		log.Fatal(err)
+		logger.Fatal("universal server stopped", zap.Error(err))
 	}
 }
 
