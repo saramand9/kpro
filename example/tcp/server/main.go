@@ -10,19 +10,28 @@ import (
 	"github.com/saramand9/bignet/kpro/protocol"
 	"github.com/saramand9/bignet/kpro/server"
 	"github.com/saramand9/bignet/kpro/transport/tcp"
+	"golang.org/x/time/rate"
 )
 
 func main() {
 	addr := flag.String("addr", ":8088", "tcp listen address")
+	connRate := flag.Float64("conn-rate", 100, "per-connection message rate per second, <=0 disables")
+	connBurst := flag.Int("conn-burst", 200, "per-connection message burst")
 	flag.Parse()
 
 	app := server.New(server.Config{Name: "tcp-example"})
-	app.TCP(*addr, tcp.Config{
+	endpoint := app.TCP(*addr, tcp.Config{
 		Protocol:     protocol.KProV1(),
 		MaxFrameSize: 64 * 1024,
-	}).
-		Use(middleware.Recover(), middleware.MaxPayload(64*1024)).
-		Handle(core.MsgEcho, exampleutil.Echo)
+	})
+	endpoint.Use(middleware.Recover(), middleware.MaxPayload(64*1024))
+	if *connRate > 0 {
+		endpoint.Use(middleware.ConnRateLimit(middleware.RateLimitConfig{
+			Rate:  rate.Limit(*connRate),
+			Burst: *connBurst,
+		}))
+	}
+	endpoint.Handle(core.MsgEcho, exampleutil.Echo)
 
 	log.Printf("tcp example server listening on %s", *addr)
 	if err := exampleutil.Run(app); err != nil {
