@@ -7,7 +7,6 @@ type Transport string
 const (
 	TransportTCP       Transport = "tcp"
 	TransportUDP       Transport = "udp"
-	TransportKCP       Transport = "kcp"
 	TransportWebSocket Transport = "websocket"
 	TransportHTTP      Transport = "http"
 	TransportHTTPS     Transport = "https"

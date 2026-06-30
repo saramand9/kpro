@@ -148,11 +148,3 @@ go run .\cmd\kpro-client -addr 127.0.0.1:8088 -conns 1000 -rate 1 -duration 60s 
 UDP currently uses the same KProV1 packet format, but one datagram must contain
 one full frame.
 
-KCP is not implemented yet. The intended API shape is:
-
-```go
-app.KCP(":8090", kcp.Config{
-	Protocol: protocol.KProV1(),
-}).Handle(core.MsgEcho, echo)
-```
-

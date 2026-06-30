@@ -46,5 +46,3 @@ go run .\example\http\client -text "hello http"
 go run .\example\sse\server
 go run .\example\sse\client -events 3
 ```
-
-KCP is not included here because the current KCP transport is a placeholder and returns `kcp transport is not implemented`.
