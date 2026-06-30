@@ -88,7 +88,7 @@ flowchart TD
     Client[Client UDP] --> ReadFromUDP[udp.Server.ListenAndServe]
     ReadFromUDP --> DecodePacket[PacketProtocol.DecodePacket]
     DecodePacket --> Message[core.Message]
-    Message --> PacketSession[udp.packetSession]
+    Message --> PacketSession[getOrCreate udp.packetSession by remote IP:port]
     PacketSession --> Context[core.NewContext]
     Context --> Dispatch[core.Router.Dispatch]
     Dispatch --> Middleware[core.Middleware]
@@ -96,11 +96,13 @@ flowchart TD
     Handler --> Reply[ctx.Reply]
     Reply --> Send[packetSession.Send]
     Send --> EncodePacket[PacketProtocol.EncodePacket]
-    EncodePacket --> WriteToUDP[UDP WriteToUDP]
+    EncodePacket --> Queue[per-remote sendQueue]
+    Queue --> WriteLoop[packetSession.writeLoop]
+    WriteLoop --> WriteToUDP[UDP WriteToUDP]
     WriteToUDP --> Client
 ```
 
-UDP has no real connection. KPro maps each remote address to a lightweight virtual session ID.
+UDP has no real connection. KPro maps each remote IP:port to a virtual session. Each virtual session owns its own bounded send queue and writer goroutine, and idle sessions are cleaned up by timeout.
 
 ## WebSocket
 

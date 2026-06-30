@@ -6,7 +6,7 @@ The design goal is:
 
 ```text
 business code handles Message / Context
-transport code handles TCP, UDP, WebSocket, HTTP, HTTPS, SSE, KCP
+transport code handles TCP, UDP, WebSocket, HTTP, HTTPS, SSE
 protocol code translates bytes, datagrams or frames into Message
 server code assembles transports, middleware and routers
 ```
@@ -18,11 +18,10 @@ Current implementation:
 ```text
 TCP         implemented
 UDP         implemented
-WebSocket   implemented, minimal RFC 6455 server framing
+WebSocket   implemented, supports RFC 6455 data-message fragmentation
 HTTP        implemented
 HTTPS       implemented through HTTP + TLS config
 SSE         implemented
-KCP         placeholder only, returns kcp transport is not implemented
 ```
 
 There is also a legacy production TCP baseline in the root `kpro` package. The universal server is built in subpackages such as `server`, `core`, `protocol` and `transport`.
@@ -38,7 +37,6 @@ flowchart TD
     App --> WS[transport/websocket]
     App --> HTTP[transport/httpx]
     App --> SSE[transport/sse]
-    App --> KCP[transport/kcp placeholder]
 
     TCP --> Protocol[protocol.KProV1]
     UDP --> Protocol
@@ -67,7 +65,7 @@ core/
 
 protocol/
   StreamProtocol           stream decoder/encoder, used by TCP
-  PacketProtocol           packet decoder/encoder, used by UDP/WebSocket/KCP
+  PacketProtocol           packet decoder/encoder, used by UDP/WebSocket
   KProV1                   default binary protocol
 
 transport/
@@ -77,7 +75,6 @@ transport/
   websocket/               WebSocket transport
   httpx/                   HTTP/HTTPS path-routed transport
   sse/                     Server-Sent Events transport
-  kcp/                     KCP placeholder
 
 middleware/
   Recover                  panic recovery
@@ -307,9 +304,10 @@ This path is useful for TCP load validation. The universal server path is the fr
 - UDP and WebSocket have message boundaries, so they use `protocol.PacketProtocol`.
 - HTTP/HTTPS use path routing because forcing them into a msgID router would make the API unnatural.
 - SSE is one-way server push and has its own `sse.Context`.
-- KCP is intentionally a placeholder until the concrete KCP implementation is selected.
 - The framework avoids exposing a Netty-style pipeline API. The public model is `Protocol + Middleware + Router + Handler`.
 - More detailed call-flow diagrams are in [docs/call-flow.md](docs/call-flow.md).
+- TCP internal flow guide is in [docs/tcp-internal-flow.md](docs/tcp-internal-flow.md).
+- Network correctness requirements for message-based transports are in [docs/network-test-requirements.md](docs/network-test-requirements.md).
 
 ## Test
 

@@ -7,5 +7,6 @@ var (
 	ErrNoHandler         = errors.New("no handler registered")
 	ErrRouterClosed      = errors.New("router closed")
 	ErrDispatchQueueFull = errors.New("dispatch queue full")
+	ErrSendQueueFull     = errors.New("send queue full")
 	ErrTooManyInflight   = errors.New("too many in-flight messages")
 )
