@@ -530,6 +530,7 @@ func startStrictUDPServer(
 		Addr:          addr,
 		Protocol:      wireProtocol,
 		MaxPacketSize: strictUDPMaxPacketSize,
+		SendQueueSize: strictWireMessageCount + 16,
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())

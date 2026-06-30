@@ -65,6 +65,40 @@ func TestWebSocketEchoFileTrace(t *testing.T) {
 	assertTraceFileEqual(t, sent.path, clientReceived.path)
 }
 
+func TestWebSocketFragmentedMessageFileTrace(t *testing.T) {
+	trace := newTCPTrace(t)
+	sent := trace.log("client_sent.ndjson")
+	received := trace.log("server_received.ndjson")
+	replied := trace.log("server_replied.ndjson")
+	clientReceived := trace.log("client_received.ndjson")
+
+	addr, stop := startWebSocketTraceServer(t, core.RouterConfig{
+		SyncQueueSize:         4,
+		AsyncWorkers:          1,
+		AsyncQueueSize:        4,
+		MaxInflightPerSession: 4,
+	}, received, func(router *core.Router) {
+		router.HandleSync(msgWSTraceEcho, func(ctx core.Context) error {
+			if err := replied.appendMessage(ctx.Message()); err != nil {
+				return err
+			}
+			msg := ctx.Message()
+			return ctx.Reply(msg.ID, msg.Data)
+		})
+	})
+	defer stop()
+
+	client := dialWebSocketTraceClient(t, "ws://"+addr+"/ws")
+	defer client.close()
+
+	msg := core.Message{ID: msgWSTraceEcho, Seq: 1, Data: []byte("ws-fragmented-echo")}
+	sendWebSocketFragmentedTraced(t, sent, client, msg)
+	readWebSocketTraced(t, clientReceived, client)
+
+	assertTraceFileEqual(t, sent.path, received.path)
+	assertTraceFileEqual(t, sent.path, replied.path)
+	assertTraceFileEqual(t, sent.path, clientReceived.path)
+}
 func TestWebSocketAsyncFileTraceAllowsOutOfOrderResponses(t *testing.T) {
 	trace := newTCPTrace(t)
 	sent := trace.log("client_sent.ndjson")
@@ -340,6 +374,19 @@ func sendWebSocketTraced(t *testing.T, log *tcpTraceLog, client *webSocketTraceC
 	}
 }
 
+func sendWebSocketFragmentedTraced(t *testing.T, log *tcpTraceLog, client *webSocketTraceClient, msg core.Message) {
+	t.Helper()
+	if err := log.appendMessage(msg); err != nil {
+		t.Fatalf("append fragmented WebSocket sent trace: %v", err)
+	}
+	packet, err := protocol.KProV1().EncodePacket(msg)
+	if err != nil {
+		t.Fatalf("encode fragmented WebSocket packet: %v", err)
+	}
+	if err := writeRawWebSocketBinaryFragments(client.conn, packet); err != nil {
+		t.Fatalf("write fragmented WebSocket frame: %v", err)
+	}
+}
 func readWebSocketTraced(t *testing.T, log *tcpTraceLog, client *webSocketTraceClient) core.Message {
 	t.Helper()
 	_ = client.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -408,7 +455,36 @@ func dialRawWebSocket(rawURL string) (net.Conn, *bufio.Reader, error) {
 }
 
 func writeRawWebSocketBinary(w io.Writer, payload []byte) error {
-	header := []byte{0x82}
+	return writeRawWebSocketFrame(w, 0x2, payload, true)
+}
+
+func writeRawWebSocketBinaryFragments(w io.Writer, payload []byte) error {
+	if len(payload) < 3 {
+		return writeRawWebSocketBinary(w, payload)
+	}
+	first := len(payload) / 3
+	second := (len(payload) * 2) / 3
+	if first == 0 {
+		first = 1
+	}
+	if second <= first {
+		second = first + 1
+	}
+	if err := writeRawWebSocketFrame(w, 0x2, payload[:first], false); err != nil {
+		return err
+	}
+	if err := writeRawWebSocketFrame(w, 0x0, payload[first:second], false); err != nil {
+		return err
+	}
+	return writeRawWebSocketFrame(w, 0x0, payload[second:], true)
+}
+
+func writeRawWebSocketFrame(w io.Writer, opcode byte, payload []byte, fin bool) error {
+	headerByte := opcode
+	if fin {
+		headerByte |= 0x80
+	}
+	header := []byte{headerByte}
 	length := len(payload)
 	switch {
 	case length < 126:

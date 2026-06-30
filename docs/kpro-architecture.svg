@@ -1,0 +1,164 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1040" viewBox="0 0 1600 1040" role="img" aria-labelledby="title desc">
+  <title id="title">KPro Universal Server Architecture</title>
+  <desc id="desc">Architecture diagram for the KPro Go networking framework, showing transports, protocol decoding, router dispatch, business handlers, HTTP/SSE paths, and current caveats.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#354052" />
+    </marker>
+    <marker id="dashedArrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#8a5a00" />
+    </marker>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#1d2430" flood-opacity="0.14" />
+    </filter>
+    <style>
+      .bg { fill: #f7f4ef; }
+      .title { font: 700 36px Arial, Helvetica, sans-serif; fill: #202631; }
+      .subtitle { font: 400 18px Arial, Helvetica, sans-serif; fill: #4f5a68; }
+      .section { font: 700 17px Arial, Helvetica, sans-serif; fill: #344052; letter-spacing: 0; }
+      .label { font: 700 18px Arial, Helvetica, sans-serif; fill: #1f2937; }
+      .small { font: 400 14px Arial, Helvetica, sans-serif; fill: #4f5a68; }
+      .tiny { font: 400 12px Arial, Helvetica, sans-serif; fill: #5a6472; }
+      .box { stroke-width: 2; filter: url(#softShadow); }
+      .client { fill: #ffffff; stroke: #c8b7a0; }
+      .transport { fill: #e9f4f1; stroke: #2f8f83; }
+      .protocol { fill: #fff4d7; stroke: #d19a17; }
+      .core { fill: #eef0ff; stroke: #6870c9; }
+      .business { fill: #e9f5df; stroke: #65a742; }
+      .special { fill: #ffeceb; stroke: #d76b61; }
+      .note { fill: #ffffff; stroke: #d8c7aa; }
+      .line { fill: none; stroke: #354052; stroke-width: 2.4; marker-end: url(#arrow); }
+      .dash { fill: none; stroke: #8a5a00; stroke-width: 2.2; stroke-dasharray: 8 8; marker-end: url(#dashedArrow); }
+      .mutedLine { fill: none; stroke: #8a94a3; stroke-width: 1.8; marker-end: url(#arrow); }
+      .bandLabel { font: 700 14px Arial, Helvetica, sans-serif; fill: #5b6470; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="1040" />
+
+  <text class="title" x="64" y="72">KPro Universal Server Architecture</text>
+  <text class="subtitle" x="64" y="104">One application model over multiple network transports; HTTP/SSE intentionally keep protocol-native routing.</text>
+
+  <rect x="54" y="132" width="1492" height="96" rx="12" fill="#efe7dc" stroke="#d8c7aa" />
+  <text class="bandLabel" x="76" y="158">clients / external traffic</text>
+
+  <rect class="box client" x="86" y="174" width="160" height="56" rx="8" />
+  <text class="label" x="129" y="208">TCP</text>
+
+  <rect class="box client" x="268" y="174" width="160" height="56" rx="8" />
+  <text class="label" x="311" y="208">UDP</text>
+
+  <rect class="box client" x="450" y="174" width="190" height="56" rx="8" />
+  <text class="label" x="486" y="208">WebSocket</text>
+
+  <rect class="box client" x="720" y="174" width="160" height="56" rx="8" />
+  <text class="label" x="765" y="208">HTTP</text>
+
+  <rect class="box client" x="902" y="174" width="160" height="56" rx="8" />
+  <text class="label" x="943" y="208">HTTPS</text>
+
+  <rect class="box client" x="1084" y="174" width="160" height="56" rx="8" />
+  <text class="label" x="1130" y="208">SSE</text>
+
+
+  <rect x="54" y="270" width="1492" height="146" rx="12" fill="#eef4ef" stroke="#c3d8cb" />
+  <text class="bandLabel" x="76" y="296">transport layer</text>
+
+  <rect class="box transport" x="86" y="326" width="160" height="70" rx="8" />
+  <text class="label" x="120" y="354">tcp.Server</text>
+  <text class="small" x="112" y="377">stream frames</text>
+
+  <rect class="box transport" x="268" y="326" width="160" height="70" rx="8" />
+  <text class="label" x="300" y="354">udp.Server</text>
+  <text class="small" x="296" y="377">datagrams</text>
+
+  <rect class="box transport" x="450" y="326" width="190" height="70" rx="8" />
+  <text class="label" x="486" y="354">ws.Server</text>
+  <text class="small" x="486" y="377">fragments -> packet</text>
+
+  <rect class="box special" x="720" y="326" width="342" height="70" rx="8" />
+  <text class="label" x="814" y="354">httpx.Endpoint</text>
+  <text class="small" x="794" y="377">method + path router, fasthttp</text>
+
+  <rect class="box special" x="1084" y="326" width="160" height="70" rx="8" />
+  <text class="label" x="1122" y="354">sse.Endpoint</text>
+  <text class="small" x="1125" y="377">event stream</text>
+
+
+  <path class="line" d="M166 230 L166 316" />
+  <path class="line" d="M348 230 L348 316" />
+  <path class="line" d="M545 230 L545 316" />
+  <path class="line" d="M800 230 L800 316" />
+  <path class="line" d="M982 230 L982 316" />
+  <path class="line" d="M1164 230 L1164 316" />
+
+
+  <rect x="54" y="458" width="626" height="154" rx="12" fill="#fff8e6" stroke="#dfc782" />
+  <text class="bandLabel" x="76" y="484">message protocol layer</text>
+
+  <rect class="box protocol" x="124" y="518" width="486" height="74" rx="8" />
+  <text class="label" x="268" y="548">protocol.KProV1</text>
+  <text class="small" x="213" y="572">20-byte header + body; stream and packet adapters</text>
+
+  <path class="line" d="M166 396 C166 438, 226 456, 266 508" />
+  <path class="line" d="M348 396 L348 508" />
+  <path class="line" d="M545 396 C545 438, 488 456, 448 508" />
+
+  <rect x="54" y="654" width="1008" height="228" rx="12" fill="#f0f2ff" stroke="#c9cef8" />
+  <text class="bandLabel" x="76" y="680">core runtime for TCP / UDP / WebSocket</text>
+
+  <rect class="box core" x="94" y="714" width="210" height="110" rx="8" />
+  <text class="label" x="143" y="744">core.Context</text>
+  <text class="small" x="122" y="769">Session + Message</text>
+  <text class="small" x="121" y="790">Reply / Error helpers</text>
+
+  <rect class="box core" x="350" y="714" width="250" height="110" rx="8" />
+  <text class="label" x="417" y="744">core.Router</text>
+  <text class="small" x="385" y="769">msgID dispatch</text>
+  <text class="small" x="385" y="790">sync / async handlers</text>
+
+  <rect class="box core" x="646" y="714" width="250" height="110" rx="8" />
+  <text class="label" x="688" y="744">middleware chain</text>
+  <text class="small" x="681" y="769">Recover, MaxPayload</text>
+  <text class="small" x="681" y="790">RateLimit, ConnRateLimit</text>
+
+  <rect class="box business" x="942" y="714" width="90" height="110" rx="8" />
+  <text class="label" x="963" y="752">app</text>
+  <text class="small" x="956" y="776">handler</text>
+
+  <path class="line" d="M367 592 C367 638, 246 652, 199 704" />
+  <path class="line" d="M304 769 L340 769" />
+  <path class="line" d="M600 769 L636 769" />
+  <path class="line" d="M896 769 L932 769" />
+  <path class="mutedLine" d="M987 714 C987 652, 614 642, 396 592" />
+  <text class="tiny" x="630" y="637">ctx.Reply encodes response back through session.Send</text>
+
+  <rect class="box note" x="356" y="838" width="438" height="32" rx="8" />
+  <text class="small" x="382" y="859">per-session order, inflight limits, idle executor cleanup</text>
+
+  <rect x="1100" y="458" width="446" height="424" rx="12" fill="#fff0ef" stroke="#e9beb9" />
+  <text class="bandLabel" x="1122" y="484">protocol-native paths</text>
+
+  <rect class="box special" x="1152" y="526" width="340" height="96" rx="8" />
+  <text class="label" x="1236" y="558">HTTP / HTTPS</text>
+  <text class="small" x="1196" y="584">path + method route lookup</text>
+  <text class="small" x="1196" y="604">httpx.Context response helpers</text>
+
+  <rect class="box business" x="1152" y="666" width="340" height="72" rx="8" />
+  <text class="label" x="1240" y="699">HTTP handlers</text>
+  <text class="small" x="1212" y="721">Text, JSON, Stream, CopyBody</text>
+
+  <rect class="box special" x="1152" y="774" width="340" height="72" rx="8" />
+  <text class="label" x="1267" y="807">SSE</text>
+  <text class="small" x="1196" y="829">one-way sse.Context.Send(event, data)</text>
+
+  <path class="line" d="M891 396 C934 448, 1124 456, 1266 516" />
+  <path class="line" d="M1164 396 C1164 472, 1288 492, 1322 516" />
+  <path class="line" d="M1322 622 L1322 656" />
+  <path class="line" d="M1322 738 L1322 764" />
+
+  <rect x="54" y="918" width="1492" height="82" rx="12" fill="#fffaf0" stroke="#dfc782" />
+  <text class="bandLabel" x="76" y="944">current caveats</text>
+  <text class="small" x="84" y="972">WebSocket fragmentation is supported; UDP virtual sessions own send queues and idle cleanup.</text>
+  <text class="small" x="84" y="992">Full tests pass serially with go test -p 1 ./..., while default parallel all-package runs were unstable in this environment.</text>
+</svg>

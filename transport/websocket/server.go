@@ -37,9 +37,10 @@ const (
 )
 
 var (
-	ErrBadHandshake        = errors.New("bad websocket handshake")
-	ErrFrameTooLarge       = errors.New("websocket frame too large")
-	ErrFragmentUnsupported = errors.New("websocket fragmented messages are not supported")
+	ErrBadHandshake           = errors.New("bad websocket handshake")
+	ErrBadFrame               = errors.New("bad websocket frame")
+	ErrFrameTooLarge          = errors.New("websocket frame too large")
+	ErrFragmentedControlFrame = errors.New("websocket control frame must not be fragmented")
 )
 
 type Config struct {
@@ -148,6 +149,7 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request, handler core.Ha
 }
 
 type wsFrame struct {
+	fin     bool
 	opcode  byte
 	payload []byte
 }
@@ -214,6 +216,9 @@ func (s *session) enqueue(frame wsFrame) error {
 
 func (s *session) readLoop(handler core.Handler) {
 	defer s.Close()
+	var fragmentOpcode byte
+	var fragmentPayload []byte
+
 	for {
 		if s.server.config.ReadTimeout > 0 {
 			if err := s.raw.SetReadDeadline(time.Now().Add(s.server.config.ReadTimeout)); err != nil {
@@ -234,19 +239,52 @@ func (s *session) readLoop(handler core.Handler) {
 		case opPong:
 			continue
 		case opText, opBinary:
-			msg, err := s.server.config.Protocol.DecodePacket(frame.payload)
+			if fragmentOpcode != 0 {
+				return
+			}
+			if !frame.fin {
+				fragmentOpcode = frame.opcode
+				fragmentPayload = append(fragmentPayload[:0], frame.payload...)
+				continue
+			}
+			if err := s.handleMessage(handler, frame.payload); err != nil {
+				return
+			}
+		case opContinuation:
+			if fragmentOpcode == 0 {
+				return
+			}
+			payload, err := appendFragment(fragmentPayload, frame.payload, s.server.config.MaxMessage)
 			if err != nil {
 				return
 			}
-			if msg.ID == core.MsgHeartbeat {
-				_ = s.Send(core.Message{ID: core.MsgPong, Seq: msg.Seq})
+			fragmentPayload = payload
+			if !frame.fin {
 				continue
 			}
-			_ = handler(core.AcquireContext(s, msg))
+			completePayload := fragmentPayload
+			fragmentOpcode = 0
+			fragmentPayload = nil
+			if err := s.handleMessage(handler, completePayload); err != nil {
+				return
+			}
 		default:
 			return
 		}
 	}
+}
+
+func (s *session) handleMessage(handler core.Handler, payload []byte) error {
+	msg, err := s.server.config.Protocol.DecodePacket(payload)
+	if err != nil {
+		return err
+	}
+	if msg.ID == core.MsgHeartbeat {
+		_ = s.Send(core.Message{ID: core.MsgPong, Seq: msg.Seq})
+		return nil
+	}
+	_ = handler(core.AcquireContext(s, msg))
+	return nil
 }
 
 func (s *session) writeLoop() {
@@ -280,8 +318,8 @@ func readFrame(r io.Reader, maxSize int) (wsFrame, error) {
 	}
 	fin := header[0]&0x80 != 0
 	opcode := header[0] & 0x0f
-	if !fin || opcode == opContinuation {
-		return wsFrame{}, ErrFragmentUnsupported
+	if header[0]&0x70 != 0 {
+		return wsFrame{}, ErrBadFrame
 	}
 	masked := header[1]&0x80 != 0
 	length := uint64(header[1] & 0x7f)
@@ -299,7 +337,13 @@ func readFrame(r io.Reader, maxSize int) (wsFrame, error) {
 		}
 		length = binary.BigEndian.Uint64(ext[:])
 	}
+	if opcode >= opClose && (!fin || length > 125) {
+		return wsFrame{}, ErrFragmentedControlFrame
+	}
 	if maxSize > 0 && length > uint64(maxSize) {
+		return wsFrame{}, ErrFrameTooLarge
+	}
+	if length > uint64(^uint(0)>>1) {
 		return wsFrame{}, ErrFrameTooLarge
 	}
 	var mask [4]byte
@@ -319,7 +363,17 @@ func readFrame(r io.Reader, maxSize int) (wsFrame, error) {
 			payload[i] ^= mask[i%4]
 		}
 	}
-	return wsFrame{opcode: opcode, payload: payload}, nil
+	return wsFrame{fin: fin, opcode: opcode, payload: payload}, nil
+}
+
+func appendFragment(dst, part []byte, maxSize int) ([]byte, error) {
+	if maxSize > 0 && len(part) > maxSize-len(dst) {
+		return nil, ErrFrameTooLarge
+	}
+	if len(part) == 0 {
+		return dst, nil
+	}
+	return append(dst, part...), nil
 }
 
 func writeFrame(w io.Writer, opcode byte, payload []byte) error {

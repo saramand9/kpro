@@ -8,7 +8,6 @@ import (
 	"github.com/saramand9/bignet/kpro/core"
 	"github.com/saramand9/bignet/kpro/transport"
 	"github.com/saramand9/bignet/kpro/transport/httpx"
-	"github.com/saramand9/bignet/kpro/transport/kcp"
 	"github.com/saramand9/bignet/kpro/transport/sse"
 	"github.com/saramand9/bignet/kpro/transport/tcp"
 	"github.com/saramand9/bignet/kpro/transport/udp"
@@ -88,15 +87,6 @@ func (s *Server) WebSocket(addr, path string, config ...websocket.Config) *Endpo
 	cfg.Addr = addr
 	cfg.Path = path
 	return s.Mount(websocket.New(cfg))
-}
-
-func (s *Server) KCP(addr string, config ...kcp.Config) *Endpoint {
-	cfg := kcp.Config{}
-	if len(config) > 0 {
-		cfg = config[0]
-	}
-	cfg.Addr = addr
-	return s.Mount(kcp.New(cfg))
 }
 
 func (s *Server) HTTP(addr string, config ...httpx.Config) *httpx.Endpoint {

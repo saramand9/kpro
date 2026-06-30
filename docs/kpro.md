@@ -78,7 +78,7 @@ kpro/protocol  StreamProtocol and PacketProtocol implementations
 kpro           current TCP server, context, router and metrics
 ```
 
-Future UDP/KCP/WebSocket transports should reuse `core.Message` and protocol
+UDP and WebSocket transports reuse `core.Message` and protocol
 interfaces instead of duplicating packet definitions.
 
 ## Run server
@@ -130,4 +130,3 @@ read/write deadline expires
 idle timeout expires
 per-IP connection limit is exceeded
 ```
-
