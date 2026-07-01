@@ -48,6 +48,8 @@ flowchart TD
     Router --> Handler[Business Handler]
 
     HTTP --> HTTPRouter[method + path router]
+    HTTP --> HTTPMessage[optional method + path -> core.Message]
+    HTTPMessage --> Message
     SSE --> SSEHandler[SSE stream handler]
 ```
 
@@ -73,7 +75,7 @@ transport/
   tcp/                     TCP stream transport
   udp/                     UDP packet transport
   websocket/               WebSocket transport
-  httpx/                   HTTP/HTTPS path-routed transport
+  httpx/                   HTTP/HTTPS path-routed transport and optional message bridge
   sse/                     Server-Sent Events transport
 
 middleware/
@@ -117,13 +119,19 @@ TCP / UDP / WebSocket
   -> transport writes response
 ```
 
-HTTP, HTTPS and SSE intentionally do not force themselves into the `Message.ID` router:
+HTTP and HTTPS have two explicit modes:
 
 ```mermaid
 flowchart LR
     HTTPClient[HTTP Client] --> HTTPRouter[method + path router]
     HTTPRouter --> HTTPHandler[httpx.Context handler]
     HTTPHandler --> HTTPResponse[Text / JSON response]
+
+    HTTPClient --> HTTPMessage[HTTPMessage route]
+    HTTPMessage --> CoreMessage[core.Message]
+    CoreMessage --> CoreRouter[core.Router]
+    CoreRouter --> CoreHandler[core.Context handler]
+    CoreHandler --> MessageResponse[ctx.Reply HTTP response]
 
     SSEClient[SSE Client] --> SSEEndpoint[SSE endpoint]
     SSEEndpoint --> SSEContext[sse.Context]
@@ -134,6 +142,11 @@ flowchart LR
 HTTP / HTTPS
   -> path + method router
   -> httpx.Context
+
+HTTPMessage / HTTPSMessage
+  -> path + method router maps to Message.ID
+  -> core.Router dispatches by Message.ID
+  -> core.Context / ctx.Reply
 
 SSE
   -> HTTP streaming endpoint
@@ -216,6 +229,10 @@ func main() {
 			}
 			return ctx.JSON(200, map[string]interface{}{"echo": string(body)})
 		})
+
+	app.HTTPMessage(":8082").
+		Post("/message/echo", core.MsgEcho).
+		Handle(core.MsgEcho, echo)
 
 	app.SSE(":8081", "/events").
 		Handle(func(ctx *sse.Context) error {
@@ -302,7 +319,7 @@ This path is useful for TCP load validation. The universal server path is the fr
 
 - TCP is stream-oriented, so it uses `protocol.StreamProtocol`.
 - UDP and WebSocket have message boundaries, so they use `protocol.PacketProtocol`.
-- HTTP/HTTPS use path routing because forcing them into a msgID router would make the API unnatural.
+- HTTP/HTTPS support native path routing for REST-style APIs and `HTTPMessage` / `HTTPSMessage` for TCP-like `core.Router` reuse.
 - SSE is one-way server push and has its own `sse.Context`.
 - The framework avoids exposing a Netty-style pipeline API. The public model is `Protocol + Middleware + Router + Handler`.
 - More detailed call-flow diagrams are in [docs/call-flow.md](docs/call-flow.md).

@@ -43,7 +43,7 @@ func main() {
 		MaxAge:     *logMaxAge,
 	})
 	if err != nil {
-		log.Fatalf("init yokaman logger: %v", err)
+		log.Fatalf("init logger: %v", err)
 	}
 	defer cleanup()
 

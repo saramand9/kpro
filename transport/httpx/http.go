@@ -3,13 +3,13 @@ package httpx
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"log"
 	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/valyala/fasthttp"
 )
 
 const (
@@ -26,7 +26,9 @@ type Config struct {
 	WriteTimeout    time.Duration
 	IdleTimeout     time.Duration
 	ShutdownTimeout time.Duration
-	Logger          fasthttp.Logger
+	Logger          interface {
+		Printf(string, ...interface{})
+	}
 }
 
 type Handler func(*Context) error
@@ -37,7 +39,7 @@ type compiledRoutes map[string]map[string]Handler
 
 type Endpoint struct {
 	config Config
-	server *fasthttp.Server
+	server *http.Server
 
 	mu          sync.RWMutex
 	routes      map[string]map[string]Handler
@@ -110,9 +112,9 @@ func (e *Endpoint) ListenAndServe(ctx context.Context) error {
 		_ = e.Shutdown(shutdownCtx)
 	}()
 	if e.config.TLS {
-		return server.ListenAndServeTLS(e.config.Addr, e.config.CertFile, e.config.KeyFile)
+		return ignoreServerClosed(server.ListenAndServeTLS(e.config.CertFile, e.config.KeyFile))
 	}
-	return server.ListenAndServe(e.config.Addr)
+	return ignoreServerClosed(server.ListenAndServe())
 }
 
 func (e *Endpoint) Shutdown(ctx context.Context) error {
@@ -122,43 +124,45 @@ func (e *Endpoint) Shutdown(ctx context.Context) error {
 	if server == nil {
 		return nil
 	}
-	return server.ShutdownWithContext(ctx)
+	return server.Shutdown(ctx)
 }
 
-func (e *Endpoint) buildServer() *fasthttp.Server {
-	return &fasthttp.Server{
-		Handler:               e.serve,
-		ReadTimeout:           e.config.ReadTimeout,
-		WriteTimeout:          e.config.WriteTimeout,
-		IdleTimeout:           e.config.IdleTimeout,
-		NoDefaultServerHeader: true,
-		Logger:                e.config.Logger,
+func (e *Endpoint) buildServer() *http.Server {
+	return &http.Server{
+		Addr:         e.config.Addr,
+		Handler:      http.HandlerFunc(e.serve),
+		ReadTimeout:  e.config.ReadTimeout,
+		WriteTimeout: e.config.WriteTimeout,
+		IdleTimeout:  e.config.IdleTimeout,
+		ErrorLog:     errorLogger(e.config.Logger),
 	}
 }
 
-func (e *Endpoint) serve(fctx *fasthttp.RequestCtx) {
+func (e *Endpoint) serve(w http.ResponseWriter, r *http.Request) {
 	routes, _ := e.compiled.Load().(compiledRoutes)
-	methods := routes[string(fctx.Path())]
+	methods := routes[r.URL.Path]
 	if methods == nil {
-		fctx.SetStatusCode(http.StatusNotFound)
-		fctx.SetBodyString("not found")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("not found"))
 		return
 	}
-	h := methods[string(fctx.Method())]
+	h := methods[r.Method]
 	if h == nil {
-		fctx.SetStatusCode(http.StatusMethodNotAllowed)
-		fctx.SetBodyString("method not allowed")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = w.Write([]byte("method not allowed"))
 		return
 	}
-	e.serveHandler(h)(fctx)
+	e.serveHandler(h)(w, r)
 }
 
-func (e *Endpoint) serveHandler(h Handler) fasthttp.RequestHandler {
-	return func(fctx *fasthttp.RequestCtx) {
-		ctx := &Context{fctx: fctx}
+func (e *Endpoint) serveHandler(h Handler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := &Context{w: w, r: r}
 		if err := h(ctx); err != nil {
-			fctx.SetStatusCode(http.StatusInternalServerError)
-			fctx.SetBodyString(err.Error())
+			if !ctx.wroteHeader {
+				w.WriteHeader(http.StatusInternalServerError)
+			}
+			_, _ = w.Write([]byte(err.Error()))
 		}
 	}
 }
@@ -194,21 +198,21 @@ func wrapMiddleware(h Handler, middlewares []Middleware) Handler {
 	return h
 }
 
-// Context is backed by fasthttp and exposes fast request accessors instead of a
-// net/http compatibility request. Context objects are not pooled, but byte
-// slices returned by Body, MethodBytes, and PathBytes still reference
-// request-owned memory and should be used only while the handler is running.
-// Copy data first before retaining it in background work.
+// Context is backed by net/http. Body caches the request body on first read so
+// handlers can call Body and CopyBody in either order.
 type Context struct {
-	fctx        *fasthttp.RequestCtx
+	w           http.ResponseWriter
+	r           *http.Request
 	header      http.Header
+	body        []byte
+	bodyRead    bool
 	status      int
 	wroteHeader bool
 }
 
 func (c *Context) Header() http.Header {
 	if c.header == nil {
-		c.header = make(http.Header)
+		c.header = c.w.Header()
 	}
 	return c.header
 }
@@ -219,67 +223,79 @@ func (c *Context) WriteHeader(status int) {
 	}
 	c.wroteHeader = true
 	c.status = status
-	c.applyHeaders()
-	c.fctx.SetStatusCode(status)
+	c.w.WriteHeader(status)
 }
 
 func (c *Context) Write(body []byte) (int, error) {
 	if !c.wroteHeader {
 		c.WriteHeader(http.StatusOK)
 	}
-	c.fctx.Response.AppendBody(body)
-	return len(body), nil
-}
-
-func (c *Context) applyHeaders() {
-	for key, values := range c.header {
-		for _, value := range values {
-			c.fctx.Response.Header.Set(key, value)
-		}
-	}
+	return c.w.Write(body)
 }
 
 func (c *Context) setContentType(contentType string) {
 	if contentType == "" {
 		return
 	}
-	if c.header == nil {
-		c.fctx.SetContentType(contentType)
-		return
-	}
-	c.header.Set("Content-Type", contentType)
+	c.w.Header().Set("Content-Type", contentType)
 }
 
 func (c *Context) Body() ([]byte, error) {
-	return c.fctx.Request.Body(), nil
+	if c.bodyRead {
+		return c.body, nil
+	}
+	if c.r.Body == nil {
+		c.bodyRead = true
+		return nil, nil
+	}
+	body, err := io.ReadAll(c.r.Body)
+	if err != nil {
+		return nil, err
+	}
+	c.body = body
+	c.bodyRead = true
+	return c.body, nil
 }
 
 func (c *Context) Method() string {
-	return string(c.MethodBytes())
+	return c.r.Method
 }
 
 func (c *Context) MethodBytes() []byte {
-	return c.fctx.Method()
+	return []byte(c.r.Method)
 }
 
 func (c *Context) Path() string {
-	return string(c.PathBytes())
+	if c.r.URL == nil {
+		return ""
+	}
+	return c.r.URL.Path
 }
 
 func (c *Context) PathBytes() []byte {
-	return c.fctx.Path()
+	return []byte(c.Path())
 }
 
 func (c *Context) RawQuery() string {
-	return string(c.fctx.URI().QueryString())
+	if c.r.URL == nil {
+		return ""
+	}
+	return c.r.URL.RawQuery
 }
 
 func (c *Context) Host() string {
-	return string(c.fctx.Host())
+	return c.r.Host
 }
 
 func (c *Context) ContentLength() int {
-	return len(c.fctx.Request.Body())
+	if c.r.ContentLength > 0 {
+		return int(c.r.ContentLength)
+	}
+	body, err := c.Body()
+	if err != nil {
+		return 0
+	}
+	return len(body)
 }
 
 func (c *Context) Bytes(status int, contentType string, body []byte) error {
@@ -288,8 +304,8 @@ func (c *Context) Bytes(status int, contentType string, body []byte) error {
 	if len(body) == 0 {
 		return nil
 	}
-	c.fctx.SetBody(body)
-	return nil
+	_, err := c.w.Write(body)
+	return err
 }
 
 func (c *Context) Stream(status int, contentType string, reader io.Reader) error {
@@ -298,8 +314,8 @@ func (c *Context) Stream(status int, contentType string, reader io.Reader) error
 	if reader == nil {
 		return nil
 	}
-	c.fctx.SetBodyStream(reader, -1)
-	return nil
+	_, err := io.Copy(c.w, reader)
+	return err
 }
 
 // CopyBody copies the current request body into the response.
@@ -316,15 +332,15 @@ func (c *Context) CopyBody(status int, contentType string) error {
 	}
 	copied := make([]byte, len(body))
 	copy(copied, body)
-	c.fctx.Response.SetBodyRaw(copied)
-	return nil
+	_, err = c.w.Write(copied)
+	return err
 }
 
 func (c *Context) Text(status int, text string) error {
 	c.setContentType("text/plain; charset=utf-8")
 	c.WriteHeader(status)
-	c.fctx.SetBodyString(text)
-	return nil
+	_, err := io.WriteString(c.w, text)
+	return err
 }
 
 func (c *Context) JSON(status int, value interface{}) error {
@@ -334,12 +350,15 @@ func (c *Context) JSON(status int, value interface{}) error {
 	}
 	c.setContentType("application/json; charset=utf-8")
 	c.WriteHeader(status)
-	c.fctx.SetBody(body)
-	return nil
+	_, err = c.w.Write(body)
+	return err
 }
 
 func (c *Context) Query(key string) string {
-	return string(c.fctx.QueryArgs().Peek(key))
+	if c.r.URL == nil {
+		return ""
+	}
+	return c.r.URL.Query().Get(key)
 }
 
 func normalizeConfig(config Config) Config {
@@ -350,4 +369,31 @@ func normalizeConfig(config Config) Config {
 		config.ShutdownTimeout = DefaultShutdownTimeout
 	}
 	return config
+}
+
+func ignoreServerClosed(err error) error {
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
+
+func errorLogger(logger interface {
+	Printf(string, ...interface{})
+}) *log.Logger {
+	if logger == nil {
+		return nil
+	}
+	return log.New(&logWriter{logger: logger}, "", 0)
+}
+
+type logWriter struct {
+	logger interface {
+		Printf(string, ...interface{})
+	}
+}
+
+func (l *logWriter) Write(p []byte) (int, error) {
+	l.logger.Printf("%s", string(p))
+	return len(p), nil
 }

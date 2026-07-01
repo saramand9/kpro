@@ -78,7 +78,7 @@
 
   <rect class="box special" x="720" y="326" width="342" height="70" rx="8" />
   <text class="label" x="814" y="354">httpx.Endpoint</text>
-  <text class="small" x="794" y="377">method + path router, fasthttp</text>
+  <text class="small" x="794" y="377">method + path router, net/http</text>
 
   <rect class="box special" x="1084" y="326" width="160" height="70" rx="8" />
   <text class="label" x="1122" y="354">sse.Endpoint</text>
