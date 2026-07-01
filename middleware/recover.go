@@ -5,16 +5,23 @@ package middleware
 
 import (
 	"fmt"
+	"log"
+	"runtime/debug"
 
 	"github.com/saramand9/bignet/kpro/core"
 )
 
 // Recover converts handler panics into returned errors.
+var logPanicStack = func(recovered interface{}, stack []byte) {
+	log.Printf("handler panic: %v\n%s", recovered, stack)
+}
+
 func Recover() core.Middleware {
 	return func(next core.InvocationHandler) core.InvocationHandler {
 		return func(ctx core.Invocation) (err error) {
 			defer func() {
 				if r := recover(); r != nil {
+					logPanicStack(r, debug.Stack())
 					err = fmt.Errorf("handler panic: %v", r)
 				}
 			}()

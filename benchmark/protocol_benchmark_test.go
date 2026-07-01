@@ -31,13 +31,17 @@ import (
 	"testing"
 	"time"
 
+	quicgo "github.com/quic-go/quic-go"
 	"github.com/saramand9/bignet/kpro/core"
 	"github.com/saramand9/bignet/kpro/protocol"
 	"github.com/saramand9/bignet/kpro/transport/httpx"
+	kcptransport "github.com/saramand9/bignet/kpro/transport/kcp"
+	quictransport "github.com/saramand9/bignet/kpro/transport/quic"
 	"github.com/saramand9/bignet/kpro/transport/sse"
 	"github.com/saramand9/bignet/kpro/transport/tcp"
 	"github.com/saramand9/bignet/kpro/transport/udp"
 	wstransport "github.com/saramand9/bignet/kpro/transport/websocket"
+	kcpgo "github.com/xtaci/kcp-go"
 )
 
 var benchmarkPayloadSizes = []int{64, 1024}
@@ -47,6 +51,22 @@ func BenchmarkTCP_Echo(b *testing.B) {
 	for _, size := range benchmarkPayloadSizes {
 		b.Run(payloadName(size), func(b *testing.B) {
 			benchmarkTCPEcho(b, size)
+		})
+	}
+}
+
+func BenchmarkKCP_Echo(b *testing.B) {
+	for _, size := range benchmarkPayloadSizes {
+		b.Run(payloadName(size), func(b *testing.B) {
+			benchmarkKCPEcho(b, size)
+		})
+	}
+}
+
+func BenchmarkQUIC_Echo(b *testing.B) {
+	for _, size := range benchmarkPayloadSizes {
+		b.Run(payloadName(size), func(b *testing.B) {
+			benchmarkQUICEcho(b, size)
 		})
 	}
 }
@@ -120,6 +140,69 @@ func benchmarkTCPEcho(b *testing.B, payloadSize int) {
 		got := readBenchmarkMessage(b, conn)
 		if got.Seq != msg.Seq || got.ID != msg.ID || len(got.Data) != len(payload) {
 			b.Fatalf("unexpected TCP response: id=%d seq=%d len=%d", got.ID, got.Seq, len(got.Data))
+		}
+	}
+	reportBenchmarkMetrics(b, started, payloadSize)
+}
+
+func benchmarkKCPEcho(b *testing.B, payloadSize int) {
+	addr, stop := startKCPBenchmarkServer(b)
+	defer stop()
+
+	conn, err := kcpgo.DialWithOptions(addr, nil, 0, 0)
+	if err != nil {
+		b.Fatalf("dial KCP addr: %v", err)
+	}
+	defer conn.Close()
+	conn.SetStreamMode(true)
+	conn.SetNoDelay(1, 20, 2, 1)
+	conn.SetWindowSize(128, 512)
+	_ = conn.SetMtu(1400)
+
+	payload := bytes.Repeat([]byte("x"), payloadSize)
+	msg := core.Message{ID: core.MsgEcho, Data: payload}
+
+	b.SetBytes(int64(payloadSize))
+	b.ReportAllocs()
+	started := startBenchmarkTimer(b)
+	for i := 0; i < b.N; i++ {
+		msg.Seq = uint64(i + 1)
+		writeBenchmarkMessage(b, conn, msg)
+		got := readBenchmarkMessage(b, conn)
+		if got.Seq != msg.Seq || got.ID != msg.ID || len(got.Data) != len(payload) {
+			b.Fatalf("unexpected KCP response: id=%d seq=%d len=%d", got.ID, got.Seq, len(got.Data))
+		}
+	}
+	reportBenchmarkMetrics(b, started, payloadSize)
+}
+
+func benchmarkQUICEcho(b *testing.B, payloadSize int) {
+	addr, stop := startQUICBenchmarkServer(b)
+	defer stop()
+
+	conn, err := quicgo.DialAddr(context.Background(), addr, benchmarkQUICTLSClientConfig(), benchmarkQUICClientConfig())
+	if err != nil {
+		b.Fatalf("dial QUIC addr: %v", err)
+	}
+	defer conn.CloseWithError(0, "")
+	stream, err := conn.OpenStreamSync(context.Background())
+	if err != nil {
+		b.Fatalf("open QUIC stream: %v", err)
+	}
+	defer stream.Close()
+
+	payload := bytes.Repeat([]byte("x"), payloadSize)
+	msg := core.Message{ID: core.MsgEcho, Data: payload}
+
+	b.SetBytes(int64(payloadSize))
+	b.ReportAllocs()
+	started := startBenchmarkTimer(b)
+	for i := 0; i < b.N; i++ {
+		msg.Seq = uint64(i + 1)
+		writeBenchmarkMessage(b, stream, msg)
+		got := readBenchmarkMessage(b, stream)
+		if got.Seq != msg.Seq || got.ID != msg.ID || len(got.Data) != len(payload) {
+			b.Fatalf("unexpected QUIC response: id=%d seq=%d len=%d", got.ID, got.Seq, len(got.Data))
 		}
 	}
 	reportBenchmarkMetrics(b, started, payloadSize)
@@ -404,6 +487,67 @@ func startUDPBenchmarkServer(b *testing.B) (string, func()) {
 	})
 }
 
+func startKCPBenchmarkServer(b *testing.B) (string, func()) {
+	b.Helper()
+
+	addr := "127.0.0.1:" + freeUDPPort(b)
+	router := benchmarkEchoRouter()
+	transport := kcptransport.New(kcptransport.Config{
+		Addr:          addr,
+		Protocol:      protocol.KProV1(),
+		SendQueueSize: 1024,
+		ReadTimeout:   10 * time.Second,
+		WriteTimeout:  10 * time.Second,
+	})
+	return startBenchmarkMessageTransport(b, addr, router, func(ctx context.Context, h core.Handler) error {
+		return transport.ListenAndServe(ctx, h)
+	}, func(ctx context.Context) error {
+		return transport.Shutdown(ctx)
+	})
+}
+
+func startQUICBenchmarkServer(b *testing.B) (string, func()) {
+	b.Helper()
+
+	certFile, keyFile, cleanupCert, err := benchmarkSelfSignedCert()
+	if err != nil {
+		b.Fatalf("generate benchmark cert: %v", err)
+	}
+	addr := "127.0.0.1:" + freeUDPPort(b)
+	router := benchmarkEchoRouter()
+	transport := quictransport.New(quictransport.Config{
+		Addr:          addr,
+		Protocol:      protocol.KProV1(),
+		SendQueueSize: 1024,
+		ReadTimeout:   10 * time.Second,
+		WriteTimeout:  10 * time.Second,
+		CertFile:      certFile,
+		KeyFile:       keyFile,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- transport.ListenAndServe(ctx, router.Dispatch)
+	}()
+	waitForQUICServer(b, addr)
+
+	stop := func() {
+		cancel()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer shutdownCancel()
+		_ = transport.Shutdown(shutdownCtx)
+		_ = router.Shutdown(shutdownCtx)
+		select {
+		case <-errCh:
+		case <-time.After(3 * time.Second):
+			b.Fatal("QUIC benchmark server did not stop")
+		}
+		cleanupCert()
+	}
+	return addr, stop
+}
+
 func startWebSocketBenchmarkServer(b *testing.B) (string, func()) {
 	b.Helper()
 
@@ -606,7 +750,7 @@ func dialTCPBenchmark(b *testing.B, addr string) net.Conn {
 	return nil
 }
 
-func writeBenchmarkMessage(b *testing.B, conn net.Conn, msg core.Message) {
+func writeBenchmarkMessage(b *testing.B, conn io.Writer, msg core.Message) {
 	b.Helper()
 	frame, err := protocol.KProV1().Encode(msg)
 	if err != nil {
@@ -617,7 +761,12 @@ func writeBenchmarkMessage(b *testing.B, conn net.Conn, msg core.Message) {
 	}
 }
 
-func readBenchmarkMessage(b *testing.B, conn net.Conn) core.Message {
+type benchmarkDeadlineReader interface {
+	io.Reader
+	SetReadDeadline(time.Time) error
+}
+
+func readBenchmarkMessage(b *testing.B, conn benchmarkDeadlineReader) core.Message {
 	b.Helper()
 	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 	result, err := protocol.KProV1().Read(conn, 64*1024)
@@ -827,6 +976,38 @@ func waitForTCPOrUDPServer(tb testing.TB, addr string) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	tb.Fatalf("server did not start on %s", addr)
+}
+
+func waitForQUICServer(tb testing.TB, addr string) {
+	tb.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		conn, err := quicgo.DialAddr(ctx, addr, benchmarkQUICTLSClientConfig(), benchmarkQUICClientConfig())
+		cancel()
+		if err == nil {
+			_ = conn.CloseWithError(0, "")
+			return
+		}
+		lastErr = err
+		time.Sleep(20 * time.Millisecond)
+	}
+	tb.Fatalf("QUIC server did not start on %s: %v", addr, lastErr)
+}
+
+func benchmarkQUICTLSClientConfig() *tls.Config {
+	return &tls.Config{
+		InsecureSkipVerify: true,
+		NextProtos:         []string{quictransport.DefaultALPN},
+	}
+}
+
+func benchmarkQUICClientConfig() *quicgo.Config {
+	return &quicgo.Config{
+		HandshakeIdleTimeout: 2 * time.Second,
+		MaxIdleTimeout:       30 * time.Second,
+	}
 }
 
 func waitForTCPServer(tb testing.TB, addr string) {
