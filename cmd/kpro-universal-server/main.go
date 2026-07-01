@@ -17,7 +17,10 @@ import (
 	"github.com/saramand9/bignet/kpro/middleware"
 	"github.com/saramand9/bignet/kpro/protocol"
 	"github.com/saramand9/bignet/kpro/server"
+	http3x "github.com/saramand9/bignet/kpro/transport/http3"
 	"github.com/saramand9/bignet/kpro/transport/httpx"
+	"github.com/saramand9/bignet/kpro/transport/kcp"
+	quictransport "github.com/saramand9/bignet/kpro/transport/quic"
 	"github.com/saramand9/bignet/kpro/transport/sse"
 	"github.com/saramand9/bignet/kpro/transport/tcp"
 	"github.com/saramand9/bignet/kpro/transport/udp"
@@ -26,9 +29,16 @@ import (
 
 func main() {
 	tcpAddr := flag.String("tcp", ":8088", "tcp listen address")
+	kcpAddr := flag.String("kcp", ":8090", "kcp listen address")
+	quicAddr := flag.String("quic", "", "quic listen address, disabled when empty")
+	quicCert := flag.String("quic-cert", "", "quic certificate file")
+	quicKey := flag.String("quic-key", "", "quic private key file")
 	udpAddr := flag.String("udp", ":8089", "udp listen address")
 	wsAddr := flag.String("ws", ":8091", "websocket listen address")
 	httpAddr := flag.String("http", ":8080", "http listen address")
+	http3Addr := flag.String("http3", "", "http3 listen address, disabled when empty")
+	http3Cert := flag.String("http3-cert", "", "http3 certificate file")
+	http3Key := flag.String("http3-key", "", "http3 private key file")
 	sseAddr := flag.String("sse", ":8081", "sse listen address")
 	defaultLog := yokalog.DefaultConfig("kpro-universal")
 	logLevel := flag.String("log-level", defaultLog.Level, "log level: debug, info, warn, error, dpanic, panic, fatal")
@@ -59,6 +69,27 @@ func main() {
 		Use(middleware.Recover(), middleware.MaxPayload(64*1024)).
 		Handle(core.MsgEcho, echo)
 
+	app.KCP(*kcpAddr, kcp.Config{
+		Protocol:     protocol.KProV1(),
+		MaxFrameSize: 64 * 1024,
+	}).
+		Use(middleware.Recover(), middleware.MaxPayload(64*1024)).
+		Handle(core.MsgEcho, echo)
+
+	if *quicAddr != "" {
+		if *quicCert == "" || *quicKey == "" {
+			logger.Fatal("quic requires -quic-cert and -quic-key")
+		}
+		app.QUIC(*quicAddr, quictransport.Config{
+			Protocol:     protocol.KProV1(),
+			MaxFrameSize: 64 * 1024,
+			CertFile:     *quicCert,
+			KeyFile:      *quicKey,
+		}).
+			Use(middleware.Recover(), middleware.MaxPayload(64*1024)).
+			Handle(core.MsgEcho, echo)
+	}
+
 	app.UDP(*udpAddr, udp.Config{
 		Protocol:      protocol.KProV1(),
 		MaxPacketSize: 2048,
@@ -81,6 +112,26 @@ func main() {
 			}
 			return ctx.JSON(200, map[string]interface{}{"echo": string(body)})
 		})
+
+	if *http3Addr != "" {
+		if *http3Cert == "" || *http3Key == "" {
+			logger.Fatal("http3 requires -http3-cert and -http3-key")
+		}
+		app.HTTP3(*http3Addr, http3x.Config{
+			CertFile: *http3Cert,
+			KeyFile:  *http3Key,
+		}).
+			Get("/health", func(ctx *http3x.Context) error {
+				return ctx.Text(200, "ok\n")
+			}).
+			Post("/echo", func(ctx *http3x.Context) error {
+				body, err := ctx.Body()
+				if err != nil {
+					return err
+				}
+				return ctx.JSON(200, map[string]interface{}{"echo": string(body)})
+			})
+	}
 
 	app.SSE(*sseAddr, "/events").
 		Handle(func(ctx *sse.Context) error {
@@ -110,9 +161,12 @@ func main() {
 
 	logger.Info("universal server listening",
 		zap.String("tcp", *tcpAddr),
+		zap.String("kcp", *kcpAddr),
+		zap.String("quic", *quicAddr),
 		zap.String("udp", *udpAddr),
 		zap.String("ws", *wsAddr),
 		zap.String("http", *httpAddr),
+		zap.String("http3", *http3Addr),
 		zap.String("sse", *sseAddr),
 		zap.String("log_file", *logFile),
 	)

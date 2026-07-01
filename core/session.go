@@ -11,6 +11,10 @@ type Transport string
 const (
 	// TransportTCP identifies TCP message sessions.
 	TransportTCP Transport = "tcp"
+	// TransportKCP identifies KCP message sessions.
+	TransportKCP Transport = "kcp"
+	// TransportQUIC identifies QUIC message stream sessions.
+	TransportQUIC Transport = "quic"
 	// TransportUDP identifies UDP packet sessions.
 	TransportUDP Transport = "udp"
 	// TransportWebSocket identifies WebSocket message sessions.
