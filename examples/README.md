@@ -39,6 +39,24 @@ go run .\examples\https\server -addr :8443
 go run .\examples\https\client -base https://127.0.0.1:8443 -text "hello https"
 ```
 
+## HTTP/2
+
+The HTTP/2 example uses TLS and verifies that the client negotiated `HTTP/2.0`.
+
+```powershell
+go run .\examples\http2\server -addr :8442
+go run .\examples\http2\client -base https://127.0.0.1:8442 -text "hello http2"
+```
+
+## HTTP/3
+
+The HTTP/3 example listens on UDP through QUIC and verifies that the client negotiated `HTTP/3.0`.
+
+```powershell
+go run .\examples\http3\server -addr :8443
+go run .\examples\http3\client -base https://127.0.0.1:8443 -text "hello http3"
+```
+
 ## SSE
 
 The SSE client reads a few events and exits.
