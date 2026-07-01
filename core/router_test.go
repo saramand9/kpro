@@ -147,6 +147,43 @@ func TestRouterRejectsWhenSessionInflightLimitIsReached(t *testing.T) {
 	close(release)
 }
 
+func TestRouterRemovesSessionExecutorWhenSessionCloses(t *testing.T) {
+	router := NewRouter(RouterConfig{
+		SyncQueueSize:         4,
+		AsyncWorkers:          1,
+		AsyncQueueSize:        4,
+		MaxInflightPerSession: 4,
+		SessionIdleTimeout:    time.Hour,
+	})
+	defer func() {
+		if err := router.Shutdown(context.Background()); err != nil {
+			t.Fatalf("shutdown router: %v", err)
+		}
+	}()
+
+	handled := make(chan struct{})
+	router.HandleSync(10, func(Context) error {
+		close(handled)
+		return nil
+	})
+
+	session := newFakeSession(42)
+	if err := router.Dispatch(NewContext(session, Message{ID: 10, Seq: 1})); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	select {
+	case <-handled:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not run")
+	}
+	waitForRouterSessionCount(t, router, 1)
+
+	if err := session.Close(); err != nil {
+		t.Fatalf("close session: %v", err)
+	}
+	waitForRouterSessionCount(t, router, 0)
+}
+
 type fakeSession struct {
 	id   uint64
 	done chan struct{}
@@ -203,6 +240,24 @@ func (s *fakeSession) waitForMessage(t *testing.T) Message {
 		t.Fatal("timed out waiting for session message")
 	}
 	return Message{}
+}
+
+func waitForRouterSessionCount(t *testing.T, router *Router, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		router.sessionsMu.Lock()
+		got := len(router.sessions)
+		router.sessionsMu.Unlock()
+		if got == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	router.sessionsMu.Lock()
+	got := len(router.sessions)
+	router.sessionsMu.Unlock()
+	t.Fatalf("router session count = %d, want %d", got, want)
 }
 
 func TestBaseContextValuesAreLazy(t *testing.T) {
