@@ -4,10 +4,11 @@
 
 ```text
 连接 -> 流式协议解码 -> core.Message -> core.Context
-  -> router 调度 -> 业务 handler -> 响应 Message -> 协议编码 -> 写回客户端
+  -> router 调度 -> core.Invocation -> core.Middleware -> 业务 handler
+  -> 响应 Message -> 协议编码 -> 写回客户端
 ```
 
-UDP 和 WebSocket 的网络输入形式不同，但它们复用同一套 `core.Message`、`core.Context`、`core.Router`、middleware 和 handler 模型。因此理解 TCP 后，再看 UDP/WebSocket，主要差异就在 transport 层。
+UDP 和 WebSocket 的网络输入形式不同，但它们复用同一套 `core.Message`、`core.Context`、`core.Router`、`core.Invocation` middleware 和 handler 模型。因此理解 TCP 后，再看 UDP/WebSocket，主要差异就在 transport 层。
 
 ## 流程图
 
@@ -23,7 +24,7 @@ SVG 源文件在 [kpro-tcp-flow.svg](kpro-tcp-flow.svg)。
 | TCP transport | `transport/tcp/server.go` | 监听、accept、创建 session、读循环、写循环 |
 | 协议层 | `protocol/kpro.go` | KProV1 frame 的解码和编码 |
 | 上下文 | `core/context.go` | 把 `Session + Message` 包装成 handler 可用的 context |
-| 路由调度 | `core/router.go` | 按 `Message.ID` 找 handler，执行 middleware，同步/异步调度 |
+| 路由调度 | `core/router.go` | 按 `Message.ID` 找 handler，快照 middleware，同步/异步调度，并在执行点构造 `core.Invocation` |
 | 会话抽象 | `core/session.go` | transport 无关的发送、关闭、连接标识接口 |
 
 ## 启动阶段
@@ -170,10 +171,13 @@ Dispatch 的核心流程：
 ctx.Message()
   -> 按 Message.ID 查找 route
   -> 没有 route：ctx.Error(ErrNoHandler)
-  -> 找到 route：套 middleware
-  -> 创建 dispatchTask{ctx, handler, sessionExecutor}
+  -> 找到 route：快照当前 middleware
+  -> 创建 dispatchTask{ctx, handler, middlewares, sessionExecutor}
   -> sync route：进入当前 session 的串行队列
   -> async route：进入全局 async worker 队列
+  -> execute task：构造 NewMessageInvocation
+  -> core.Middleware 链
+  -> 业务 handler
 ```
 
 ### 同步 route
@@ -370,7 +374,7 @@ core.Context -> dispatchTask
 
 ### 6. sync executor 执行业务 handler
 
-当前连接的 sync executor 取出 task，执行 middleware 包装后的 handler。
+当前连接的 sync executor 取出 task 后，`Router.execute` 会先构造 `core.NewMessageInvocation`，再执行 `core.Middleware` 链，最后进入业务 handler。
 
 handler 内部通过：
 
@@ -502,7 +506,7 @@ TCP 路径体现了当前工程的职责划分：
 transport 负责 I/O、连接、session 生命周期
 protocol 负责 bytes <-> Message
 context 负责把当前连接和当前消息暴露给业务
-router 负责 route 查找、middleware、同步/异步调度
+router 负责 route 查找、middleware 快照、同步/异步调度，并在 handler 执行点创建 Invocation
 handler 负责业务逻辑
 session.Send 负责把响应交回 transport 写出
 ```

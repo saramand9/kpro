@@ -118,9 +118,9 @@
   <text class="small" x="385" y="790">sync / async handlers</text>
 
   <rect class="box core" x="646" y="714" width="250" height="110" rx="8" />
-  <text class="label" x="688" y="744">middleware chain</text>
-  <text class="small" x="681" y="769">Recover, MaxPayload</text>
-  <text class="small" x="681" y="790">RateLimit, ConnRateLimit</text>
+  <text class="label" x="681" y="744">core.Invocation</text>
+  <text class="small" x="681" y="769">core.Middleware chain</text>
+  <text class="small" x="681" y="790">before business handler</text>
 
   <rect class="box business" x="942" y="714" width="90" height="110" rx="8" />
   <text class="label" x="963" y="752">app</text>
