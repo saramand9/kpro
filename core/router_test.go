@@ -243,10 +243,10 @@ func TestRouterUseAfterHandleRebuildsMiddlewareChain(t *testing.T) {
 		called <- struct{}{}
 		return nil
 	})
-	router.Use(func(next Handler) Handler {
-		return func(ctx Context) error {
-			ctx.Set("middleware", "applied")
-			return next(ctx)
+	router.Use(func(next InvocationHandler) InvocationHandler {
+		return func(inv Invocation) error {
+			inv.Set("middleware", "applied")
+			return next(inv)
 		}
 	})
 
@@ -257,6 +257,57 @@ func TestRouterUseAfterHandleRebuildsMiddlewareChain(t *testing.T) {
 	case <-called:
 	case <-time.After(time.Second):
 		t.Fatal("handler was not called")
+	}
+}
+
+func TestRouterMiddlewareWrapsActualHandlerExecution(t *testing.T) {
+	router := NewRouter(RouterConfig{
+		SyncQueueSize:         4,
+		AsyncWorkers:          1,
+		AsyncQueueSize:        4,
+		MaxInflightPerSession: 4,
+		SessionIdleTimeout:    time.Minute,
+	})
+	defer func() {
+		if err := router.Shutdown(context.Background()); err != nil {
+			t.Fatalf("shutdown router: %v", err)
+		}
+	}()
+
+	beforeNext := make(chan struct{})
+	afterNext := make(chan struct{})
+	handlerRelease := make(chan struct{})
+	router.Use(func(next InvocationHandler) InvocationHandler {
+		return func(inv Invocation) error {
+			close(beforeNext)
+			err := next(inv)
+			close(afterNext)
+			return err
+		}
+	})
+	router.HandleSync(10, func(Context) error {
+		<-handlerRelease
+		return nil
+	})
+
+	if err := router.Dispatch(NewContext(newFakeSession(1), Message{ID: 10, Seq: 1})); err != nil {
+		t.Fatalf("dispatch sync: %v", err)
+	}
+	select {
+	case <-beforeNext:
+	case <-time.After(time.Second):
+		t.Fatal("middleware did not enter before handler")
+	}
+	select {
+	case <-afterNext:
+		t.Fatal("middleware completed before handler returned")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(handlerRelease)
+	select {
+	case <-afterNext:
+	case <-time.After(time.Second):
+		t.Fatal("middleware did not complete after handler returned")
 	}
 }
 

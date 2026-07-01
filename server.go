@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/saramand9/bignet/kpro/core"
 )
 
 type requestTask struct {
@@ -33,7 +35,7 @@ type Server struct {
 
 	routerMu    sync.RWMutex
 	handlers    map[uint32]Handler
-	middlewares []Middleware
+	middlewares []core.Middleware
 }
 
 func NewServer(c Config) *Server {
@@ -55,11 +57,11 @@ func NewServer(c Config) *Server {
 
 func (s *Server) Handle(msgID uint32, h Handler) {
 	s.routerMu.Lock()
-	s.handlers[msgID] = s.wrap(h)
+	s.handlers[msgID] = h
 	s.routerMu.Unlock()
 }
 
-func (s *Server) Use(middlewares ...Middleware) {
+func (s *Server) Use(middlewares ...core.Middleware) {
 	s.routerMu.Lock()
 	s.middlewares = append(s.middlewares, middlewares...)
 	s.routerMu.Unlock()
@@ -164,23 +166,26 @@ func (s *Server) dispatch(task requestTask) {
 
 	s.routerMu.RLock()
 	h := s.handlers[task.msg.ID]
+	middlewares := append([]core.Middleware(nil), s.middlewares...)
 	s.routerMu.RUnlock()
 	if h == nil {
 		atomic.AddInt64(&s.metrics.handlerErrors, 1)
 		_ = task.conn.Send(Message{ID: MsgError, Seq: task.msg.Seq, Data: []byte(ErrNoHandler.Error())})
 		return
 	}
-	if err := h(&Context{Server: s, Conn: task.conn, Msg: task.msg}); err != nil {
+	ctx := core.AcquireContext(task.conn, task.msg)
+	inv := core.NewMessageInvocation(context.Background(), ctx)
+	handler := core.Chain(middlewares...)(func(inv core.Invocation) error {
+		msgCtx, ok := inv.Native().(core.Context)
+		if !ok {
+			msgCtx = ctx
+		}
+		return h(msgCtx)
+	})
+	if err := handler(inv); err != nil {
 		atomic.AddInt64(&s.metrics.handlerErrors, 1)
 		_ = task.conn.Send(Message{ID: MsgError, Seq: task.msg.Seq, Data: []byte(err.Error())})
 	}
-}
-
-func (s *Server) wrap(h Handler) Handler {
-	for i := len(s.middlewares) - 1; i >= 0; i-- {
-		h = s.middlewares[i](h)
-	}
-	return h
 }
 
 func (s *Server) sweeper() {

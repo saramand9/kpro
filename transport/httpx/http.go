@@ -4,12 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"hash/fnv"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/saramand9/bignet/kpro/core"
 )
 
 const (
@@ -33,8 +37,6 @@ type Config struct {
 
 type Handler func(*Context) error
 
-type Middleware func(Handler) Handler
-
 type compiledRoutes map[string]map[string]Handler
 
 type Endpoint struct {
@@ -43,7 +45,7 @@ type Endpoint struct {
 
 	mu          sync.RWMutex
 	routes      map[string]map[string]Handler
-	middlewares []Middleware
+	middlewares []core.Middleware
 	compiled    atomic.Value
 }
 
@@ -64,7 +66,7 @@ func (e *Endpoint) Name() string {
 	return "http"
 }
 
-func (e *Endpoint) Use(middlewares ...Middleware) *Endpoint {
+func (e *Endpoint) Use(middlewares ...core.Middleware) *Endpoint {
 	e.mu.Lock()
 	e.middlewares = append(e.middlewares, middlewares...)
 	e.rebuildCompiledLocked()
@@ -184,18 +186,120 @@ func (e *Endpoint) rebuildCompiledLocked() {
 	for path, methodHandlers := range e.routes {
 		methods := make(map[string]Handler, len(methodHandlers))
 		for method, h := range methodHandlers {
-			methods[method] = wrapMiddleware(h, e.middlewares)
+			methods[method] = e.wrapRoute(method, path, h)
 		}
 		routes[path] = methods
 	}
 	e.compiled.Store(routes)
 }
 
-func wrapMiddleware(h Handler, middlewares []Middleware) Handler {
-	for i := len(middlewares) - 1; i >= 0; i-- {
-		h = middlewares[i](h)
+func (e *Endpoint) wrapRoute(method, path string, h Handler) Handler {
+	if len(e.middlewares) == 0 {
+		return h
 	}
-	return h
+	operation := httpOperation(method, path)
+	middlewares := append([]core.Middleware(nil), e.middlewares...)
+	return func(ctx *Context) error {
+		body, err := ctx.Body()
+		if err != nil {
+			return err
+		}
+		inv := newHTTPInvocation(ctx, e.config.TLS, operation, body)
+		handler := core.Chain(middlewares...)(func(core.Invocation) error {
+			return h(ctx)
+		})
+		return handler(inv)
+	}
+}
+
+func newHTTPInvocation(ctx *Context, tls bool, operation string, payload []byte) core.Invocation {
+	transport := core.TransportHTTP
+	if tls {
+		transport = core.TransportHTTPS
+	}
+	remote := ""
+	if addr := parseRemoteAddr(ctx.r.RemoteAddr); addr != nil {
+		remote = addr.String()
+	}
+	return core.NewInvocation(core.InvocationOptions{
+		Context:   ctx.r.Context(),
+		Transport: transport,
+		Operation: operation,
+		ConnID:    sessionIDFromRemote(ctx.r.RemoteAddr),
+		Remote:    remote,
+		Headers:   httpHeaders(ctx.r),
+		Meta:      httpMeta(ctx.r),
+		Payload:   payload,
+		Native:    ctx,
+		Done:      ctx.r.Context().Done(),
+	})
+}
+
+func httpHeaders(r *http.Request) map[string]string {
+	headers := make(map[string]string, len(r.Header)+1)
+	if r.Host != "" {
+		headers["Host"] = r.Host
+	}
+	for key, values := range r.Header {
+		if len(values) > 0 {
+			headers[key] = values[0]
+		}
+	}
+	if len(headers) == 0 {
+		return nil
+	}
+	return headers
+}
+
+func httpMeta(r *http.Request) map[string]any {
+	meta := map[string]any{
+		"method": r.Method,
+		"host":   r.Host,
+	}
+	if r.URL != nil {
+		meta["path"] = r.URL.Path
+		meta["query"] = r.URL.RawQuery
+	}
+	return meta
+}
+
+func sessionIDFromRemote(remote string) uint64 {
+	if remote == "" {
+		return 1
+	}
+	hash := fnv.New64a()
+	_, _ = hash.Write([]byte(remote))
+	id := hash.Sum64()
+	if id == 0 {
+		return 1
+	}
+	return id
+}
+
+func parseRemoteAddr(remote string) net.Addr {
+	if remote == "" {
+		return stringAddr("")
+	}
+	if addr, err := net.ResolveTCPAddr("tcp", remote); err == nil {
+		return addr
+	}
+	return stringAddr(remote)
+}
+
+type stringAddr string
+
+func (a stringAddr) Network() string {
+	return "tcp"
+}
+
+func (a stringAddr) String() string {
+	return string(a)
+}
+func httpOperation(method, path string) string {
+	if path == "" {
+		path = "/"
+	}
+	return method + " " + path
 }
 
 // Context is backed by net/http. Body caches the request body on first read so

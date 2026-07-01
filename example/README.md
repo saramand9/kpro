@@ -8,6 +8,7 @@ example/udp
 example/websocket
 example/http
 example/sse
+example/grpc
 ```
 
 Run a server in one terminal and its client in another.
@@ -45,4 +46,11 @@ go run .\example\http\client -text "hello http"
 ```powershell
 go run .\example\sse\server
 go run .\example\sse\client -events 3
+```
+
+## gRPC
+
+```powershell
+go run .\example\grpc\server
+go run .\example\grpc\client -name "hello grpc"
 ```
