@@ -100,10 +100,29 @@ func (s *Server) HTTP(addr string, config ...httpx.Config) *httpx.Endpoint {
 	return endpoint
 }
 
+func (s *Server) HTTPMessage(addr string, config ...httpx.Config) *httpx.MessageEndpoint {
+	cfg := httpx.Config{}
+	if len(config) > 0 {
+		cfg = config[0]
+	}
+	cfg.Addr = addr
+	endpoint := httpx.NewMessage(cfg, s.config.Router)
+	s.MountRunner(endpoint)
+	return endpoint
+}
+
 func (s *Server) HTTPS(addr string, config httpx.Config) *httpx.Endpoint {
 	config.Addr = addr
 	config.TLS = true
 	endpoint := httpx.New(config)
+	s.MountRunner(endpoint)
+	return endpoint
+}
+
+func (s *Server) HTTPSMessage(addr string, config httpx.Config) *httpx.MessageEndpoint {
+	config.Addr = addr
+	config.TLS = true
+	endpoint := httpx.NewMessage(config, s.config.Router)
 	s.MountRunner(endpoint)
 	return endpoint
 }
