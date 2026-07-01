@@ -10,14 +10,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/kprogrpc"
+	"github.com/saramand9/bignet/kpro/transport/grpcx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 type grpcGreeter struct {
-	kprogrpc.UnimplementedGreeterServer
+	grpcx.UnimplementedGreeterServer
 }
 
 func (grpcGreeter) SayHello(_ context.Context, req *wrapperspb.StringValue) (*wrapperspb.StringValue, error) {
@@ -42,8 +42,8 @@ func TestKProGRPCRegisterGreeterWithStandardClient(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	srv := kprogrpc.NewServer(ln.Addr().String())
-	kprogrpc.RegisterGreeter(srv, grpcGreeter{})
+	srv := grpcx.NewServer(ln.Addr().String())
+	grpcx.RegisterGreeter(srv, grpcGreeter{})
 	go func() {
 		_ = srv.ServeListener(ln)
 	}()
@@ -52,7 +52,7 @@ func TestKProGRPCRegisterGreeterWithStandardClient(t *testing.T) {
 	conn := dialGRPC(t, ln.Addr().String())
 	defer conn.Close()
 
-	assertGreeterRPCs(t, kprogrpc.NewGreeterClient(conn), "integration")
+	assertGreeterRPCs(t, grpcx.NewGreeterClient(conn), "integration")
 }
 
 func TestStandardGRPCServerWithKProGRPCClient(t *testing.T) {
@@ -62,7 +62,7 @@ func TestStandardGRPCServerWithKProGRPCClient(t *testing.T) {
 	}
 
 	srv := grpc.NewServer()
-	kprogrpc.RegisterGreeter(srv, grpcGreeter{})
+	grpcx.RegisterGreeter(srv, grpcGreeter{})
 	go func() {
 		_ = srv.Serve(ln)
 	}()
@@ -71,7 +71,7 @@ func TestStandardGRPCServerWithKProGRPCClient(t *testing.T) {
 	conn := dialGRPC(t, ln.Addr().String())
 	defer conn.Close()
 
-	assertGreeterRPCs(t, kprogrpc.NewGreeterClient(conn), "standard")
+	assertGreeterRPCs(t, grpcx.NewGreeterClient(conn), "standard")
 }
 
 func dialGRPC(t *testing.T, addr string) *grpc.ClientConn {
@@ -86,7 +86,7 @@ func dialGRPC(t *testing.T, addr string) *grpc.ClientConn {
 	return conn
 }
 
-func assertGreeterRPCs(t *testing.T, client kprogrpc.GreeterClient, name string) {
+func assertGreeterRPCs(t *testing.T, client grpcx.GreeterClient, name string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()

@@ -4,12 +4,12 @@
 package greeter
 
 import (
-	"github.com/saramand9/bignet/kpro/kprogrpc"
+	"github.com/saramand9/bignet/kpro/transport/grpcx"
 	"google.golang.org/grpc"
 )
 
 type Module struct{}
 
 func (Module) RegisterGRPC(registrar grpc.ServiceRegistrar) {
-	kprogrpc.RegisterGreeter(registrar, service{})
+	grpcx.RegisterGreeter(registrar, service{})
 }

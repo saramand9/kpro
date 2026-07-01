@@ -11,14 +11,14 @@ import (
 	"time"
 
 	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/kprogrpc"
+	"github.com/saramand9/bignet/kpro/transport/grpcx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 type grpcTestGreeter struct {
-	kprogrpc.UnimplementedGreeterServer
+	grpcx.UnimplementedGreeterServer
 }
 
 func (grpcTestGreeter) SayHello(_ context.Context, req *wrapperspb.StringValue) (*wrapperspb.StringValue, error) {
@@ -39,7 +39,7 @@ func TestServerGRPCRunsWithAppLifecycle(t *testing.T) {
 		}
 	})
 	endpoint := app.GRPC("127.0.0.1:0")
-	kprogrpc.RegisterGreeter(endpoint, grpcTestGreeter{})
+	grpcx.RegisterGreeter(endpoint, grpcTestGreeter{})
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -52,7 +52,7 @@ func TestServerGRPCRunsWithAppLifecycle(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	resp, err := kprogrpc.NewGreeterClient(conn).SayHello(ctx, wrapperspb.String("server"))
+	resp, err := grpcx.NewGreeterClient(conn).SayHello(ctx, wrapperspb.String("server"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestServerGRPCRunsWithAppLifecycle(t *testing.T) {
 	}
 }
 
-func waitForGRPCAddr(t *testing.T, endpoint *kprogrpc.Server) net.Addr {
+func waitForGRPCAddr(t *testing.T, endpoint *grpcx.Server) net.Addr {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
