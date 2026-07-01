@@ -13,18 +13,21 @@ flowchart TD
     Main --> UDP[app.UDP]
     Main --> WS[app.WebSocket]
     Main --> HTTP[app.HTTP]
+    Main --> HTTPMSG[app.HTTPMessage]
     Main --> SSE[app.SSE]
 
     TCP --> MountTCP[server.Mount]
     UDP --> MountUDP[server.Mount]
     WS --> MountWS[server.Mount]
     HTTP --> MountHTTP[server.MountRunner]
+    HTTPMSG --> MountHTTPMSG[server.MountRunner]
     SSE --> MountSSE[server.MountRunner]
 
     MountTCP --> TCPEndpoint[server.Endpoint + core.Router]
     MountUDP --> UDPEndpoint[server.Endpoint + core.Router]
     MountWS --> WSEndpoint[server.Endpoint + core.Router]
     MountHTTP --> HTTPEndpoint[httpx.Endpoint]
+    MountHTTPMSG --> HTTPMessageEndpoint[httpx.MessageEndpoint + core.Router]
     MountSSE --> SSEEndpoint[sse.Endpoint]
 
     Main --> Listen[app.ListenAndServe]
@@ -32,12 +35,13 @@ flowchart TD
     Listen --> RunUDP[udp.ListenAndServe]
     Listen --> RunWS[websocket.ListenAndServe]
     Listen --> RunHTTP[httpx.ListenAndServe]
+    Listen --> RunHTTPMSG[httpx.MessageEndpoint.ListenAndServe]
     Listen --> RunSSE[sse.ListenAndServe]
 ```
 
 ## Message-Based Transports
 
-TCP, UDP and WebSocket share the same business model:
+TCP, UDP, WebSocket and the optional HTTP message endpoint share the same business model:
 
 ```text
 transport input
@@ -130,18 +134,47 @@ WebSocket currently treats one WebSocket message as one protocol packet.
 
 ## HTTP / HTTPS
 
+HTTP and HTTPS now have two explicit modes.
+
+The native HTTP mode keeps method + path routing and is appropriate for REST-style APIs:
+
 ```mermaid
 flowchart TD
     Client[HTTP Client] --> Listen[httpx.Endpoint.ListenAndServe]
-    Listen --> ServePath[Endpoint.servePath]
-    ServePath --> Route[routes path method]
-    Route --> Middleware[httpx.Middleware]
+    Listen --> NetHTTP[net/http Server]
+    NetHTTP --> Serve[Endpoint.serve]
+    Serve --> Path{path exists}
+    Path -->|no| NotFound[404 not found]
+    Path -->|yes| Method{method exists}
+    Method -->|no| MethodNotAllowed[405 method not allowed]
+    Method -->|yes| Middleware[httpx.Middleware]
     Middleware --> Handler[HTTP Handler]
-    Handler --> Response[ctx.Text / ctx.JSON]
+    Handler --> Response[ctx.Text / ctx.JSON / ctx.Bytes / ctx.Stream]
+    Handler -->|error| ServerError[500 err.Error]
     Response --> Client
 ```
 
-HTTP and HTTPS use method + path routing rather than `core.Message.ID`.
+The message HTTP mode maps method + path routes to `core.Message.ID`, then reuses the same `core.Router`, middleware and sync/async dispatch model as TCP:
+
+```mermaid
+flowchart TD
+    Client[HTTP Client] --> Listen[httpx.MessageEndpoint.ListenAndServe]
+    Listen --> NetHTTP[net/http Server]
+    NetHTTP --> Serve[Endpoint.serve]
+    Serve --> Route[method + path -> message id]
+    Route --> RequestBody[read request body]
+    RequestBody --> Message[core.Message]
+    Message --> Session[per-request HTTP session]
+    Session --> Context[core.NewContext]
+    Context --> Dispatch[core.Router.Dispatch]
+    Dispatch --> Middleware[core.Middleware]
+    Middleware --> Handler[Business Handler]
+    Handler --> Reply[ctx.Reply / session.Send]
+    Reply --> Response[HTTP status, headers, body]
+    Response --> Client
+```
+
+`HTTPMessage` and `HTTPSMessage` are the TCP-like entry points. They preserve HTTP protocol semantics at the edge, but business code runs against `core.Context`.
 
 ## SSE
 

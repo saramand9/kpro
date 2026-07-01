@@ -1,10 +1,11 @@
 package httpx
 
 import (
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
-
-	"github.com/valyala/fasthttp"
 )
 
 func TestContextBytes(t *testing.T) {
@@ -19,13 +20,13 @@ func TestContextBytes(t *testing.T) {
 
 	resp := executeTestRequest(endpoint, http.MethodPost, "/echo", "hello")
 
-	if resp.Response.StatusCode() != http.StatusCreated {
-		t.Fatalf("status = %d, want %d", resp.Response.StatusCode(), http.StatusCreated)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusCreated)
 	}
-	if got := string(resp.Response.Header.Peek("Content-Type")); got != "application/octet-stream" {
+	if got := resp.Header().Get("Content-Type"); got != "application/octet-stream" {
 		t.Fatalf("content type = %q", got)
 	}
-	if got := string(resp.Response.Body()); got != "hello" {
+	if got := resp.Body.String(); got != "hello" {
 		t.Fatalf("body = %q", got)
 	}
 }
@@ -46,13 +47,13 @@ func TestContextCopyBody(t *testing.T) {
 
 	resp := executeTestRequest(endpoint, http.MethodPost, "/echo", "payload")
 
-	if resp.Response.StatusCode() != http.StatusOK {
-		t.Fatalf("status = %d, want %d", resp.Response.StatusCode(), http.StatusOK)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
 	}
-	if got := string(resp.Response.Header.Peek("Content-Type")); got != "text/plain" {
+	if got := resp.Header().Get("Content-Type"); got != "text/plain" {
 		t.Fatalf("content type = %q", got)
 	}
-	if got := string(resp.Response.Body()); got != "payload" {
+	if got := resp.Body.String(); got != "payload" {
 		t.Fatalf("body = %q", got)
 	}
 }
@@ -73,10 +74,10 @@ func TestContextCopyBodyFastContentTypeSkipsHeaderMap(t *testing.T) {
 	if allocatedHeaderMap {
 		t.Fatal("CopyBody should not allocate compatibility header map")
 	}
-	if got := string(resp.Response.Header.Peek("Content-Type")); got != "text/plain" {
+	if got := resp.Header().Get("Content-Type"); got != "text/plain" {
 		t.Fatalf("content type = %q", got)
 	}
-	if got := string(resp.Response.Body()); got != "payload" {
+	if got := resp.Body.String(); got != "payload" {
 		t.Fatalf("body = %q", got)
 	}
 }
@@ -90,13 +91,13 @@ func TestContextContentTypeKeepsExistingHeaderMap(t *testing.T) {
 
 	resp := executeTestRequest(endpoint, http.MethodGet, "/text", "")
 
-	if resp.Response.StatusCode() != http.StatusAccepted {
-		t.Fatalf("status = %d, want %d", resp.Response.StatusCode(), http.StatusAccepted)
+	if resp.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusAccepted)
 	}
-	if got := string(resp.Response.Header.Peek("X-Test")); got != "hit" {
+	if got := resp.Header().Get("X-Test"); got != "hit" {
 		t.Fatalf("x-test = %q", got)
 	}
-	if got := string(resp.Response.Header.Peek("Content-Type")); got != "text/plain; charset=utf-8" {
+	if got := resp.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
 		t.Fatalf("content type = %q", got)
 	}
 }
@@ -118,10 +119,10 @@ func TestMiddlewareSnapshotRebuildsAfterUse(t *testing.T) {
 
 	for _, path := range []string{"/before", "/after"} {
 		resp := executeTestRequest(endpoint, http.MethodGet, path, "")
-		if resp.Response.StatusCode() != http.StatusOK {
-			t.Fatalf("%s status = %d, want %d", path, resp.Response.StatusCode(), http.StatusOK)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, want %d", path, resp.Code, http.StatusOK)
 		}
-		if got := string(resp.Response.Header.Peek("X-Middleware")); got != "hit" {
+		if got := resp.Header().Get("X-Middleware"); got != "hit" {
 			t.Fatalf("%s middleware header = %q", path, got)
 		}
 	}
@@ -135,8 +136,8 @@ func TestRouteNotFound(t *testing.T) {
 
 	resp := executeTestRequest(endpoint, http.MethodGet, "/missing", "")
 
-	if resp.Response.StatusCode() != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d", resp.Response.StatusCode(), http.StatusNotFound)
+	if resp.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusNotFound)
 	}
 }
 
@@ -148,8 +149,8 @@ func TestRouteMethodNotAllowed(t *testing.T) {
 
 	resp := executeTestRequest(endpoint, http.MethodPost, "/exists", "")
 
-	if resp.Response.StatusCode() != http.StatusMethodNotAllowed {
-		t.Fatalf("status = %d, want %d", resp.Response.StatusCode(), http.StatusMethodNotAllowed)
+	if resp.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusMethodNotAllowed)
 	}
 }
 
@@ -178,20 +179,18 @@ func TestContextFastAccessors(t *testing.T) {
 	})
 
 	resp := executeTestRequest(endpoint, http.MethodGet, "/inspect?name=kpro", "")
-	if resp.Response.StatusCode() != http.StatusOK {
-		t.Fatalf("status = %d, want %d", resp.Response.StatusCode(), http.StatusOK)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
 	}
 }
 
-func executeTestRequest(endpoint *Endpoint, method, path, body string) *fasthttp.RequestCtx {
-	var req fasthttp.Request
-	req.Header.SetMethod(method)
-	req.SetRequestURI(path)
+func executeTestRequest(endpoint *Endpoint, method, path, body string) *httptest.ResponseRecorder {
+	var reader io.Reader
 	if body != "" {
-		req.SetBodyString(body)
+		reader = strings.NewReader(body)
 	}
-	var ctx fasthttp.RequestCtx
-	ctx.Init(&req, nil, nil)
-	endpoint.serve(&ctx)
-	return &ctx
+	req := httptest.NewRequest(method, path, reader)
+	recorder := httptest.NewRecorder()
+	endpoint.serve(recorder, req)
+	return recorder
 }

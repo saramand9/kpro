@@ -39,11 +39,14 @@ BenchmarkUDP_Echo
 BenchmarkWebSocket_Echo
 BenchmarkHTTP_Echo
 BenchmarkHTTP_Echo_Concurrent
+BenchmarkHTTPMessage_Echo
+BenchmarkHTTPMessage_Echo_Concurrent
 BenchmarkHTTPS_Echo
 BenchmarkSSE_Events
 ```
 
-`BenchmarkHTTP_Echo` and `BenchmarkHTTPS_Echo` use KPro `httpx`, which is backed by fasthttp.
+`BenchmarkHTTP_Echo` and `BenchmarkHTTPS_Echo` use KPro `httpx`, which is backed by net/http.
+`BenchmarkHTTPMessage_Echo` uses the optional HTTP-to-core message bridge.
 Concurrent HTTP benchmarks run the same `POST /echo` workload with 16 and 64 workers.
 Fiber and gnet comparison benchmarks live in `benchmark/compare` so their dependencies do not enter the main kpro module.
 That module includes KPro-vs-Fiber HTTP echo and KPro-vs-gnet TCP echo comparisons.
