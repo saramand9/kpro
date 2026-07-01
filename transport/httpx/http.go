@@ -266,9 +266,10 @@ func (e *Endpoint) serveHandler(h Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := &Context{w: w, r: r}
 		if err := h(ctx); err != nil {
-			if !ctx.wroteHeader {
-				w.WriteHeader(http.StatusInternalServerError)
+			if ctx.wroteHeader {
+				return
 			}
+			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(err.Error()))
 		}
 	}

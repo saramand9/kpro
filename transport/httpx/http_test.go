@@ -4,6 +4,7 @@
 package httpx
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -105,6 +106,25 @@ func TestContextContentTypeKeepsExistingHeaderMap(t *testing.T) {
 	}
 	if got := resp.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
 		t.Fatalf("content type = %q", got)
+	}
+}
+
+func TestHandlerErrorAfterResponseStartedDoesNotAppendBody(t *testing.T) {
+	endpoint := New(Config{})
+	endpoint.Get("/partial", func(ctx *Context) error {
+		if err := ctx.Text(http.StatusAccepted, "accepted"); err != nil {
+			return err
+		}
+		return errors.New("late failure")
+	})
+
+	resp := executeTestRequest(endpoint, http.MethodGet, "/partial", "")
+
+	if resp.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusAccepted)
+	}
+	if got := resp.Body.String(); got != "accepted" {
+		t.Fatalf("body = %q, want response body without late error text", got)
 	}
 }
 

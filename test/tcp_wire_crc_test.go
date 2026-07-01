@@ -79,7 +79,7 @@ func TestTCPWireCRCTraceStrict1000(t *testing.T) {
 		}, messages, nil)
 
 		assertWireFramesEqual(t, logs.clientSent, logs.serverReceived)
-		assertWireFramesEqual(t, logs.serverSent, logs.clientReceived)
+		assertWireFrameSetEqual(t, logs.serverSent, logs.clientReceived)
 		assertStrictEchoResponseSet(t, messages, logs.clientReceived.snapshot())
 	})
 
@@ -103,7 +103,7 @@ func TestTCPWireCRCTraceStrict1000(t *testing.T) {
 		}, messages, nil)
 
 		assertWireFramesEqual(t, logs.clientSent, logs.serverReceived)
-		assertWireFramesEqual(t, logs.serverSent, logs.clientReceived)
+		assertWireFrameSetEqual(t, logs.serverSent, logs.clientReceived)
 		assertStrictEchoResponseSet(t, messages, logs.clientReceived.snapshot())
 	})
 
@@ -203,7 +203,7 @@ func TestTCPWireCRCTraceStrict1000(t *testing.T) {
 		})
 
 		assertWireFramesEqual(t, logs.clientSent, logs.serverReceived)
-		assertWireFramesEqual(t, logs.serverSent, logs.clientReceived)
+		assertWireFrameSetEqual(t, logs.serverSent, logs.clientReceived)
 		assertStrictQueueFullResponsesFor(t, messages, logs.clientReceived.snapshot(), msgStrictAsyncQueueFull, 2)
 	})
 

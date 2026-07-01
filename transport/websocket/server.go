@@ -339,6 +339,9 @@ func readFrame(r io.Reader, maxSize int) (wsFrame, error) {
 		return wsFrame{}, ErrBadFrame
 	}
 	masked := header[1]&0x80 != 0
+	if !masked {
+		return wsFrame{}, ErrBadFrame
+	}
 	length := uint64(header[1] & 0x7f)
 	switch length {
 	case 126:
