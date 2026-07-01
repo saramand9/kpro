@@ -31,7 +31,7 @@ type Middleware func(InvocationHandler) InvocationHandler
 //     Payload=*httpx.BodyPayload, Native=*httpx.Context.
 //   - gRPC /pkg.Service/Call: Transport=TransportGRPC, Operation is the full
 //     method name, Payload is the protobuf request for unary calls, and Native
-//     is kprogrpc.UnaryInvocationNative or StreamInvocationNative.
+//     is grpcx.UnaryInvocationNative or StreamInvocationNative.
 type Invocation interface {
 	// Context returns the cancellation and deadline context for the invocation.
 	Context() context.Context

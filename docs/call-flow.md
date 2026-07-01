@@ -28,7 +28,7 @@ flowchart TD
     MountWS --> WSEndpoint[server.Endpoint + core.Router]
     MountHTTP --> HTTPEndpoint[httpx.Endpoint]
     MountSSE --> SSEEndpoint[sse.Endpoint]
-    MountGRPC --> GRPCEndpoint[kprogrpc.Server]
+    MountGRPC --> GRPCEndpoint[grpcx.Server]
 
     Main --> Listen[app.ListenAndServe]
     Listen --> RunTCP[tcp.ListenAndServe]
@@ -36,7 +36,7 @@ flowchart TD
     Listen --> RunWS[websocket.ListenAndServe]
     Listen --> RunHTTP[httpx.ListenAndServe]
     Listen --> RunSSE[sse.ListenAndServe]
-    Listen --> RunGRPC[kprogrpc.ListenAndServe]
+    Listen --> RunGRPC[grpcx.ListenAndServe]
 ```
 
 ## Message-Based Transports
@@ -184,7 +184,7 @@ gRPC keeps native service and method routing. KPro does not convert gRPC request
 
 ```mermaid
 flowchart TD
-    Client[gRPC Client] --> Listen[kprogrpc.Server.ListenAndServe]
+    Client[gRPC Client] --> Listen[grpcx.Server.ListenAndServe]
     Listen --> GRPCServer[google.golang.org/grpc.Server]
     GRPCServer --> UnaryInterceptor[unary middleware interceptor]
     GRPCServer --> StreamInterceptor[stream middleware interceptor]
@@ -211,7 +211,7 @@ flowchart TD
     Cancel --> WSShutdown[websocket.Shutdown]
     Cancel --> HTTPShutdown[httpx.Shutdown]
     Cancel --> SSEShutdown[sse.Shutdown]
-    Cancel --> GRPCShutdown[kprogrpc.Shutdown]
+    Cancel --> GRPCShutdown[grpcx.Shutdown]
     TCPShutdown --> Done[wait goroutines]
     UDPShutdown --> Done
     WSShutdown --> Done

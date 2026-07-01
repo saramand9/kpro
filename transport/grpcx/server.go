@@ -1,7 +1,7 @@
-// File: kprogrpc/server.go
-// Purpose: Implements or tests the gRPC integration for KPro.
+// File: transport/grpcx/server.go
+// Purpose: Implements the gRPC integration for KPro.
 
-package kprogrpc
+package grpcx
 
 import (
 	"context"

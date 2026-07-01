@@ -10,7 +10,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/kprogrpc"
+	"github.com/saramand9/bignet/kpro/transport/grpcx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -30,7 +30,7 @@ func main() {
 	}
 	defer conn.Close()
 
-	client := kprogrpc.NewGreeterClient(conn)
+	client := grpcx.NewGreeterClient(conn)
 
 	hello, err := client.SayHello(ctx, wrapperspb.String(*name))
 	if err != nil {

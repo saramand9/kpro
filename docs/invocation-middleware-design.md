@@ -61,8 +61,8 @@ gRPC handler                   -> generated gRPC service method
 TCP / UDP / WebSocket Native() -> core.Context
 HTTP / HTTPS Native()          -> *httpx.Context
 SSE Native()                   -> *sse.Context
-gRPC unary Native()            -> kprogrpc.UnaryInvocationNative
-gRPC stream Native()           -> kprogrpc.StreamInvocationNative
+gRPC unary Native()            -> grpcx.UnaryInvocationNative
+gRPC stream Native()           -> grpcx.StreamInvocationNative
 ```
 
 Common middleware should prefer stable fields such as `Transport`, `Operation`, `Headers`, `Meta` and `Payload`. Protocol-specific middleware can inspect `Native()` when needed.

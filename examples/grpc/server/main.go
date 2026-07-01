@@ -8,13 +8,13 @@ import (
 	"flag"
 	"log"
 
-	"github.com/saramand9/bignet/kpro/kprogrpc"
 	"github.com/saramand9/bignet/kpro/server"
+	"github.com/saramand9/bignet/kpro/transport/grpcx"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 type GreeterService struct {
-	kprogrpc.UnimplementedGreeterServer
+	grpcx.UnimplementedGreeterServer
 }
 
 func (GreeterService) SayHello(_ context.Context, req *wrapperspb.StringValue) (*wrapperspb.StringValue, error) {
@@ -39,7 +39,7 @@ func main() {
 
 	app := server.New()
 	grpcEndpoint := app.GRPC(*addr)
-	kprogrpc.RegisterGreeter(grpcEndpoint, GreeterService{})
+	grpcx.RegisterGreeter(grpcEndpoint, GreeterService{})
 
 	log.Printf("grpc server listening on %s", *addr)
 	if err := app.ListenAndServe(); err != nil {

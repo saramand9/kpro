@@ -1,7 +1,7 @@
-// File: kprogrpc/ratelimit_test.go
+// File: transport/grpcx/ratelimit_test.go
 // Purpose: Verifies gRPC connection-level rate limiting behavior.
 
-package kprogrpc
+package grpcx
 
 import (
 	"context"
