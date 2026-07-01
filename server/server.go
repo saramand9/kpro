@@ -11,7 +11,10 @@ import (
 	"github.com/saramand9/bignet/kpro/core"
 	"github.com/saramand9/bignet/kpro/kprogrpc"
 	"github.com/saramand9/bignet/kpro/transport"
+	http3x "github.com/saramand9/bignet/kpro/transport/http3"
 	"github.com/saramand9/bignet/kpro/transport/httpx"
+	"github.com/saramand9/bignet/kpro/transport/kcp"
+	quictransport "github.com/saramand9/bignet/kpro/transport/quic"
 	"github.com/saramand9/bignet/kpro/transport/sse"
 	"github.com/saramand9/bignet/kpro/transport/tcp"
 	"github.com/saramand9/bignet/kpro/transport/udp"
@@ -146,6 +149,22 @@ func (s *Server) TCP(addr string, config ...tcp.Config) *Endpoint {
 	return s.Mount(tcp.New(cfg))
 }
 
+// KCP mounts a KCP message endpoint at addr.
+func (s *Server) KCP(addr string, config ...kcp.Config) *Endpoint {
+	cfg := kcp.Config{}
+	if len(config) > 0 {
+		cfg = config[0]
+	}
+	cfg.Addr = addr
+	return s.Mount(kcp.New(cfg))
+}
+
+// QUIC mounts a QUIC message endpoint at addr.
+func (s *Server) QUIC(addr string, config quictransport.Config) *Endpoint {
+	config.Addr = addr
+	return s.Mount(quictransport.New(config))
+}
+
 // UDP mounts a UDP packet endpoint at addr.
 func (s *Server) UDP(addr string, config ...udp.Config) *Endpoint {
 	cfg := udp.Config{}
@@ -191,6 +210,14 @@ func (s *Server) HTTPS(addr string, config httpx.Config) *httpx.Endpoint {
 // GRPC mounts a gRPC server at addr.
 func (s *Server) GRPC(addr string, options ...kprogrpc.Option) *kprogrpc.Server {
 	endpoint := kprogrpc.NewServer(addr, options...)
+	s.MountRunner(endpoint)
+	return endpoint
+}
+
+// HTTP3 mounts a native HTTP/3 endpoint at addr.
+func (s *Server) HTTP3(addr string, config http3x.Config) *http3x.Endpoint {
+	config.Addr = addr
+	endpoint := http3x.New(config)
 	s.MountRunner(endpoint)
 	return endpoint
 }

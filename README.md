@@ -6,7 +6,7 @@ The design goal is:
 
 ```text
 business code handles protocol-native handlers or Message / Context
-transport code handles TCP, UDP, WebSocket, HTTP, HTTPS, SSE, gRPC
+transport code handles TCP, KCP, QUIC, UDP, WebSocket, HTTP, HTTPS, HTTP/3, SSE, gRPC
 protocol code translates bytes, datagrams or frames into Message when applicable
 server code assembles transports, middleware and routers
 ```
@@ -17,10 +17,13 @@ Current implementation:
 
 ```text
 TCP         implemented
+KCP         implemented
+QUIC        implemented as KPro message streams over QUIC
 UDP         implemented
 WebSocket   implemented, supports RFC 6455 data-message fragmentation
 HTTP        implemented
 HTTPS       implemented through HTTP + TLS config
+HTTP/3      implemented through QUIC + TLS config
 SSE         implemented
 gRPC        implemented through kprogrpc and server.GRPC
 ```
@@ -34,13 +37,18 @@ High-level structure:
 ```mermaid
 flowchart TD
     App[server.Server] --> TCP[transport/tcp]
+    App --> KCP[transport/kcp]
+    App --> QUIC[transport/quic]
     App --> UDP[transport/udp]
     App --> WS[transport/websocket]
     App --> HTTP[transport/httpx]
+    App --> HTTP3[transport/http3]
     App --> SSE[transport/sse]
     App --> GRPC[kprogrpc]
 
     TCP --> Protocol[protocol.KProV1]
+    KCP --> Protocol
+    QUIC --> Protocol
     UDP --> Protocol
     WS --> Protocol
 
@@ -51,6 +59,7 @@ flowchart TD
     Middleware --> Handler[Business Handler]
 
     HTTP --> HTTPRouter[method + path router]
+    HTTP3 --> HTTPRouter
     SSE --> SSEHandler[SSE stream handler]
     GRPC --> GRPCService[gRPC service handlers]
 ```
@@ -77,9 +86,12 @@ protocol/
 transport/
   transport.go             common transport interfaces
   tcp/                     TCP stream transport
+  kcp/                     KCP reliable UDP stream transport
+  quic/                    QUIC stream transport
   udp/                     UDP packet transport
   websocket/               WebSocket transport
   httpx/                   HTTP/HTTPS path-routed transport
+  http3/                   HTTP/3 path-routed transport over QUIC
   sse/                     Server-Sent Events transport
 
 kprogrpc/
@@ -116,7 +128,7 @@ sequenceDiagram
 ```
 
 ```text
-TCP / UDP / WebSocket
+	TCP / KCP / QUIC / UDP / WebSocket
   -> transport reads bytes, datagram or WebSocket message
   -> protocol decodes core.Message
   -> core.Router dispatches by Message.ID
@@ -194,7 +206,10 @@ import (
 	"github.com/saramand9/bignet/kpro/middleware"
 	"github.com/saramand9/bignet/kpro/protocol"
 	"github.com/saramand9/bignet/kpro/server"
+	http3x "github.com/saramand9/bignet/kpro/transport/http3"
 	"github.com/saramand9/bignet/kpro/transport/httpx"
+	"github.com/saramand9/bignet/kpro/transport/kcp"
+	quictransport "github.com/saramand9/bignet/kpro/transport/quic"
 	"github.com/saramand9/bignet/kpro/transport/sse"
 	"github.com/saramand9/bignet/kpro/transport/tcp"
 	"github.com/saramand9/bignet/kpro/transport/udp"
@@ -207,6 +222,18 @@ func main() {
 
 	app.TCP(":8088", tcp.Config{
 		Protocol: protocol.KProV1(),
+	}).Use(middleware.Recover()).
+		Handle(core.MsgEcho, echo)
+
+	app.KCP(":8090", kcp.Config{
+		Protocol: protocol.KProV1(),
+	}).Use(middleware.Recover()).
+		Handle(core.MsgEcho, echo)
+
+	app.QUIC(":8444", quictransport.Config{
+		Protocol: protocol.KProV1(),
+		CertFile: "server.crt",
+		KeyFile:  "server.key",
 	}).Use(middleware.Recover()).
 		Handle(core.MsgEcho, echo)
 
@@ -234,6 +261,13 @@ func main() {
 			return ctx.JSON(200, map[string]interface{}{"echo": string(body)})
 		})
 
+
+	app.HTTP3(":8443", http3x.Config{
+		CertFile: "server.crt",
+		KeyFile:  "server.key",
+	}).Get("/health", func(ctx *http3x.Context) error {
+		return ctx.Text(200, "ok\n")
+	})
 
 	app.SSE(":8081", "/events").
 		Handle(func(ctx *sse.Context) error {
@@ -264,7 +298,21 @@ func echo(ctx core.Context) error {
 
 ```powershell
 cd D:\dev\saramand9\bignet\kpro
-go run .\cmd\kpro-universal-server -tcp :8088 -udp :8089 -ws :8091 -http :8080 -sse :8081
+go run .\cmd\kpro-universal-server -tcp :8088 -kcp :8090 -udp :8089 -ws :8091 -http :8080 -sse :8081
+```
+
+HTTP/3 is disabled by default in the universal server because it requires TLS
+certificates and listens on UDP:
+
+```powershell
+go run .\cmd\kpro-universal-server -http3 :8443 -http3-cert server.crt -http3-key server.key
+```
+
+QUIC message transport is also disabled by default because it requires TLS
+certificates and listens on UDP:
+
+```powershell
+go run .\cmd\kpro-universal-server -quic :8444 -quic-cert server.crt -quic-key server.key
 ```
 
 TCP validation:
@@ -319,9 +367,11 @@ This path is useful for TCP load validation only. New framework code should use 
 
 ## Design Notes
 
-- TCP is stream-oriented, so it uses `protocol.StreamProtocol`.
+- TCP, KCP and QUIC are stream-oriented, so they use `protocol.StreamProtocol`.
 - UDP and WebSocket have message boundaries, so they use `protocol.PacketProtocol`.
 - HTTP/HTTPS keep native method + path routing for REST-style APIs and do not convert requests into `core.Message`.
+- HTTP/3 uses the same path-routing handler model over QUIC/UDP and requires TLS certificates.
+- QUIC uses bidirectional QUIC streams as `core.Session` instances and runs KPro messages directly over them.
 - `server.Server.Use(...)` installs unified `core.Middleware` for TCP, UDP, WebSocket, HTTP, HTTPS, SSE and gRPC endpoints mounted before or after the call.
 - `core.Middleware` runs on `core.Invocation`; TCP, UDP and WebSocket build the invocation at real handler execution time after Router scheduling.
 - SSE is one-way server push and has its own `sse.Context`; the stream setup can reuse unified `core.Middleware`.
