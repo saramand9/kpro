@@ -26,8 +26,8 @@ func main() {
 	cfg.MaxFrameSize = uint32(maxFrameSize)
 
 	s := kpro.NewServer(cfg)
-	s.Handle(kpro.MsgEcho, func(ctx *kpro.Context) error {
-		return ctx.Reply(kpro.MsgEcho, ctx.Msg.Data)
+	s.Handle(kpro.MsgEcho, func(ctx kpro.Context) error {
+		return ctx.Reply(kpro.MsgEcho, ctx.Message().Data)
 	})
 
 	go func() {

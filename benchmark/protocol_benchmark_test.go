@@ -82,24 +82,6 @@ func BenchmarkHTTP_Echo_Concurrent(b *testing.B) {
 	}
 }
 
-func BenchmarkHTTPMessage_Echo(b *testing.B) {
-	for _, size := range benchmarkPayloadSizes {
-		b.Run(payloadName(size), func(b *testing.B) {
-			benchmarkHTTPMessageEcho(b, size)
-		})
-	}
-}
-
-func BenchmarkHTTPMessage_Echo_Concurrent(b *testing.B) {
-	for _, size := range benchmarkPayloadSizes {
-		for _, workers := range benchmarkConcurrentWorkers {
-			b.Run(concurrentPayloadName(size, workers), func(b *testing.B) {
-				benchmarkHTTPMessageEchoConcurrent(b, size, workers)
-			})
-		}
-	}
-}
-
 func BenchmarkHTTPS_Echo(b *testing.B) {
 	for _, size := range benchmarkPayloadSizes {
 		b.Run(payloadName(size), func(b *testing.B) {
@@ -255,53 +237,12 @@ func benchmarkHTTPEcho(b *testing.B, payloadSize int, tlsEnabled bool) {
 	reportBenchmarkMetrics(b, started, payloadSize)
 }
 
-func benchmarkHTTPMessageEcho(b *testing.B, payloadSize int) {
-	addr, stop, client := startHTTPMessageBenchmarkServer(b)
-	defer stop()
-
-	payload := bytes.Repeat([]byte("x"), payloadSize)
-	url := "http://" + addr + "/echo"
-
-	b.SetBytes(int64(payloadSize))
-	b.ReportAllocs()
-	started := startBenchmarkTimer(b)
-	for i := 0; i < b.N; i++ {
-		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
-		if err != nil {
-			b.Fatalf("create HTTP message request: %v", err)
-		}
-		req.Header.Set("Content-Type", "text/plain")
-		resp, err := client.Do(req)
-		if err != nil {
-			b.Fatalf("do HTTP message request: %v", err)
-		}
-		body, err := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		if err != nil {
-			b.Fatalf("read HTTP message response: %v", err)
-		}
-		if resp.StatusCode != http.StatusOK || len(body) != len(payload) {
-			b.Fatalf("unexpected HTTP message response: status=%d len=%d", resp.StatusCode, len(body))
-		}
-	}
-	reportBenchmarkMetrics(b, started, payloadSize)
-}
-
 func benchmarkHTTPEchoConcurrent(b *testing.B, payloadSize, workers int, tlsEnabled bool) {
 	addr, stop, client, scheme := startHTTPBenchmarkServer(b, tlsEnabled)
 	defer stop()
 
 	payload := bytes.Repeat([]byte("x"), payloadSize)
 	url := scheme + "://" + addr + "/echo"
-	benchmarkHTTPPostEchoConcurrent(b, client, url, payload, workers)
-}
-
-func benchmarkHTTPMessageEchoConcurrent(b *testing.B, payloadSize, workers int) {
-	addr, stop, client := startHTTPMessageBenchmarkServer(b)
-	defer stop()
-
-	payload := bytes.Repeat([]byte("x"), payloadSize)
-	url := "http://" + addr + "/echo"
 	benchmarkHTTPPostEchoConcurrent(b, client, url, payload, workers)
 }
 
@@ -593,60 +534,6 @@ func startHTTPBenchmarkServer(b *testing.B, tlsEnabled bool) (string, func(), *h
 		cleanupCert()
 	}
 	return addr, stop, client, scheme
-}
-
-func startHTTPMessageBenchmarkServer(b *testing.B) (string, func(), *http.Client) {
-	b.Helper()
-
-	addr := "127.0.0.1:" + freeTCPPort(b)
-	config := httpx.Config{
-		Addr:            addr,
-		ReadTimeout:     10 * time.Second,
-		WriteTimeout:    10 * time.Second,
-		IdleTimeout:     30 * time.Second,
-		ShutdownTimeout: 500 * time.Millisecond,
-	}
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 100,
-		},
-	}
-
-	endpoint := httpx.NewMessage(config, core.RouterConfig{
-		SyncQueueSize:         4096,
-		AsyncWorkers:          1,
-		AsyncQueueSize:        4096,
-		MaxInflightPerSession: 4096,
-		SessionIdleTimeout:    time.Minute,
-	})
-	endpoint.Post("/echo", core.MsgEcho).
-		HandleSync(core.MsgEcho, func(ctx core.Context) error {
-			msg := ctx.Message()
-			return ctx.Reply(msg.ID, msg.Data)
-		})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- endpoint.ListenAndServe(ctx)
-	}()
-	waitForTCPServer(b, addr)
-
-	stop := func() {
-		cancel()
-		client.CloseIdleConnections()
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer shutdownCancel()
-		_ = endpoint.Shutdown(shutdownCtx)
-		select {
-		case <-errCh:
-		case <-time.After(3 * time.Second):
-			b.Fatal("HTTP message benchmark server did not stop")
-		}
-	}
-	return addr, stop, client
 }
 
 func startSSEBenchmarkServer(b *testing.B, payloadSize int) (string, func(), chan struct{}) {

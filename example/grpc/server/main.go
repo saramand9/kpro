@@ -6,6 +6,7 @@ import (
 	"log"
 
 	"github.com/saramand9/bignet/kpro/kprogrpc"
+	"github.com/saramand9/bignet/kpro/server"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
@@ -33,11 +34,12 @@ func main() {
 	addr := flag.String("addr", ":9090", "listen address")
 	flag.Parse()
 
-	srv := kprogrpc.NewServer(*addr)
-	kprogrpc.RegisterGreeter(srv, GreeterService{})
+	app := server.New()
+	grpcEndpoint := app.GRPC(*addr)
+	kprogrpc.RegisterGreeter(grpcEndpoint, GreeterService{})
 
 	log.Printf("grpc server listening on %s", *addr)
-	if err := srv.Serve(); err != nil {
+	if err := app.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
 }

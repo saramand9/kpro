@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1900" height="1240" viewBox="0 0 1900 1240" role="img" aria-labelledby="title desc">
   <title id="title">KPro HTTP and HTTPS Internal Flow</title>
-  <desc id="desc">Detailed HTTP and HTTPS call flow for KPro universal server, covering native httpx.Endpoint routing and the optional HTTPMessage path that maps HTTP requests into core.Message and core.Router.</desc>
+  <desc id="desc">Detailed HTTP and HTTPS call flow for KPro universal server, covering native httpx.Endpoint method and path routing.</desc>
   <defs>
     <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
       <path d="M2,2 L10,6 L2,10 Z" fill="#2e3745" />
@@ -35,7 +35,7 @@
 
   <rect class="bg" x="0" y="0" width="1900" height="1240" />
   <text class="title" x="54" y="64">KPro HTTP / HTTPS Call Flow and Internal Design</text>
-  <text class="subtitle" x="54" y="96">HTTP and HTTPS support native method + path routing, plus HTTPMessage / HTTPSMessage for TCP-like core.Message and core.Router dispatch.</text>
+  <text class="subtitle" x="54" y="96">HTTP and HTTPS use native method + path routing and do not convert requests into core.Message.</text>
 
   <rect x="40" y="126" width="1820" height="172" rx="14" fill="#f0e7d8" stroke="#dbc7a5" />
   <text class="laneTitle" x="64" y="154">1. User API and endpoint assembly</text>
@@ -82,7 +82,7 @@
 
   <rect class="box route" x="750" y="410" width="324" height="92" rx="8" />
   <text class="boxTitle" x="814" y="442">Use middleware</text>
-  <text class="text" x="786" y="466">append httpx.Middleware</text>
+  <text class="text" x="786" y="466">append core.Middleware</text>
   <text class="text" x="786" y="488">rebuild compiled handlers</text>
 
   <rect class="box route" x="1134" y="410" width="336" height="92" rx="8" />
@@ -180,7 +180,7 @@
   <text class="text" x="704" y="1198">405 method not allowed</text>
 
   <rect class="box note" x="1000" y="1168" width="620" height="48" rx="8" />
-  <text class="small" x="1020" y="1198">Native HTTP stays on httpx.Context; HTTPMessage maps method + path to core.Message and reuses core.Router.</text>
+  <text class="small" x="1020" y="1198">HTTP stays on httpx.Context; cross-protocol concerns use core.Middleware with core.Invocation instead of core.Message.</text>
 
   <rect class="box note" x="1500" y="830" width="300" height="48" rx="8" />
   <text class="small" x="1522" y="860">ctx.Done -> ShutdownWithContext</text>

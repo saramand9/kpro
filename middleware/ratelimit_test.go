@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"errors"
 	"net"
 	"sync"
@@ -16,12 +17,12 @@ func TestRateLimitRejectsOverLimit(t *testing.T) {
 	handler := RateLimit(RateLimitConfig{
 		Rate:  rate.Limit(1),
 		Burst: 1,
-	})(func(core.Context) error {
+	})(func(core.Invocation) error {
 		handlerCalls++
 		return nil
 	})
 
-	ctx := core.NewContext(newRateLimitTestSession(1), core.Message{ID: core.MsgEcho})
+	ctx := newRateLimitTestInvocation(newRateLimitTestSession(1))
 	if err := handler(ctx); err != nil {
 		t.Fatalf("first call should pass: %v", err)
 	}
@@ -37,12 +38,12 @@ func TestRateLimitSharesBucketAcrossSessions(t *testing.T) {
 	handler := RateLimit(RateLimitConfig{
 		Rate:  rate.Limit(1),
 		Burst: 1,
-	})(func(core.Context) error {
+	})(func(core.Invocation) error {
 		return nil
 	})
 
-	ctx1 := core.NewContext(newRateLimitTestSession(1), core.Message{ID: core.MsgEcho})
-	ctx2 := core.NewContext(newRateLimitTestSession(2), core.Message{ID: core.MsgEcho})
+	ctx1 := newRateLimitTestInvocation(newRateLimitTestSession(1))
+	ctx2 := newRateLimitTestInvocation(newRateLimitTestSession(2))
 
 	if err := handler(ctx1); err != nil {
 		t.Fatalf("first session should pass: %v", err)
@@ -57,12 +58,12 @@ func TestRateLimitHonorsBurst(t *testing.T) {
 	handler := RateLimit(RateLimitConfig{
 		Rate:  rate.Limit(1),
 		Burst: 2,
-	})(func(core.Context) error {
+	})(func(core.Invocation) error {
 		handlerCalls++
 		return nil
 	})
 
-	ctx := core.NewContext(newRateLimitTestSession(1), core.Message{ID: core.MsgEcho})
+	ctx := newRateLimitTestInvocation(newRateLimitTestSession(1))
 	for i := 0; i < 2; i++ {
 		if err := handler(ctx); err != nil {
 			t.Fatalf("call %d should pass within burst: %v", i+1, err)
@@ -80,7 +81,7 @@ func TestConnRateLimitIsPerSession(t *testing.T) {
 	handler := ConnRateLimit(RateLimitConfig{
 		Rate:  rate.Limit(1),
 		Burst: 1,
-	})(func(core.Context) error {
+	})(func(core.Invocation) error {
 		return nil
 	})
 
@@ -90,8 +91,8 @@ func TestConnRateLimitIsPerSession(t *testing.T) {
 		_ = session1.Close()
 		_ = session2.Close()
 	})
-	ctx1 := core.NewContext(session1, core.Message{ID: core.MsgEcho})
-	ctx2 := core.NewContext(session2, core.Message{ID: core.MsgEcho})
+	ctx1 := newRateLimitTestInvocation(session1)
+	ctx2 := newRateLimitTestInvocation(session2)
 
 	if err := handler(ctx1); err != nil {
 		t.Fatalf("first session first call should pass: %v", err)
@@ -108,12 +109,12 @@ func TestConnRateLimitRemovesLimiterWhenSessionCloses(t *testing.T) {
 	handler := ConnRateLimit(RateLimitConfig{
 		Rate:  rate.Limit(0.001),
 		Burst: 1,
-	})(func(core.Context) error {
+	})(func(core.Invocation) error {
 		return nil
 	})
 
 	session := newRateLimitTestSession(9)
-	ctx := core.NewContext(session, core.Message{ID: core.MsgEcho})
+	ctx := newRateLimitTestInvocation(session)
 	if err := handler(ctx); err != nil {
 		t.Fatalf("first call should pass: %v", err)
 	}
@@ -129,7 +130,7 @@ func TestConnRateLimitRemovesLimiterWhenSessionCloses(t *testing.T) {
 	t.Cleanup(func() {
 		_ = reusedIDSession.Close()
 	})
-	reusedIDCtx := core.NewContext(reusedIDSession, core.Message{ID: core.MsgEcho})
+	reusedIDCtx := newRateLimitTestInvocation(reusedIDSession)
 
 	waitForRateLimitCleanup(t, func() bool {
 		return handler(reusedIDCtx) == nil
@@ -137,11 +138,11 @@ func TestConnRateLimitRemovesLimiterWhenSessionCloses(t *testing.T) {
 }
 
 func TestRateLimitUsesDefaults(t *testing.T) {
-	handler := RateLimit(RateLimitConfig{})(func(core.Context) error {
+	handler := RateLimit(RateLimitConfig{})(func(core.Invocation) error {
 		return nil
 	})
 
-	ctx := core.NewContext(newRateLimitTestSession(1), core.Message{ID: core.MsgEcho})
+	ctx := newRateLimitTestInvocation(newRateLimitTestSession(1))
 	if err := handler(ctx); err != nil {
 		t.Fatalf("default rate limit should allow first request: %v", err)
 	}
@@ -164,6 +165,10 @@ func waitForRateLimitCleanup(t *testing.T, condition func() bool) {
 			t.Fatal("timed out waiting for limiter cleanup")
 		}
 	}
+}
+
+func newRateLimitTestInvocation(session *rateLimitTestSession) core.Invocation {
+	return core.NewMessageInvocation(context.Background(), core.NewContext(session, core.Message{ID: core.MsgEcho}))
 }
 
 type rateLimitTestSession struct {

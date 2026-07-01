@@ -19,10 +19,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/saramand9/bignet/kpro/core"
 	"github.com/saramand9/bignet/kpro/transport/httpx"
 )
 
-const strictHTTPMessageCount = 1000
+const strictHTTPExchangeCount = 1000
 
 const (
 	strictHTTPHost = "127.0.0.1"
@@ -30,7 +31,7 @@ const (
 
 func TestHTTPWireCRCTraceStrict1000(t *testing.T) {
 	t.Run("get_health", func(t *testing.T) {
-		requests := strictHTTPRequests(http.MethodGet, "/health", "health", strictHTTPMessageCount)
+		requests := strictHTTPRequests(http.MethodGet, "/health", "health", strictHTTPExchangeCount)
 		logs := runHTTPWireCRCScenario(t, func(endpoint *httpx.Endpoint, logs strictHTTPLogs) {
 			endpoint.Get("/health", func(ctx *httpx.Context) error {
 				req := strictHTTPRequestFromContext(t, ctx)
@@ -46,15 +47,15 @@ func TestHTTPWireCRCTraceStrict1000(t *testing.T) {
 			})
 		}, requests, writeStrictHTTPRequestsNormal)
 
-		assertHTTPMessagesEqual(t, logs.clientSent, logs.serverReceived)
-		assertHTTPMessagesEqual(t, logs.serverSent, logs.clientReceived)
+		assertHTTPExchangesEqual(t, logs.clientSent, logs.serverReceived)
+		assertHTTPExchangesEqual(t, logs.serverSent, logs.clientReceived)
 		assertHTTPResponsesMatchRequests(t, requests, logs.clientReceived.snapshot(), http.StatusOK, func(req strictHTTPRequest) []byte {
 			return []byte("ok:" + strictHTTPQueryValue(req.Target, "seq"))
 		})
 	})
 
 	t.Run("post_echo", func(t *testing.T) {
-		requests := strictHTTPRequests(http.MethodPost, "/echo", "echo", strictHTTPMessageCount)
+		requests := strictHTTPRequests(http.MethodPost, "/echo", "echo", strictHTTPExchangeCount)
 		logs := runHTTPWireCRCScenario(t, func(endpoint *httpx.Endpoint, logs strictHTTPLogs) {
 			endpoint.Post("/echo", func(ctx *httpx.Context) error {
 				req := strictHTTPRequestFromContext(t, ctx)
@@ -73,13 +74,13 @@ func TestHTTPWireCRCTraceStrict1000(t *testing.T) {
 			})
 		}, requests, writeStrictHTTPRequestsNormal)
 
-		assertHTTPMessagesEqual(t, logs.clientSent, logs.serverReceived)
-		assertHTTPMessagesEqual(t, logs.serverSent, logs.clientReceived)
+		assertHTTPExchangesEqual(t, logs.clientSent, logs.serverReceived)
+		assertHTTPExchangesEqual(t, logs.serverSent, logs.clientReceived)
 		assertHTTPResponsesEchoRequests(t, requests, logs.clientReceived.snapshot(), http.StatusOK)
 	})
 
 	t.Run("put_bytes_created", func(t *testing.T) {
-		requests := strictHTTPRequests(http.MethodPut, "/bytes", "bytes", strictHTTPMessageCount)
+		requests := strictHTTPRequests(http.MethodPut, "/bytes", "bytes", strictHTTPExchangeCount)
 		logs := runHTTPWireCRCScenario(t, func(endpoint *httpx.Endpoint, logs strictHTTPLogs) {
 			endpoint.Put("/bytes", func(ctx *httpx.Context) error {
 				req := strictHTTPRequestFromContext(t, ctx)
@@ -98,13 +99,13 @@ func TestHTTPWireCRCTraceStrict1000(t *testing.T) {
 			})
 		}, requests, writeStrictHTTPRequestsNormal)
 
-		assertHTTPMessagesEqual(t, logs.clientSent, logs.serverReceived)
-		assertHTTPMessagesEqual(t, logs.serverSent, logs.clientReceived)
+		assertHTTPExchangesEqual(t, logs.clientSent, logs.serverReceived)
+		assertHTTPExchangesEqual(t, logs.serverSent, logs.clientReceived)
 		assertHTTPResponsesEchoRequests(t, requests, logs.clientReceived.snapshot(), http.StatusCreated)
 	})
 
 	t.Run("json_response", func(t *testing.T) {
-		requests := strictHTTPRequests(http.MethodGet, "/json", "json", strictHTTPMessageCount)
+		requests := strictHTTPRequests(http.MethodGet, "/json", "json", strictHTTPExchangeCount)
 		logs := runHTTPWireCRCScenario(t, func(endpoint *httpx.Endpoint, logs strictHTTPLogs) {
 			endpoint.Get("/json", func(ctx *httpx.Context) error {
 				req := strictHTTPRequestFromContext(t, ctx)
@@ -122,20 +123,21 @@ func TestHTTPWireCRCTraceStrict1000(t *testing.T) {
 			})
 		}, requests, writeStrictHTTPRequestsNormal)
 
-		assertHTTPMessagesEqual(t, logs.clientSent, logs.serverReceived)
-		assertHTTPMessagesEqual(t, logs.serverSent, logs.clientReceived)
+		assertHTTPExchangesEqual(t, logs.clientSent, logs.serverReceived)
+		assertHTTPExchangesEqual(t, logs.serverSent, logs.clientReceived)
 		assertHTTPResponsesMatchRequests(t, requests, logs.clientReceived.snapshot(), http.StatusOK, func(req strictHTTPRequest) []byte {
 			return []byte(fmt.Sprintf(`{"seq":"%s"}`, strictHTTPQueryValue(req.Target, "seq")))
 		})
 	})
 
 	t.Run("middleware_header", func(t *testing.T) {
-		requests := strictHTTPRequests(http.MethodGet, "/middleware", "middleware", strictHTTPMessageCount)
+		requests := strictHTTPRequests(http.MethodGet, "/middleware", "middleware", strictHTTPExchangeCount)
 		logs := runHTTPWireCRCScenario(t, func(endpoint *httpx.Endpoint, logs strictHTTPLogs) {
-			endpoint.Use(func(next httpx.Handler) httpx.Handler {
-				return func(ctx *httpx.Context) error {
+			endpoint.Use(func(next core.InvocationHandler) core.InvocationHandler {
+				return func(inv core.Invocation) error {
+					ctx := inv.Native().(*httpx.Context)
 					ctx.Header().Set("X-Strict-Middleware", "hit")
-					return next(ctx)
+					return next(inv)
 				}
 			})
 			endpoint.Get("/middleware", func(ctx *httpx.Context) error {
@@ -157,15 +159,15 @@ func TestHTTPWireCRCTraceStrict1000(t *testing.T) {
 			})
 		}, requests, writeStrictHTTPRequestsNormal)
 
-		assertHTTPMessagesEqual(t, logs.clientSent, logs.serverReceived)
-		assertHTTPMessagesEqual(t, logs.serverSent, logs.clientReceived)
+		assertHTTPExchangesEqual(t, logs.clientSent, logs.serverReceived)
+		assertHTTPExchangesEqual(t, logs.serverSent, logs.clientReceived)
 		assertHTTPResponsesMatchRequests(t, requests, logs.clientReceived.snapshot(), http.StatusAccepted, func(req strictHTTPRequest) []byte {
 			return []byte("middleware:" + strictHTTPQueryValue(req.Target, "seq"))
 		})
 	})
 
 	t.Run("handler_error_500", func(t *testing.T) {
-		requests := strictHTTPRequests(http.MethodGet, "/handler-error", "handler-error", strictHTTPMessageCount)
+		requests := strictHTTPRequests(http.MethodGet, "/handler-error", "handler-error", strictHTTPExchangeCount)
 		logs := runHTTPWireCRCScenario(t, func(endpoint *httpx.Endpoint, logs strictHTTPLogs) {
 			endpoint.Get("/handler-error", func(ctx *httpx.Context) error {
 				req := strictHTTPRequestFromContext(t, ctx)
@@ -181,15 +183,15 @@ func TestHTTPWireCRCTraceStrict1000(t *testing.T) {
 			})
 		}, requests, writeStrictHTTPRequestsNormal)
 
-		assertHTTPMessagesEqual(t, logs.clientSent, logs.serverReceived)
-		assertHTTPMessagesEqual(t, logs.serverSent, logs.clientReceived)
+		assertHTTPExchangesEqual(t, logs.clientSent, logs.serverReceived)
+		assertHTTPExchangesEqual(t, logs.serverSent, logs.clientReceived)
 		assertHTTPResponsesMatchRequests(t, requests, logs.clientReceived.snapshot(), http.StatusInternalServerError, func(req strictHTTPRequest) []byte {
 			return []byte("handler failed:" + strictHTTPQueryValue(req.Target, "seq"))
 		})
 	})
 
 	t.Run("boundary_payloads", func(t *testing.T) {
-		requests := strictHTTPBoundaryRequests("/boundary", strictHTTPMessageCount)
+		requests := strictHTTPBoundaryRequests("/boundary", strictHTTPExchangeCount)
 		logs := runHTTPWireCRCInterleavedScenario(t, func(endpoint *httpx.Endpoint, logs strictHTTPLogs) {
 			endpoint.Post("/boundary", func(ctx *httpx.Context) error {
 				req := strictHTTPRequestFromContext(t, ctx)
@@ -208,13 +210,13 @@ func TestHTTPWireCRCTraceStrict1000(t *testing.T) {
 			})
 		}, requests)
 
-		assertHTTPMessagesEqual(t, logs.clientSent, logs.serverReceived)
-		assertHTTPMessagesEqual(t, logs.serverSent, logs.clientReceived)
+		assertHTTPExchangesEqual(t, logs.clientSent, logs.serverReceived)
+		assertHTTPExchangesEqual(t, logs.serverSent, logs.clientReceived)
 		assertHTTPResponsesEchoRequests(t, requests, logs.clientReceived.snapshot(), http.StatusOK)
 	})
 
 	t.Run("multi_connection_echo", func(t *testing.T) {
-		requests := strictHTTPRequests(http.MethodPost, "/multi", "multi", strictHTTPMessageCount)
+		requests := strictHTTPRequests(http.MethodPost, "/multi", "multi", strictHTTPExchangeCount)
 		logs := runHTTPWireCRCMultiConnectionScenario(t, 4, func(endpoint *httpx.Endpoint, logs strictHTTPLogs) {
 			endpoint.Post("/multi", func(ctx *httpx.Context) error {
 				req := strictHTTPRequestFromContext(t, ctx)
@@ -233,13 +235,13 @@ func TestHTTPWireCRCTraceStrict1000(t *testing.T) {
 			})
 		}, requests)
 
-		assertHTTPMessageSetEqual(t, logs.clientSent, logs.serverReceived)
-		assertHTTPMessageSetEqual(t, logs.serverSent, logs.clientReceived)
+		assertHTTPExchangeSetEqual(t, logs.clientSent, logs.serverReceived)
+		assertHTTPExchangeSetEqual(t, logs.serverSent, logs.clientReceived)
 		assertHTTPResponseSetEchoRequests(t, requests, logs.clientReceived.snapshot(), http.StatusOK)
 	})
 
 	t.Run("coalesced_write_echo", func(t *testing.T) {
-		requests := strictHTTPRequests(http.MethodPost, "/coalesced", "coalesced", strictHTTPMessageCount)
+		requests := strictHTTPRequests(http.MethodPost, "/coalesced", "coalesced", strictHTTPExchangeCount)
 		logs := runHTTPWireCRCScenario(t, func(endpoint *httpx.Endpoint, logs strictHTTPLogs) {
 			endpoint.Post("/coalesced", func(ctx *httpx.Context) error {
 				req := strictHTTPRequestFromContext(t, ctx)
@@ -258,13 +260,13 @@ func TestHTTPWireCRCTraceStrict1000(t *testing.T) {
 			})
 		}, requests, writeStrictHTTPRequestsCoalesced)
 
-		assertHTTPMessagesEqual(t, logs.clientSent, logs.serverReceived)
-		assertHTTPMessagesEqual(t, logs.serverSent, logs.clientReceived)
+		assertHTTPExchangesEqual(t, logs.clientSent, logs.serverReceived)
+		assertHTTPExchangesEqual(t, logs.serverSent, logs.clientReceived)
 		assertHTTPResponsesEchoRequests(t, requests, logs.clientReceived.snapshot(), http.StatusOK)
 	})
 
 	t.Run("fragmented_write_echo", func(t *testing.T) {
-		requests := strictHTTPRequests(http.MethodPost, "/fragmented", "fragmented", strictHTTPMessageCount)
+		requests := strictHTTPRequests(http.MethodPost, "/fragmented", "fragmented", strictHTTPExchangeCount)
 		logs := runHTTPWireCRCScenario(t, func(endpoint *httpx.Endpoint, logs strictHTTPLogs) {
 			endpoint.Post("/fragmented", func(ctx *httpx.Context) error {
 				req := strictHTTPRequestFromContext(t, ctx)
@@ -283,34 +285,34 @@ func TestHTTPWireCRCTraceStrict1000(t *testing.T) {
 			})
 		}, requests, writeStrictHTTPRequestsFragmented)
 
-		assertHTTPMessagesEqual(t, logs.clientSent, logs.serverReceived)
-		assertHTTPMessagesEqual(t, logs.serverSent, logs.clientReceived)
+		assertHTTPExchangesEqual(t, logs.clientSent, logs.serverReceived)
+		assertHTTPExchangesEqual(t, logs.serverSent, logs.clientReceived)
 		assertHTTPResponsesEchoRequests(t, requests, logs.clientReceived.snapshot(), http.StatusOK)
 	})
 
 	t.Run("not_found", func(t *testing.T) {
-		requests := strictHTTPRequests(http.MethodGet, "/missing", "missing", strictHTTPMessageCount)
+		requests := strictHTTPRequests(http.MethodGet, "/missing", "missing", strictHTTPExchangeCount)
 		logs := runHTTPWireCRCScenario(t, func(endpoint *httpx.Endpoint, _ strictHTTPLogs) {
 			endpoint.Get("/exists", func(ctx *httpx.Context) error {
 				return ctx.Text(http.StatusOK, "exists")
 			})
 		}, requests, writeStrictHTTPRequestsNormal)
 
-		assertHTTPLogCount(t, logs.clientSent, strictHTTPMessageCount)
+		assertHTTPLogCount(t, logs.clientSent, strictHTTPExchangeCount)
 		assertHTTPLogCount(t, logs.serverReceived, 0)
 		assertHTTPLogCount(t, logs.serverSent, 0)
 		assertHTTPResponsesBody(t, logs.clientReceived.snapshot(), http.StatusNotFound, []byte("not found"))
 	})
 
 	t.Run("method_not_allowed", func(t *testing.T) {
-		requests := strictHTTPRequests(http.MethodPost, "/only-get", "method", strictHTTPMessageCount)
+		requests := strictHTTPRequests(http.MethodPost, "/only-get", "method", strictHTTPExchangeCount)
 		logs := runHTTPWireCRCScenario(t, func(endpoint *httpx.Endpoint, _ strictHTTPLogs) {
 			endpoint.Get("/only-get", func(ctx *httpx.Context) error {
 				return ctx.Text(http.StatusOK, "ok")
 			})
 		}, requests, writeStrictHTTPRequestsNormal)
 
-		assertHTTPLogCount(t, logs.clientSent, strictHTTPMessageCount)
+		assertHTTPLogCount(t, logs.clientSent, strictHTTPExchangeCount)
 		assertHTTPLogCount(t, logs.serverReceived, 0)
 		assertHTTPLogCount(t, logs.serverSent, 0)
 		assertHTTPResponsesBody(t, logs.clientReceived.snapshot(), http.StatusMethodNotAllowed, []byte("method not allowed"))
@@ -367,7 +369,7 @@ func TestHTTPWireProtocolFaultStrict1000(t *testing.T) {
 
 			rawLog := newStrictHTTPRawLog(t, "client_malformed_"+tc.name+".ndjson")
 			host := strictHTTPHostHeader(addr)
-			for i := 0; i < strictHTTPMessageCount; i++ {
+			for i := 0; i < strictHTTPExchangeCount; i++ {
 				conn := dialTCP(t, addr)
 				raw := tc.build(i+1, host)
 				if err := rawLog.appendRaw(raw); err != nil {
@@ -381,7 +383,7 @@ func TestHTTPWireProtocolFaultStrict1000(t *testing.T) {
 				readOptionalStrictHTTPFaultResponse(conn)
 				_ = conn.Close()
 			}
-			waitForStrictHTTPRawCount(t, rawLog, strictHTTPMessageCount)
+			waitForStrictHTTPRawCount(t, rawLog, strictHTTPExchangeCount)
 			assertHTTPLogCount(t, logs.serverReceived, 0)
 			assertHTTPLogCount(t, logs.serverSent, 0)
 		})
@@ -454,8 +456,8 @@ func runHTTPWireCRCScenario(
 	writer func(*testing.T, net.Conn, *strictHTTPLog, []strictHTTPRequest),
 ) strictHTTPLogs {
 	t.Helper()
-	if len(requests) < strictHTTPMessageCount {
-		t.Fatalf("strict HTTP scenario has %d requests, want at least %d", len(requests), strictHTTPMessageCount)
+	if len(requests) < strictHTTPExchangeCount {
+		t.Fatalf("strict HTTP scenario has %d requests, want at least %d", len(requests), strictHTTPExchangeCount)
 	}
 
 	logs, addr, stop := startStrictHTTPServer(t, register)
@@ -482,8 +484,8 @@ func runHTTPWireCRCMultiConnectionScenario(
 	requests []strictHTTPRequest,
 ) strictHTTPLogs {
 	t.Helper()
-	if len(requests) < strictHTTPMessageCount {
-		t.Fatalf("strict HTTP multi-connection scenario has %d requests, want at least %d", len(requests), strictHTTPMessageCount)
+	if len(requests) < strictHTTPExchangeCount {
+		t.Fatalf("strict HTTP multi-connection scenario has %d requests, want at least %d", len(requests), strictHTTPExchangeCount)
 	}
 
 	logs, addr, stop := startStrictHTTPServer(t, register)
@@ -521,8 +523,8 @@ func runHTTPWireCRCInterleavedScenario(
 	requests []strictHTTPRequest,
 ) strictHTTPLogs {
 	t.Helper()
-	if len(requests) < strictHTTPMessageCount {
-		t.Fatalf("strict HTTP interleaved scenario has %d requests, want at least %d", len(requests), strictHTTPMessageCount)
+	if len(requests) < strictHTTPExchangeCount {
+		t.Fatalf("strict HTTP interleaved scenario has %d requests, want at least %d", len(requests), strictHTTPExchangeCount)
 	}
 
 	logs, addr, stop := startStrictHTTPServer(t, register)
@@ -929,29 +931,29 @@ func strictHTTPHostHeader(addr string) string {
 	return addr
 }
 
-func assertHTTPMessagesEqual(t *testing.T, wantLog, gotLog *strictHTTPLog) {
+func assertHTTPExchangesEqual(t *testing.T, wantLog, gotLog *strictHTTPLog) {
 	t.Helper()
 	want := wantLog.snapshot()
 	got := gotLog.snapshot()
-	if len(want) != strictHTTPMessageCount || len(got) != strictHTTPMessageCount {
-		t.Fatalf("HTTP log counts differ: want=%d got=%d minimum=%d", len(want), len(got), strictHTTPMessageCount)
+	if len(want) != strictHTTPExchangeCount || len(got) != strictHTTPExchangeCount {
+		t.Fatalf("HTTP log counts differ: want=%d got=%d minimum=%d", len(want), len(got), strictHTTPExchangeCount)
 	}
 	for i := range want {
 		if want[i].MessageLen != got[i].MessageLen ||
 			want[i].MessageCRC32 != got[i].MessageCRC32 ||
 			want[i].MessageHex != got[i].MessageHex {
-			t.Fatalf("HTTP message %d differs\nwant len=%d crc=%s\ngot  len=%d crc=%s",
+			t.Fatalf("HTTP exchange %d differs\nwant len=%d crc=%s\ngot  len=%d crc=%s",
 				i+1, want[i].MessageLen, want[i].MessageCRC32, got[i].MessageLen, got[i].MessageCRC32)
 		}
 	}
 }
 
-func assertHTTPMessageSetEqual(t *testing.T, wantLog, gotLog *strictHTTPLog) {
+func assertHTTPExchangeSetEqual(t *testing.T, wantLog, gotLog *strictHTTPLog) {
 	t.Helper()
 	want := wantLog.snapshot()
 	got := gotLog.snapshot()
-	if len(want) != strictHTTPMessageCount || len(got) != strictHTTPMessageCount {
-		t.Fatalf("HTTP log counts differ: want=%d got=%d minimum=%d", len(want), len(got), strictHTTPMessageCount)
+	if len(want) != strictHTTPExchangeCount || len(got) != strictHTTPExchangeCount {
+		t.Fatalf("HTTP log counts differ: want=%d got=%d minimum=%d", len(want), len(got), strictHTTPExchangeCount)
 	}
 	counts := make(map[string]int, len(want))
 	for _, record := range want {
@@ -959,13 +961,13 @@ func assertHTTPMessageSetEqual(t *testing.T, wantLog, gotLog *strictHTTPLog) {
 	}
 	for _, record := range got {
 		if counts[record.MessageHex] == 0 {
-			t.Fatalf("unexpected HTTP message kind=%s crc=%s", record.Kind, record.MessageCRC32)
+			t.Fatalf("unexpected HTTP exchange kind=%s crc=%s", record.Kind, record.MessageCRC32)
 		}
 		counts[record.MessageHex]--
 	}
 	for key, count := range counts {
 		if count != 0 {
-			t.Fatalf("missing HTTP message %s count=%d", key[:minInt(len(key), 32)], count)
+			t.Fatalf("missing HTTP exchange %s count=%d", key[:minInt(len(key), 32)], count)
 		}
 	}
 }
@@ -1027,8 +1029,8 @@ func assertHTTPResponsesMatchRequests(t *testing.T, requests []strictHTTPRequest
 
 func assertHTTPResponsesBody(t *testing.T, got []strictHTTPRecord, status int, body []byte) {
 	t.Helper()
-	if len(got) != strictHTTPMessageCount {
-		t.Fatalf("HTTP response count=%d, want %d", len(got), strictHTTPMessageCount)
+	if len(got) != strictHTTPExchangeCount {
+		t.Fatalf("HTTP response count=%d, want %d", len(got), strictHTTPExchangeCount)
 	}
 	for i, record := range got {
 		if record.Status != status ||

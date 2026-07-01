@@ -35,14 +35,14 @@ type RouterConfig struct {
 
 type route struct {
 	handler Handler
-	wrapped Handler
 	mode    DispatchMode
 }
 
 type dispatchTask struct {
-	ctx     Context
-	handler Handler
-	session *sessionExecutor
+	ctx         Context
+	handler     Handler
+	middlewares []Middleware
+	session     *sessionExecutor
 }
 
 type Router struct {
@@ -77,10 +77,6 @@ func NewRouter(config ...RouterConfig) *Router {
 func (r *Router) Use(middlewares ...Middleware) {
 	r.mu.Lock()
 	r.middlewares = append(r.middlewares, middlewares...)
-	for msgID, rt := range r.routes {
-		rt.wrapped = r.wrap(rt.handler)
-		r.routes[msgID] = rt
-	}
 	r.mu.Unlock()
 }
 
@@ -101,6 +97,7 @@ func (r *Router) Dispatch(ctx Context) error {
 
 	r.mu.RLock()
 	rt := r.routes[msg.ID]
+	middlewares := append([]Middleware(nil), r.middlewares...)
 	r.mu.RUnlock()
 
 	if rt.handler == nil {
@@ -109,12 +106,13 @@ func (r *Router) Dispatch(ctx Context) error {
 		return ErrNoHandler
 	}
 
-	h := rt.wrapped
+	h := rt.handler
 
 	task := dispatchTask{
-		ctx:     ctx,
-		handler: h,
-		session: r.sessionFor(ctx.Session()),
+		ctx:         ctx,
+		handler:     h,
+		middlewares: middlewares,
+		session:     r.sessionFor(ctx.Session()),
 	}
 	var err error
 	switch rt.mode {
@@ -176,15 +174,8 @@ func (r *Router) handle(msgID uint32, h Handler, mode DispatchMode) {
 		r.startAsyncWorkers()
 	}
 	r.mu.Lock()
-	r.routes[msgID] = route{handler: h, wrapped: r.wrap(h), mode: mode}
+	r.routes[msgID] = route{handler: h, mode: mode}
 	r.mu.Unlock()
-}
-
-func (r *Router) wrap(h Handler) Handler {
-	for i := len(r.middlewares) - 1; i >= 0; i-- {
-		h = r.middlewares[i](h)
-	}
-	return h
 }
 
 func (r *Router) submitAsync(task dispatchTask) error {
@@ -236,7 +227,14 @@ func (r *Router) execute(task dispatchTask) {
 			_ = task.ctx.Error(fmt.Sprintf("handler panic: %v", recovered))
 		}
 	}()
-	if err := task.handler(task.ctx); err != nil {
+	handler := InvocationHandler(func(Invocation) error {
+		return task.handler(task.ctx)
+	})
+	if len(task.middlewares) > 0 {
+		handler = Chain(task.middlewares...)(handler)
+	}
+	inv := NewMessageInvocation(context.Background(), task.ctx)
+	if err := handler(inv); err != nil {
 		_ = task.ctx.Error(err.Error())
 	}
 }

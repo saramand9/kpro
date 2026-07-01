@@ -13,42 +13,44 @@ flowchart TD
     Main --> UDP[app.UDP]
     Main --> WS[app.WebSocket]
     Main --> HTTP[app.HTTP]
-    Main --> HTTPMSG[app.HTTPMessage]
     Main --> SSE[app.SSE]
+    Main --> GRPC[app.GRPC]
 
     TCP --> MountTCP[server.Mount]
     UDP --> MountUDP[server.Mount]
     WS --> MountWS[server.Mount]
     HTTP --> MountHTTP[server.MountRunner]
-    HTTPMSG --> MountHTTPMSG[server.MountRunner]
     SSE --> MountSSE[server.MountRunner]
+    GRPC --> MountGRPC[server.MountRunner]
 
     MountTCP --> TCPEndpoint[server.Endpoint + core.Router]
     MountUDP --> UDPEndpoint[server.Endpoint + core.Router]
     MountWS --> WSEndpoint[server.Endpoint + core.Router]
     MountHTTP --> HTTPEndpoint[httpx.Endpoint]
-    MountHTTPMSG --> HTTPMessageEndpoint[httpx.MessageEndpoint + core.Router]
     MountSSE --> SSEEndpoint[sse.Endpoint]
+    MountGRPC --> GRPCEndpoint[kprogrpc.Server]
 
     Main --> Listen[app.ListenAndServe]
     Listen --> RunTCP[tcp.ListenAndServe]
     Listen --> RunUDP[udp.ListenAndServe]
     Listen --> RunWS[websocket.ListenAndServe]
     Listen --> RunHTTP[httpx.ListenAndServe]
-    Listen --> RunHTTPMSG[httpx.MessageEndpoint.ListenAndServe]
     Listen --> RunSSE[sse.ListenAndServe]
+    Listen --> RunGRPC[kprogrpc.ListenAndServe]
 ```
 
 ## Message-Based Transports
 
-TCP, UDP, WebSocket and the optional HTTP message endpoint share the same business model:
+TCP, UDP and WebSocket share the same message business model:
 
 ```text
 transport input
   -> protocol decode
   -> core.NewContext
   -> core.Router.Dispatch
-  -> middleware chain
+  -> queue / scheduling
+  -> core.Invocation
+  -> core.Middleware chain
   -> business handler
   -> ctx.Reply
   -> protocol encode
@@ -66,7 +68,8 @@ flowchart TD
     ProtocolRead --> Message[core.Message]
     Message --> Context[core.NewContext]
     Context --> Dispatch[core.Router.Dispatch]
-    Dispatch --> Middleware[core.Middleware]
+    Dispatch --> Invocation[core.Invocation]
+    Invocation --> Middleware[core.Middleware]
     Middleware --> Handler[Business Handler]
     Handler --> Reply[ctx.Reply]
     Reply --> Send[session.Send]
@@ -95,7 +98,8 @@ flowchart TD
     Message --> PacketSession[getOrCreate udp.packetSession by remote IP:port]
     PacketSession --> Context[core.NewContext]
     Context --> Dispatch[core.Router.Dispatch]
-    Dispatch --> Middleware[core.Middleware]
+    Dispatch --> Invocation[core.Invocation]
+    Invocation --> Middleware[core.Middleware]
     Middleware --> Handler[Business Handler]
     Handler --> Reply[ctx.Reply]
     Reply --> Send[packetSession.Send]
@@ -121,7 +125,8 @@ flowchart TD
     DecodePacket --> Message[core.Message]
     Message --> Context[core.NewContext]
     Context --> Dispatch[core.Router.Dispatch]
-    Dispatch --> Middleware[core.Middleware]
+    Dispatch --> Invocation[core.Invocation]
+    Invocation --> Middleware[core.Middleware]
     Middleware --> Handler[Business Handler]
     Handler --> Reply[ctx.Reply]
     Reply --> Send[session.Send]
@@ -134,9 +139,9 @@ WebSocket currently treats one WebSocket message as one protocol packet.
 
 ## HTTP / HTTPS
 
-HTTP and HTTPS now have two explicit modes.
+HTTP and HTTPS keep protocol-native method + path routing.
 
-The native HTTP mode keeps method + path routing and is appropriate for REST-style APIs:
+This is appropriate for REST-style APIs:
 
 ```mermaid
 flowchart TD
@@ -147,34 +152,14 @@ flowchart TD
     Path -->|no| NotFound[404 not found]
     Path -->|yes| Method{method exists}
     Method -->|no| MethodNotAllowed[405 method not allowed]
-    Method -->|yes| Middleware[httpx.Middleware]
+    Method -->|yes| Invocation[core.Invocation]
+    Invocation --> Middleware[core.Middleware]
     Middleware --> Handler[HTTP Handler]
     Handler --> Response[ctx.Text / ctx.JSON / ctx.Bytes / ctx.Stream]
     Handler -->|error| ServerError[500 err.Error]
     Response --> Client
 ```
 
-The message HTTP mode maps method + path routes to `core.Message.ID`, then reuses the same `core.Router`, middleware and sync/async dispatch model as TCP:
-
-```mermaid
-flowchart TD
-    Client[HTTP Client] --> Listen[httpx.MessageEndpoint.ListenAndServe]
-    Listen --> NetHTTP[net/http Server]
-    NetHTTP --> Serve[Endpoint.serve]
-    Serve --> Route[method + path -> message id]
-    Route --> RequestBody[read request body]
-    RequestBody --> Message[core.Message]
-    Message --> Session[per-request HTTP session]
-    Session --> Context[core.NewContext]
-    Context --> Dispatch[core.Router.Dispatch]
-    Dispatch --> Middleware[core.Middleware]
-    Middleware --> Handler[Business Handler]
-    Handler --> Reply[ctx.Reply / session.Send]
-    Reply --> Response[HTTP status, headers, body]
-    Response --> Client
-```
-
-`HTTPMessage` and `HTTPSMessage` are the TCP-like entry points. They preserve HTTP protocol semantics at the edge, but business code runs against `core.Context`.
 
 ## SSE
 
@@ -182,14 +167,38 @@ flowchart TD
 flowchart TD
     Client[SSE Client] --> Listen[sse.Endpoint.ListenAndServe]
     Listen --> Serve[sse.Endpoint.serve]
-    Serve --> Context[sse.Context]
+    Serve --> Invocation[core.Invocation]
+    Invocation --> Middleware[core.Middleware]
+    Middleware --> Context[sse.Context]
     Context --> Handler[SSE Handler]
     Handler --> Send[ctx.Send event data]
     Send --> Stream[text/event-stream]
     Stream --> Client
 ```
 
-SSE is a one-way server push transport. It is intentionally not modeled as request/reply.
+SSE is a one-way server push transport. It is intentionally not modeled as request/reply. The stream setup can still enter unified `core.Middleware`, using operation keys such as `GET /events`.
+
+## gRPC
+
+gRPC keeps native service and method routing. KPro does not convert gRPC requests into `core.Message`; instead unary and stream RPCs enter the shared `core.Middleware` layer before the service handler runs.
+
+```mermaid
+flowchart TD
+    Client[gRPC Client] --> Listen[kprogrpc.Server.ListenAndServe]
+    Listen --> GRPCServer[google.golang.org/grpc.Server]
+    GRPCServer --> UnaryInterceptor[unary middleware interceptor]
+    GRPCServer --> StreamInterceptor[stream middleware interceptor]
+    UnaryInterceptor --> UnaryContext[core.Invocation with request payload]
+    StreamInterceptor --> StreamContext[core.Invocation with stream metadata]
+    UnaryContext --> ServiceHandler[gRPC unary handler]
+    StreamContext --> StreamHandler[gRPC stream handler]
+    ServiceHandler --> Response[gRPC response / status]
+    StreamHandler --> StreamResponse[gRPC stream messages / status]
+    Response --> Client
+    StreamResponse --> Client
+```
+
+The operation key is the full gRPC method, for example `/helloworld.v1.Greeter/SayHello`. Unary payload is the decoded request object. Stream payload is nil at stream setup; stream direction is exposed in metadata.
 
 ## Shutdown
 
@@ -202,9 +211,11 @@ flowchart TD
     Cancel --> WSShutdown[websocket.Shutdown]
     Cancel --> HTTPShutdown[httpx.Shutdown]
     Cancel --> SSEShutdown[sse.Shutdown]
+    Cancel --> GRPCShutdown[kprogrpc.Shutdown]
     TCPShutdown --> Done[wait goroutines]
     UDPShutdown --> Done
     WSShutdown --> Done
     HTTPShutdown --> Done
     SSEShutdown --> Done
+    GRPCShutdown --> Done
 ```
