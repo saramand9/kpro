@@ -6,12 +6,12 @@ package greeter
 import (
 	"context"
 
-	"github.com/saramand9/bignet/kpro/kprogrpc"
+	"github.com/saramand9/bignet/kpro/transport/grpcx"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 type service struct {
-	kprogrpc.UnimplementedGreeterServer
+	grpcx.UnimplementedGreeterServer
 }
 
 func (service) SayHello(_ context.Context, req *wrapperspb.StringValue) (*wrapperspb.StringValue, error) {

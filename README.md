@@ -24,8 +24,9 @@ WebSocket   implemented, supports RFC 6455 data-message fragmentation
 HTTP        implemented
 HTTPS       implemented through HTTP + TLS config
 HTTP/3      implemented through QUIC + TLS config
+gRPC        implemented through transport/grpcx service bindings
 SSE         implemented
-gRPC        implemented through kprogrpc and server.GRPC
+gRPC        implemented through transport/grpcx and server.GRPC
 ```
 
 There is also a legacy TCP validation baseline in `kpro/legacy`. The universal server in `server`, `core`, `protocol` and `transport` is the framework direction.
@@ -44,7 +45,7 @@ flowchart TD
     App --> HTTP[transport/httpx]
     App --> HTTP3[transport/http3]
     App --> SSE[transport/sse]
-    App --> GRPC[kprogrpc]
+    App --> GRPC[transport/grpcx]
 
     TCP --> Protocol[protocol.KProV1]
     KCP --> Protocol
@@ -92,9 +93,10 @@ transport/
   websocket/               WebSocket transport
   httpx/                   HTTP/HTTPS path-routed transport
   http3/                   HTTP/3 path-routed transport over QUIC
+  grpcx/                   gRPC server wrapper and generated-style bindings
   sse/                     Server-Sent Events transport
 
-kprogrpc/
+transport/grpcx/
   Server                   gRPC runner and service registrar
   Middleware bridge        unary/stream RPC -> core.Invocation
 
@@ -371,11 +373,12 @@ This path is useful for TCP load validation only. New framework code should use 
 - UDP and WebSocket have message boundaries, so they use `protocol.PacketProtocol`.
 - HTTP/HTTPS keep native method + path routing for REST-style APIs and do not convert requests into `core.Message`.
 - HTTP/3 uses the same path-routing handler model over QUIC/UDP and requires TLS certificates.
+- gRPC uses standard `grpc.ServiceRegistrar` service bindings rather than `core.Message` routing.
 - QUIC uses bidirectional QUIC streams as `core.Session` instances and runs KPro messages directly over them.
 - `server.Server.Use(...)` installs unified `core.Middleware` for TCP, UDP, WebSocket, HTTP, HTTPS, SSE and gRPC endpoints mounted before or after the call.
 - `core.Middleware` runs on `core.Invocation`; TCP, UDP and WebSocket build the invocation at real handler execution time after Router scheduling.
 - SSE is one-way server push and has its own `sse.Context`; the stream setup can reuse unified `core.Middleware`.
-- gRPC uses native gRPC service and method routing. Unary and stream RPCs reuse unified `core.Middleware` through `server.GRPC` / `kprogrpc.Server.Use`; they are not converted into `core.Message`.
+- gRPC uses native gRPC service and method routing. Unary and stream RPCs reuse unified `core.Middleware` through `server.GRPC` / `grpcx.Server.Use`; they are not converted into `core.Message`.
 - The framework avoids exposing a Netty-style pipeline API. The public model is `Protocol + Middleware + Router + Handler`.
 - More detailed call-flow diagrams are in [docs/call-flow.md](docs/call-flow.md).
 - TCP internal flow guide is in [docs/tcp-internal-flow.md](docs/tcp-internal-flow.md).

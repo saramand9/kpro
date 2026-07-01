@@ -1,7 +1,7 @@
-// File: kprogrpc/server_stream_invocation_test.go
-// Purpose: Implements or tests the gRPC integration for KPro.
+// File: transport/grpcx/server_stream_invocation_test.go
+// Purpose: Tests stream gRPC invocation middleware.
 
-package kprogrpc
+package grpcx
 
 import (
 	"context"

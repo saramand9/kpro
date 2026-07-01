@@ -9,8 +9,8 @@ import (
 	"sync"
 
 	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/kprogrpc"
 	"github.com/saramand9/bignet/kpro/transport"
+	"github.com/saramand9/bignet/kpro/transport/grpcx"
 	http3x "github.com/saramand9/bignet/kpro/transport/http3"
 	"github.com/saramand9/bignet/kpro/transport/httpx"
 	"github.com/saramand9/bignet/kpro/transport/kcp"
@@ -41,7 +41,7 @@ var (
 	_ MiddlewareTarget = (*Endpoint)(nil)
 	_ MiddlewareTarget = (*httpx.Endpoint)(nil)
 	_ MiddlewareTarget = (*sse.Endpoint)(nil)
-	_ MiddlewareTarget = (*kprogrpc.Server)(nil)
+	_ MiddlewareTarget = (*grpcx.Server)(nil)
 )
 
 // Config controls the high-level server and the router used by message transports.
@@ -208,8 +208,8 @@ func (s *Server) HTTPS(addr string, config httpx.Config) *httpx.Endpoint {
 }
 
 // GRPC mounts a gRPC server at addr.
-func (s *Server) GRPC(addr string, options ...kprogrpc.Option) *kprogrpc.Server {
-	endpoint := kprogrpc.NewServer(addr, options...)
+func (s *Server) GRPC(addr string, options ...grpcx.Option) *grpcx.Server {
+	endpoint := grpcx.NewServer(addr, options...)
 	s.MountRunner(endpoint)
 	return endpoint
 }

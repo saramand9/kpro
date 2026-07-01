@@ -10,6 +10,7 @@ kpro/transport/tcp     TCP transport
 kpro/transport/kcp     KCP reliable UDP stream transport
 kpro/transport/quic    QUIC stream transport
 kpro/transport/udp     UDP transport
+kpro/transport/grpcx   gRPC server wrapper and service bindings
 kpro/transport/http3   HTTP/3 transport over QUIC
 kpro/middleware        reusable middleware
 kpro/server            universal server assembly layer

@@ -1,7 +1,7 @@
-// File: kprogrpc/helloworld.go
-// Purpose: Implements or tests the gRPC integration for KPro.
+// File: transport/grpcx/helloworld.go
+// Purpose: Provides the generated-style example Greeter binding.
 
-package kprogrpc
+package grpcx
 
 import (
 	"context"
