@@ -6,7 +6,7 @@ The design goal is:
 
 ```text
 business code handles protocol-native handlers or Message / Context
-transport code handles TCP, KCP, QUIC, UDP, WebSocket, HTTP, HTTPS, HTTP/3, SSE, gRPC
+transport code handles TCP, KCP, QUIC, UDP, WebSocket, HTTP, HTTPS, HTTP/2, HTTP/3, SSE, gRPC
 protocol code translates bytes, datagrams or frames into Message when applicable
 server code assembles transports, middleware and routers
 ```
@@ -23,8 +23,8 @@ UDP         implemented
 WebSocket   implemented, supports RFC 6455 data-message fragmentation
 HTTP        implemented
 HTTPS       implemented through HTTP + TLS config
+HTTP/2      implemented through HTTPS native Go negotiation
 HTTP/3      implemented through QUIC + TLS config
-gRPC        implemented through transport/grpcx service bindings
 SSE         implemented
 gRPC        implemented through transport/grpcx and server.GRPC
 ```
@@ -340,6 +340,8 @@ examples/udp/server          examples/udp/client
 examples/websocket/server    examples/websocket/client
 examples/http/server         examples/http/client
 examples/https/server        examples/https/client
+examples/http2/server        examples/http2/client
+examples/http3/server        examples/http3/client
 examples/sse/server          examples/sse/client
 examples/grpc/server         examples/grpc/client
 ```
@@ -373,7 +375,6 @@ This path is useful for TCP load validation only. New framework code should use 
 - UDP and WebSocket have message boundaries, so they use `protocol.PacketProtocol`.
 - HTTP/HTTPS keep native method + path routing for REST-style APIs and do not convert requests into `core.Message`.
 - HTTP/3 uses the same path-routing handler model over QUIC/UDP and requires TLS certificates.
-- gRPC uses standard `grpc.ServiceRegistrar` service bindings rather than `core.Message` routing.
 - QUIC uses bidirectional QUIC streams as `core.Session` instances and runs KPro messages directly over them.
 - `server.Server.Use(...)` installs unified `core.Middleware` for TCP, UDP, WebSocket, HTTP, HTTPS, SSE and gRPC endpoints mounted before or after the call.
 - `core.Middleware` runs on `core.Invocation`; TCP, UDP and WebSocket build the invocation at real handler execution time after Router scheduling.
