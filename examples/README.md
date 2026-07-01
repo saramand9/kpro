@@ -48,6 +48,13 @@ go run .\examples\sse\server -addr :8081 -path /events
 go run .\examples\sse\client -url http://127.0.0.1:8081/events -events 3
 ```
 
+## gRPC
+
+```powershell
+go run .\examples\grpc\server -addr :9090
+go run .\examples\grpc\client -addr 127.0.0.1:9090 -name "hello grpc"
+```
+
 ## Modular Route Examples
 
 These demos keep startup code, route assembly, and feature modules separate. Each protocol has its own standalone modular server.
@@ -95,6 +102,13 @@ go run .\examples\websocket\client -url ws://127.0.0.1:8091/ws -text "hello modu
 ```powershell
 go run .\examples\sse-modular\server -addr :8081 -path /events
 go run .\examples\sse\client -url http://127.0.0.1:8081/events -events 3
+```
+
+### gRPC Modular
+
+```powershell
+go run .\examples\grpc-modular\server -addr :9090
+go run .\examples\grpc\client -addr 127.0.0.1:9090 -name "hello modular grpc"
 ```
 
 ### Multi-Protocol Modular

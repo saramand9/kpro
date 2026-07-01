@@ -2,8 +2,6 @@ package core
 
 type Handler func(Context) error
 
-type Middleware func(Handler) Handler
-
 // Context carries the current session, message, and handler-local values.
 // It is not safe for concurrent mutation. If a handler starts background work,
 // call CloneContext first when the goroutine must retain an isolated copy of

@@ -6,6 +6,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/saramand9/bignet/kpro/core"
 )
 
 type Conn struct {
@@ -32,6 +34,17 @@ func (c *Conn) RemoteIP() string {
 	return c.remoteIP
 }
 
+func (c *Conn) Transport() core.Transport {
+	return core.TransportTCP
+}
+
+func (c *Conn) RemoteAddr() net.Addr {
+	if c.raw == nil {
+		return nil
+	}
+	return c.raw.RemoteAddr()
+}
+
 func (c *Conn) LastSeen() time.Time {
 	return time.Unix(0, atomic.LoadInt64(&c.lastSeen))
 }
@@ -56,14 +69,20 @@ func (c *Conn) Send(msg Message) error {
 	}
 }
 
-func (c *Conn) Close() {
+func (c *Conn) Close() error {
+	var err error
 	c.closeOnce.Do(func() {
 		atomic.StoreInt32(&c.closed, 1)
 		close(c.done)
-		_ = c.raw.Close()
+		err = c.raw.Close()
 		c.server.conns.Remove(c)
 		c.server.metrics.decActive()
 	})
+	return err
+}
+
+func (c *Conn) Done() <-chan struct{} {
+	return c.done
 }
 
 func (c *Conn) start() {

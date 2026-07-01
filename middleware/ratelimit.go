@@ -19,8 +19,8 @@ func RateLimit(config RateLimitConfig) core.Middleware {
 	config = normalizeRateLimitConfig(config)
 	limiter := rate.NewLimiter(config.Rate, config.Burst)
 
-	return func(next core.Handler) core.Handler {
-		return func(ctx core.Context) error {
+	return func(next core.InvocationHandler) core.InvocationHandler {
+		return func(ctx core.Invocation) error {
 			if !limiter.Allow() {
 				return ErrRateLimited
 			}
@@ -39,8 +39,8 @@ func ConnRateLimit(config RateLimitConfig) core.Middleware {
 	var mu sync.Mutex
 	limiters := make(map[uint64]*limiterEntry)
 
-	limiterFor := func(session core.Session) *rate.Limiter {
-		id := session.ID()
+	limiterFor := func(ctx core.Invocation) *rate.Limiter {
+		id := ctx.ConnID()
 
 		mu.Lock()
 		entry := limiters[id]
@@ -50,18 +50,16 @@ func ConnRateLimit(config RateLimitConfig) core.Middleware {
 			}
 			limiters[id] = entry
 
-			if doneSession, ok := session.(interface{ Done() <-chan struct{} }); ok {
-				done := doneSession.Done()
-				if done != nil {
-					go func() {
-						<-done
-						mu.Lock()
-						if limiters[id] == entry {
-							delete(limiters, id)
-						}
-						mu.Unlock()
-					}()
-				}
+			done := invocationDone(ctx)
+			if done != nil {
+				go func() {
+					<-done
+					mu.Lock()
+					if limiters[id] == entry {
+						delete(limiters, id)
+					}
+					mu.Unlock()
+				}()
 			}
 		}
 		limiter := entry.limiter
@@ -70,9 +68,9 @@ func ConnRateLimit(config RateLimitConfig) core.Middleware {
 		return limiter
 	}
 
-	return func(next core.Handler) core.Handler {
-		return func(ctx core.Context) error {
-			if !limiterFor(ctx.Session()).Allow() {
+	return func(next core.InvocationHandler) core.InvocationHandler {
+		return func(ctx core.Invocation) error {
+			if !limiterFor(ctx).Allow() {
 				return ErrRateLimited
 			}
 			return next(ctx)
@@ -91,4 +89,16 @@ func normalizeRateLimitConfig(config RateLimitConfig) RateLimitConfig {
 		}
 	}
 	return config
+}
+
+func invocationDone(ctx core.Invocation) <-chan struct{} {
+	if doneCtx, ok := ctx.(interface{ Done() <-chan struct{} }); ok {
+		if done := doneCtx.Done(); done != nil {
+			return done
+		}
+	}
+	if ctx.Context() == nil {
+		return nil
+	}
+	return ctx.Context().Done()
 }

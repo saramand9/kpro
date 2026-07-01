@@ -11,6 +11,7 @@ const (
 	TransportHTTP      Transport = "http"
 	TransportHTTPS     Transport = "https"
 	TransportSSE       Transport = "sse"
+	TransportGRPC      Transport = "grpc"
 )
 
 // Session is the common handle used by business code.

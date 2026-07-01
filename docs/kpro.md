@@ -55,20 +55,19 @@ Built-in message ids:
 ```go
 s := kpro.NewServer(kpro.DefaultConfig())
 
-s.Use(func(next kpro.Handler) kpro.Handler {
-	return func(ctx *kpro.Context) error {
+s.Use(func(next kpro.InvocationHandler) kpro.InvocationHandler {
+	return func(inv kpro.Invocation) error {
 		// auth, rate limit, trace, etc.
-		return next(ctx)
+		return next(inv)
 	}
 })
 
-s.Handle(kpro.MsgEcho, func(ctx *kpro.Context) error {
-	return ctx.Reply(kpro.MsgEcho, ctx.Msg.Data)
+s.Handle(kpro.MsgEcho, func(ctx kpro.Context) error {
+	return ctx.Reply(kpro.MsgEcho, ctx.Message().Data)
 })
 ```
 
-`Use` should be registered before `Handle`; handlers are wrapped when routes
-are added.
+`Use` middlewares are snapshotted when each message is dispatched, so new middleware applies to later requests without re-registering handlers.
 
 ## Package Direction
 

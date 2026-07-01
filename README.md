@@ -5,9 +5,9 @@ KPro is a Go network framework experiment for building a "universal server" that
 The design goal is:
 
 ```text
-business code handles Message / Context
-transport code handles TCP, UDP, WebSocket, HTTP, HTTPS, SSE
-protocol code translates bytes, datagrams or frames into Message
+business code handles protocol-native handlers or Message / Context
+transport code handles TCP, UDP, WebSocket, HTTP, HTTPS, SSE, gRPC
+protocol code translates bytes, datagrams or frames into Message when applicable
 server code assembles transports, middleware and routers
 ```
 
@@ -22,6 +22,7 @@ WebSocket   implemented, supports RFC 6455 data-message fragmentation
 HTTP        implemented
 HTTPS       implemented through HTTP + TLS config
 SSE         implemented
+gRPC        implemented through kprogrpc and server.GRPC
 ```
 
 There is also a legacy production TCP baseline in the root `kpro` package. The universal server is built in subpackages such as `server`, `core`, `protocol` and `transport`.
@@ -37,20 +38,21 @@ flowchart TD
     App --> WS[transport/websocket]
     App --> HTTP[transport/httpx]
     App --> SSE[transport/sse]
+    App --> GRPC[kprogrpc]
 
     TCP --> Protocol[protocol.KProV1]
     UDP --> Protocol
     WS --> Protocol
 
     Protocol --> Message[core.Message]
-    Message --> Middleware[core.Middleware]
-    Middleware --> Router[core.Router]
-    Router --> Handler[Business Handler]
+    Message --> Router[core.Router]
+    Router --> Invocation[core.Invocation]
+    Invocation --> Middleware[core.Middleware]
+    Middleware --> Handler[Business Handler]
 
     HTTP --> HTTPRouter[method + path router]
-    HTTP --> HTTPMessage[optional method + path -> core.Message]
-    HTTPMessage --> Message
     SSE --> SSEHandler[SSE stream handler]
+    GRPC --> GRPCService[gRPC service handlers]
 ```
 
 ```text
@@ -64,6 +66,8 @@ core/
   Context                  handler context
   Session                  transport-neutral send/close handle
   Router                   msgID router and middleware chain
+  Invocation               unified middleware context
+  Middleware               shared invocation middleware
 
 protocol/
   StreamProtocol           stream decoder/encoder, used by TCP
@@ -75,12 +79,16 @@ transport/
   tcp/                     TCP stream transport
   udp/                     UDP packet transport
   websocket/               WebSocket transport
-  httpx/                   HTTP/HTTPS path-routed transport and optional message bridge
+  httpx/                   HTTP/HTTPS path-routed transport
   sse/                     Server-Sent Events transport
 
+kprogrpc/
+  Server                   gRPC runner and service registrar
+  Middleware bridge        unary/stream RPC -> core.Invocation
+
 middleware/
-  Recover                  panic recovery
-  MaxPayload               payload size guard
+  Recover / RateLimit / MaxPayload
+                           unified invocation middleware
 
 server/
   Server                   universal assembly layer
@@ -111,27 +119,23 @@ sequenceDiagram
 TCP / UDP / WebSocket
   -> transport reads bytes, datagram or WebSocket message
   -> protocol decodes core.Message
-  -> endpoint middleware
   -> core.Router dispatches by Message.ID
+  -> queue / scheduling
+  -> core.Invocation
+  -> core.Middleware
   -> business handler
   -> ctx.Reply / session.Send
   -> protocol encodes response
   -> transport writes response
 ```
 
-HTTP and HTTPS have two explicit modes:
+HTTP and HTTPS keep protocol-native method + path routing:
 
 ```mermaid
 flowchart LR
     HTTPClient[HTTP Client] --> HTTPRouter[method + path router]
     HTTPRouter --> HTTPHandler[httpx.Context handler]
     HTTPHandler --> HTTPResponse[Text / JSON response]
-
-    HTTPClient --> HTTPMessage[HTTPMessage route]
-    HTTPMessage --> CoreMessage[core.Message]
-    CoreMessage --> CoreRouter[core.Router]
-    CoreRouter --> CoreHandler[core.Context handler]
-    CoreHandler --> MessageResponse[ctx.Reply HTTP response]
 
     SSEClient[SSE Client] --> SSEEndpoint[SSE endpoint]
     SSEEndpoint --> SSEContext[sse.Context]
@@ -141,15 +145,14 @@ flowchart LR
 ```text
 HTTP / HTTPS
   -> path + method router
+  -> core.Invocation
+  -> core.Middleware
   -> httpx.Context
-
-HTTPMessage / HTTPSMessage
-  -> path + method router maps to Message.ID
-  -> core.Router dispatches by Message.ID
-  -> core.Context / ctx.Reply
 
 SSE
   -> HTTP streaming endpoint
+  -> core.Invocation
+  -> core.Middleware at stream setup
   -> sse.Context.Send(event, data)
 ```
 
@@ -200,6 +203,7 @@ import (
 
 func main() {
 	app := server.New(server.Config{Name: "gateway"})
+	app.Use(middleware.Recover())
 
 	app.TCP(":8088", tcp.Config{
 		Protocol: protocol.KProV1(),
@@ -230,9 +234,6 @@ func main() {
 			return ctx.JSON(200, map[string]interface{}{"echo": string(body)})
 		})
 
-	app.HTTPMessage(":8082").
-		Post("/message/echo", core.MsgEcho).
-		Handle(core.MsgEcho, echo)
 
 	app.SSE(":8081", "/events").
 		Handle(func(ctx *sse.Context) error {
@@ -290,6 +291,7 @@ examples/websocket/server    examples/websocket/client
 examples/http/server         examples/http/client
 examples/https/server        examples/https/client
 examples/sse/server          examples/sse/client
+examples/grpc/server         examples/grpc/client
 ```
 
 See [examples/README.md](examples/README.md) for startup commands.
@@ -319,8 +321,11 @@ This path is useful for TCP load validation. The universal server path is the fr
 
 - TCP is stream-oriented, so it uses `protocol.StreamProtocol`.
 - UDP and WebSocket have message boundaries, so they use `protocol.PacketProtocol`.
-- HTTP/HTTPS support native path routing for REST-style APIs and `HTTPMessage` / `HTTPSMessage` for TCP-like `core.Router` reuse.
-- SSE is one-way server push and has its own `sse.Context`.
+- HTTP/HTTPS keep native method + path routing for REST-style APIs and do not convert requests into `core.Message`.
+- `server.Server.Use(...)` installs unified `core.Middleware` for TCP, UDP, WebSocket, HTTP, HTTPS, SSE and gRPC endpoints mounted before or after the call.
+- `core.Middleware` runs on `core.Invocation`; TCP, UDP and WebSocket build the invocation at real handler execution time after Router scheduling.
+- SSE is one-way server push and has its own `sse.Context`; the stream setup can reuse unified `core.Middleware`.
+- gRPC uses native gRPC service and method routing. Unary and stream RPCs reuse unified `core.Middleware` through `server.GRPC` / `kprogrpc.Server.Use`; they are not converted into `core.Message`.
 - The framework avoids exposing a Netty-style pipeline API. The public model is `Protocol + Middleware + Router + Handler`.
 - More detailed call-flow diagrams are in [docs/call-flow.md](docs/call-flow.md).
 - TCP internal flow guide is in [docs/tcp-internal-flow.md](docs/tcp-internal-flow.md).

@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/saramand9/bignet/kpro/core"
 )
 
 func TestContextBytes(t *testing.T) {
@@ -107,10 +109,11 @@ func TestMiddlewareSnapshotRebuildsAfterUse(t *testing.T) {
 	endpoint.Get("/before", func(ctx *Context) error {
 		return ctx.Text(http.StatusOK, "before")
 	})
-	endpoint.Use(func(next Handler) Handler {
-		return func(ctx *Context) error {
+	endpoint.Use(func(next core.InvocationHandler) core.InvocationHandler {
+		return func(inv core.Invocation) error {
+			ctx := inv.Native().(*Context)
 			ctx.Header().Set("X-Middleware", "hit")
-			return next(ctx)
+			return next(inv)
 		}
 	})
 	endpoint.Get("/after", func(ctx *Context) error {

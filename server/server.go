@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/bignet/kpro/kprogrpc"
 	"github.com/saramand9/bignet/kpro/transport"
 	"github.com/saramand9/bignet/kpro/transport/httpx"
 	"github.com/saramand9/bignet/kpro/transport/sse"
@@ -24,8 +25,9 @@ type Config struct {
 type Server struct {
 	config Config
 
-	mu      sync.Mutex
-	runners []transport.Runner
+	mu          sync.Mutex
+	runners     []transport.Runner
+	middlewares []core.Middleware
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -49,18 +51,51 @@ func (s *Server) Mount(transport transport.Server) *Endpoint {
 		router:    core.NewRouter(s.config.Router),
 	}
 	s.mu.Lock()
+	middlewares := append([]core.Middleware(nil), s.middlewares...)
 	s.runners = append(s.runners, endpoint)
 	s.mu.Unlock()
+	endpoint.Use(middlewares...)
 	return endpoint
 }
 
 func (s *Server) MountRunner(runner transport.Runner) transport.Runner {
 	s.mu.Lock()
+	middlewares := append([]core.Middleware(nil), s.middlewares...)
 	s.runners = append(s.runners, runner)
 	s.mu.Unlock()
+	applyMiddlewares(runner, middlewares...)
 	return runner
 }
 
+func (s *Server) Use(middlewares ...core.Middleware) *Server {
+	if len(middlewares) == 0 {
+		return s
+	}
+	s.mu.Lock()
+	s.middlewares = append(s.middlewares, middlewares...)
+	runners := append([]transport.Runner(nil), s.runners...)
+	s.mu.Unlock()
+	for _, runner := range runners {
+		applyMiddlewares(runner, middlewares...)
+	}
+	return s
+}
+
+func applyMiddlewares(runner transport.Runner, middlewares ...core.Middleware) {
+	if len(middlewares) == 0 {
+		return
+	}
+	switch endpoint := runner.(type) {
+	case *Endpoint:
+		endpoint.Use(middlewares...)
+	case *httpx.Endpoint:
+		endpoint.Use(middlewares...)
+	case *sse.Endpoint:
+		endpoint.Use(middlewares...)
+	case *kprogrpc.Server:
+		endpoint.Use(middlewares...)
+	}
+}
 func (s *Server) TCP(addr string, config ...tcp.Config) *Endpoint {
 	cfg := tcp.Config{}
 	if len(config) > 0 {
@@ -100,17 +135,6 @@ func (s *Server) HTTP(addr string, config ...httpx.Config) *httpx.Endpoint {
 	return endpoint
 }
 
-func (s *Server) HTTPMessage(addr string, config ...httpx.Config) *httpx.MessageEndpoint {
-	cfg := httpx.Config{}
-	if len(config) > 0 {
-		cfg = config[0]
-	}
-	cfg.Addr = addr
-	endpoint := httpx.NewMessage(cfg, s.config.Router)
-	s.MountRunner(endpoint)
-	return endpoint
-}
-
 func (s *Server) HTTPS(addr string, config httpx.Config) *httpx.Endpoint {
 	config.Addr = addr
 	config.TLS = true
@@ -119,10 +143,8 @@ func (s *Server) HTTPS(addr string, config httpx.Config) *httpx.Endpoint {
 	return endpoint
 }
 
-func (s *Server) HTTPSMessage(addr string, config httpx.Config) *httpx.MessageEndpoint {
-	config.Addr = addr
-	config.TLS = true
-	endpoint := httpx.NewMessage(config, s.config.Router)
+func (s *Server) GRPC(addr string, options ...kprogrpc.Option) *kprogrpc.Server {
+	endpoint := kprogrpc.NewServer(addr, options...)
 	s.MountRunner(endpoint)
 	return endpoint
 }
@@ -228,7 +250,7 @@ func (e *Endpoint) Name() string {
 }
 
 func (e *Endpoint) ListenAndServe(ctx context.Context) error {
-	return e.transport.ListenAndServe(ctx, e.router.Dispatch)
+	return e.transport.ListenAndServe(ctx, e.dispatch)
 }
 
 func (e *Endpoint) Shutdown(ctx context.Context) error {
@@ -238,4 +260,8 @@ func (e *Endpoint) Shutdown(ctx context.Context) error {
 		return transportErr
 	}
 	return routerErr
+}
+
+func (e *Endpoint) dispatch(ctx core.Context) error {
+	return e.router.Dispatch(ctx)
 }
