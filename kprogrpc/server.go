@@ -70,12 +70,16 @@ func (s *Server) Name() string {
 }
 
 func (s *Server) Use(middlewares ...core.Middleware) *Server {
+	s.ApplyMiddleware(middlewares...)
+	return s
+}
+
+func (s *Server) ApplyMiddleware(middlewares ...core.Middleware) {
 	s.mu.Lock()
 	s.middlewares = append(s.middlewares, middlewares...)
 	snapshot := append([]core.Middleware(nil), s.middlewares...)
 	s.middlewareValue.Store(snapshot)
 	s.mu.Unlock()
-	return s
 }
 
 func (s *Server) Serve() error {

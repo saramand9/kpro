@@ -115,6 +115,22 @@ func TestServerUseAppliesToMountedMessageEndpoints(t *testing.T) {
 	waitForSignal(t, handlerSeen, "handler")
 }
 
+func TestServerUseAppliesToCustomMiddlewareRunner(t *testing.T) {
+	app := New()
+	runner := &customMiddlewareRunner{}
+
+	app.MountRunner(runner)
+	app.Use(func(next core.InvocationHandler) core.InvocationHandler {
+		return func(ctx core.Invocation) error {
+			return next(ctx)
+		}
+	})
+
+	if runner.middlewareCount != 1 {
+		t.Fatalf("middleware count = %d, want 1", runner.middlewareCount)
+	}
+}
+
 func dispatchTestEcho(t *testing.T, endpoint *Endpoint) {
 	t.Helper()
 	session := &fakeSession{id: 10, done: make(chan struct{})}
@@ -187,4 +203,24 @@ func (s *fakeSession) Close() error {
 
 func (s *fakeSession) Done() <-chan struct{} {
 	return s.done
+}
+
+type customMiddlewareRunner struct {
+	middlewareCount int
+}
+
+func (r *customMiddlewareRunner) Name() string {
+	return "custom"
+}
+
+func (r *customMiddlewareRunner) ListenAndServe(context.Context) error {
+	return nil
+}
+
+func (r *customMiddlewareRunner) Shutdown(context.Context) error {
+	return nil
+}
+
+func (r *customMiddlewareRunner) ApplyMiddleware(middlewares ...core.Middleware) {
+	r.middlewareCount += len(middlewares)
 }

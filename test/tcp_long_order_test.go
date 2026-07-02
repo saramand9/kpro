@@ -21,6 +21,9 @@ import (
 
 const msgTCPOrderStress uint32 = 910
 
+func TestTCPMultiClientRandomOrderCRCDefault(t *testing.T) {
+	runTCPMultiClientRandomOrderStrict(t, 10, 1000, 30*time.Second)
+}
 func TestTCPMultiClientRandomOrderStrict100K(t *testing.T) {
 	if os.Getenv("KPRO_TCP_LONG_ORDER_TEST") != "1" {
 		t.Skip("set KPRO_TCP_LONG_ORDER_TEST=1 to run the 10-client x 100000-message TCP order stress test")
@@ -31,7 +34,11 @@ func TestTCPMultiClientRandomOrderStrict100K(t *testing.T) {
 	if clients <= 0 || messagesPerClient <= 0 {
 		t.Fatalf("invalid stress dimensions: clients=%d messages=%d", clients, messagesPerClient)
 	}
+	runTCPMultiClientRandomOrderStrict(t, clients, messagesPerClient, 10*time.Minute)
+}
 
+func runTCPMultiClientRandomOrderStrict(t *testing.T, clients, messagesPerClient int, timeout time.Duration) {
+	t.Helper()
 	logs := newTCPOrderStressLogs(clients, messagesPerClient)
 	addr := "127.0.0.1:" + freeTCPPort(t)
 	app := server.New(server.Config{
@@ -82,7 +89,7 @@ func TestTCPMultiClientRandomOrderStrict100K(t *testing.T) {
 		}
 	}()
 
-	deadline := time.Now().Add(10 * time.Minute)
+	deadline := time.Now().Add(timeout)
 	var wg sync.WaitGroup
 	clientErrs := make(chan error, clients)
 	started := time.Now()

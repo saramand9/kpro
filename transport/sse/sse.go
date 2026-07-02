@@ -49,10 +49,14 @@ func (e *Endpoint) Name() string {
 }
 
 func (e *Endpoint) Use(middlewares ...core.Middleware) *Endpoint {
+	e.ApplyMiddleware(middlewares...)
+	return e
+}
+
+func (e *Endpoint) ApplyMiddleware(middlewares ...core.Middleware) {
 	e.mu.Lock()
 	e.middlewares = append(e.middlewares, middlewares...)
 	e.mu.Unlock()
-	return e
 }
 
 func (e *Endpoint) Handle(h Handler) *Endpoint {

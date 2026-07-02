@@ -1,4 +1,4 @@
-package kpro
+package legacy
 
 import (
 	"io"

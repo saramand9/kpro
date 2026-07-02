@@ -20,9 +20,15 @@ func TestEndpointUseWrapsNativeHTTPRoute(t *testing.T) {
 			if ctx.Transport() != core.TransportHTTP {
 				t.Fatalf("transport = %s", ctx.Transport())
 			}
-			payload, ok := ctx.Payload().([]byte)
-			if !ok || string(payload) != "hello" {
-				t.Fatalf("payload = %T %q", ctx.Payload(), ctx.Payload())
+			payload, ok := ctx.Payload().(*BodyPayload)
+			if !ok {
+				t.Fatalf("payload = %T, want *httpx.BodyPayload", ctx.Payload())
+			}
+			if payload.ctx.bodyRead {
+				t.Fatal("middleware should not eagerly read HTTP body")
+			}
+			if size, ok := payload.PayloadSize(); !ok || size != len("hello") {
+				t.Fatalf("payload size = %d/%v, want %d/true", size, ok, len("hello"))
 			}
 			if got := ctx.Meta()["path"]; got != "/call" {
 				t.Fatalf("path meta = %v", got)
