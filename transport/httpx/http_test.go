@@ -89,6 +89,20 @@ func TestContextCopyBodyFastContentTypeSkipsHeaderMap(t *testing.T) {
 	}
 }
 
+func TestContextBodyRejectsOversizedRequest(t *testing.T) {
+	endpoint := New(Config{MaxBodyBytes: 4})
+	endpoint.Post("/echo", func(ctx *Context) error {
+		_, err := ctx.Body()
+		return err
+	})
+
+	resp := executeTestRequest(endpoint, http.MethodPost, "/echo", "hello")
+
+	if resp.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d; body=%q", resp.Code, http.StatusRequestEntityTooLarge, resp.Body.String())
+	}
+}
+
 func TestContextContentTypeKeepsExistingHeaderMap(t *testing.T) {
 	endpoint := New(Config{})
 	endpoint.Get("/text", func(ctx *Context) error {

@@ -77,6 +77,7 @@ type Router struct {
 
 	asyncQueue     chan dispatchTask
 	asyncStartOnce sync.Once
+	asyncMu        sync.Mutex
 
 	sessionsMu sync.Mutex
 	sessions   map[uint64]*sessionExecutor
@@ -157,6 +158,9 @@ func (r *Router) Dispatch(ctx Context) error {
 func (r *Router) Close() {
 	r.closeOnce.Do(func() {
 		close(r.done)
+		r.asyncMu.Lock()
+		close(r.asyncQueue)
+		r.asyncMu.Unlock()
 
 		r.sessionsMu.Lock()
 		sessions := make([]*sessionExecutor, 0, len(r.sessions))
@@ -212,13 +216,18 @@ func (r *Router) submitAsync(task dispatchTask) error {
 		_ = task.ctx.Error(err.Error())
 		return err
 	}
+	r.asyncMu.Lock()
+	defer r.asyncMu.Unlock()
 	select {
-	case r.asyncQueue <- task:
-		return nil
 	case <-r.done:
 		task.session.release()
 		_ = task.ctx.Error(ErrRouterClosed.Error())
 		return ErrRouterClosed
+	default:
+	}
+	select {
+	case r.asyncQueue <- task:
+		return nil
 	default:
 		task.session.release()
 		_ = task.ctx.Error(ErrDispatchQueueFull.Error())
@@ -237,13 +246,8 @@ func (r *Router) startAsyncWorkers() {
 
 func (r *Router) asyncWorker() {
 	defer r.wg.Done()
-	for {
-		select {
-		case task := <-r.asyncQueue:
-			r.execute(task)
-		case <-r.done:
-			return
-		}
+	for task := range r.asyncQueue {
+		r.execute(task)
 	}
 }
 

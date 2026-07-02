@@ -10,6 +10,7 @@ import (
 
 	"github.com/saramand9/bignet/kpro/core"
 	"github.com/saramand9/bignet/kpro/protocol"
+	"github.com/saramand9/bignet/kpro/transport/internal/streamutil"
 	kcpgo "github.com/xtaci/kcp-go"
 )
 
@@ -214,7 +215,7 @@ func (s *session) writeLoop() {
 					return
 				}
 			}
-			if err := writeFull(s.raw, data); err != nil {
+			if err := streamutil.WriteFull(s.raw, data); err != nil {
 				_ = s.Close()
 				return
 			}
@@ -275,15 +276,4 @@ func applySessionConfig(session *kcpgo.UDPSession, config Config) {
 	session.SetNoDelay(config.NoDelay, config.Interval, config.Resend, config.NoCongestion)
 	session.SetWindowSize(config.SendWindow, config.ReceiveWindow)
 	_ = session.SetMtu(config.MTU)
-}
-
-func writeFull(w io.Writer, data []byte) error {
-	for len(data) > 0 {
-		n, err := w.Write(data)
-		if err != nil {
-			return err
-		}
-		data = data[n:]
-	}
-	return nil
 }
