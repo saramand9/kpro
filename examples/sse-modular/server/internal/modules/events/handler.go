@@ -1,3 +1,6 @@
+// File: examples/sse-modular/server/internal/modules/events/handler.go
+// Purpose: Provides runnable KPro example code.
+
 package events
 
 import (

@@ -1,3 +1,6 @@
+// File: example/tcp/server/main.go
+// Purpose: Provides runnable KPro example code.
+
 package main
 
 import (

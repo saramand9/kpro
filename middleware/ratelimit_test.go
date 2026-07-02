@@ -1,3 +1,6 @@
+// File: middleware/ratelimit_test.go
+// Purpose: Defines or tests reusable KPro invocation middleware.
+
 package middleware
 
 import (

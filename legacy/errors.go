@@ -1,3 +1,6 @@
+// File: legacy/errors.go
+// Purpose: Implements or tests the legacy TCP validation server.
+
 package legacy
 
 import (

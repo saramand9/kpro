@@ -1,3 +1,6 @@
+// File: test/tcp_long_order_test.go
+// Purpose: Exercises KPro protocol and transport behavior through integration tests.
+
 package test
 
 import (

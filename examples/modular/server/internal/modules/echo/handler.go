@@ -1,3 +1,6 @@
+// File: examples/modular/server/internal/modules/echo/handler.go
+// Purpose: Provides runnable KPro example code.
+
 package echo
 
 import (

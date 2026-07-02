@@ -1,3 +1,6 @@
+// File: cmd/kpro-server/main.go
+// Purpose: Provides a command-line entry point for KPro tooling or examples.
+
 package main
 
 import (

@@ -1,3 +1,6 @@
+// File: benchmark/protocol_benchmark_test.go
+// Purpose: Benchmarks KPro transports and comparison baselines.
+
 package benchmark
 
 import (

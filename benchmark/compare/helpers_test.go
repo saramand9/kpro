@@ -1,3 +1,6 @@
+// File: benchmark/compare/helpers_test.go
+// Purpose: Benchmarks KPro transports and comparison baselines.
+
 package compare
 
 import (

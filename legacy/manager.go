@@ -1,3 +1,6 @@
+// File: legacy/manager.go
+// Purpose: Implements or tests the legacy TCP validation server.
+
 package legacy
 
 import (
@@ -13,12 +16,14 @@ type connShard struct {
 	conns map[uint64]*Conn
 }
 
+// ConnManager stores active legacy TCP connections in shards.
 type ConnManager struct {
 	shards [connShardCount]*connShard
 	ipMu   sync.Mutex
 	ipConn map[string]int
 }
 
+// NewConnManager creates an empty connection manager.
 func NewConnManager() *ConnManager {
 	m := &ConnManager{ipConn: make(map[string]int)}
 	for i := range m.shards {
@@ -27,6 +32,7 @@ func NewConnManager() *ConnManager {
 	return m
 }
 
+// Add records a connection and updates its per-IP count.
 func (m *ConnManager) Add(c *Conn) {
 	s := m.shard(c.id)
 	s.mu.Lock()
@@ -38,6 +44,7 @@ func (m *ConnManager) Add(c *Conn) {
 	m.ipMu.Unlock()
 }
 
+// Remove deletes a connection and decrements its per-IP count.
 func (m *ConnManager) Remove(c *Conn) {
 	s := m.shard(c.id)
 	s.mu.Lock()
@@ -53,12 +60,14 @@ func (m *ConnManager) Remove(c *Conn) {
 	m.ipMu.Unlock()
 }
 
+// CountByIP returns the active connection count for an IP.
 func (m *ConnManager) CountByIP(ip string) int {
 	m.ipMu.Lock()
 	defer m.ipMu.Unlock()
 	return m.ipConn[ip]
 }
 
+// Snapshot returns a copy of active connection pointers.
 func (m *ConnManager) Snapshot() []*Conn {
 	out := make([]*Conn, 0)
 	for _, s := range m.shards {
@@ -71,6 +80,7 @@ func (m *ConnManager) Snapshot() []*Conn {
 	return out
 }
 
+// CloseAll closes every active connection.
 func (m *ConnManager) CloseAll() {
 	for _, c := range m.Snapshot() {
 		c.Close()

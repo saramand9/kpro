@@ -1,3 +1,6 @@
+// File: transport/websocket/server.go
+// Purpose: Implements the WebSocket transport adapter for KPro message sessions.
+
 package websocket
 
 import (
@@ -43,16 +46,25 @@ var (
 	ErrFragmentedControlFrame = errors.New("websocket control frame must not be fragmented")
 )
 
+// Config controls WebSocket listener, path, protocol, queue, and timeout settings.
 type Config struct {
-	Addr          string
-	Path          string
-	Protocol      protocol.PacketProtocol
-	MaxMessage    int
+	// Addr is the HTTP listen address used for WebSocket upgrades.
+	Addr string
+	// Path is the WebSocket upgrade route path.
+	Path string
+	// Protocol decodes and encodes binary WebSocket payloads. Nil uses protocol.KProV1().
+	Protocol protocol.PacketProtocol
+	// MaxMessage limits reassembled WebSocket message size.
+	MaxMessage int
+	// SendQueueSize is the per-session outbound frame queue length.
 	SendQueueSize int
-	ReadTimeout   time.Duration
-	WriteTimeout  time.Duration
+	// ReadTimeout is applied before each WebSocket frame read.
+	ReadTimeout time.Duration
+	// WriteTimeout is applied before each WebSocket frame write.
+	WriteTimeout time.Duration
 }
 
+// Server upgrades HTTP requests to WebSocket sessions and dispatches KPro messages.
 type Server struct {
 	config Config
 	server *http.Server
@@ -61,18 +73,22 @@ type Server struct {
 	sessions sync.Map
 }
 
+// New creates a WebSocket transport with normalized defaults.
 func New(config Config) *Server {
 	return &Server{config: normalizeConfig(config)}
 }
 
+// NewServer is an alias for New.
 func NewServer(config Config) *Server {
 	return New(config)
 }
 
+// Name returns the transport name.
 func (s *Server) Name() string {
 	return "websocket"
 }
 
+// ListenAndServe starts the WebSocket HTTP server until ctx is cancelled or serving fails.
 func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc(s.config.Path, func(w http.ResponseWriter, r *http.Request) {
@@ -92,6 +108,7 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 	return err
 }
 
+// Shutdown closes active WebSocket sessions and stops the HTTP server.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.sessions.Range(func(_, value interface{}) bool {
 		if session, ok := value.(*session); ok {

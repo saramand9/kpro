@@ -1,5 +1,9 @@
+// File: core/context.go
+// Purpose: Defines shared KPro primitives used by transports, routers, and middleware.
+
 package core
 
+// Handler processes one decoded KPro message context.
 type Handler func(Context) error
 
 // Context carries the current session, message, and handler-local values.
@@ -7,23 +11,34 @@ type Handler func(Context) error
 // call CloneContext first when the goroutine must retain an isolated copy of
 // mutable message data or context values.
 type Context interface {
+	// Session returns the live transport session used for replies and errors.
 	Session() Session
+	// Message returns the decoded business message for the current dispatch.
 	Message() Message
+	// Transport returns the protocol family of the underlying session.
 	Transport() Transport
+	// ConnID returns the stable identifier of the underlying session.
 	ConnID() uint64
+	// RemoteAddr returns the peer address string, or an empty string if unavailable.
 	RemoteAddr() string
+	// Reply sends a response with the current message sequence number.
 	Reply(msgID uint32, data []byte) error
+	// Error sends a MsgError response with the current message sequence number.
 	Error(text string) error
+	// Set stores a handler-local value on the context.
 	Set(key string, value interface{})
+	// Get retrieves a handler-local value from the context.
 	Get(key string) (interface{}, bool)
 }
 
+// BaseContext is the default Context implementation used by message transports.
 type BaseContext struct {
 	session Session
 	message Message
 	values  map[string]interface{}
 }
 
+// NewContext creates a message context for the supplied session and message.
 func NewContext(session Session, message Message) *BaseContext {
 	return &BaseContext{
 		session: session,
@@ -81,22 +96,27 @@ func cloneMessage(msg Message) Message {
 	return cloned
 }
 
+// Session returns the transport session that delivered the message.
 func (c *BaseContext) Session() Session {
 	return c.session
 }
 
+// Message returns the decoded business message.
 func (c *BaseContext) Message() Message {
 	return c.message
 }
 
+// Transport returns the protocol family for the underlying session.
 func (c *BaseContext) Transport() Transport {
 	return c.session.Transport()
 }
 
+// ConnID returns the stable session identifier for this context.
 func (c *BaseContext) ConnID() uint64 {
 	return c.session.ID()
 }
 
+// RemoteAddr returns the peer address string when one is available.
 func (c *BaseContext) RemoteAddr() string {
 	if c.session.RemoteAddr() == nil {
 		return ""
@@ -104,6 +124,7 @@ func (c *BaseContext) RemoteAddr() string {
 	return c.session.RemoteAddr().String()
 }
 
+// Reply sends a response with the current message sequence number.
 func (c *BaseContext) Reply(msgID uint32, data []byte) error {
 	return c.session.Send(Message{
 		ID:   msgID,
@@ -112,6 +133,7 @@ func (c *BaseContext) Reply(msgID uint32, data []byte) error {
 	})
 }
 
+// Error sends a MsgError response with the current message sequence number.
 func (c *BaseContext) Error(text string) error {
 	return c.session.Send(Message{
 		ID:   MsgError,
@@ -120,6 +142,7 @@ func (c *BaseContext) Error(text string) error {
 	})
 }
 
+// Set stores a handler-local value on the context.
 func (c *BaseContext) Set(key string, value interface{}) {
 	if c.values == nil {
 		c.values = make(map[string]interface{})
@@ -127,6 +150,7 @@ func (c *BaseContext) Set(key string, value interface{}) {
 	c.values[key] = value
 }
 
+// Get retrieves a handler-local value from the context.
 func (c *BaseContext) Get(key string) (interface{}, bool) {
 	value, ok := c.values[key]
 	return value, ok

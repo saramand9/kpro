@@ -1,3 +1,6 @@
+// File: protocol/kpro.go
+// Purpose: Defines or tests KPro wire protocol encoding and decoding.
+
 package protocol
 
 import (
@@ -13,16 +16,20 @@ const (
 	FrameHeaderSize        = 20
 )
 
+// KProV1Protocol implements the default KPro binary frame format.
 type KProV1Protocol struct{}
 
+// KProV1 returns the default KPro version-1 protocol implementation.
 func KProV1() KProV1Protocol {
 	return KProV1Protocol{}
 }
 
+// Name returns the protocol identifier.
 func (KProV1Protocol) Name() string {
 	return "kpro.v1"
 }
 
+// Read decodes one framed message from a stream reader.
 func (KProV1Protocol) Read(r io.Reader, maxBodySize uint32) (ReadResult, error) {
 	var header [FrameHeaderSize]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
@@ -47,6 +54,7 @@ func (KProV1Protocol) Read(r io.Reader, maxBodySize uint32) (ReadResult, error) 
 	}, nil
 }
 
+// Encode serializes one message into a framed byte slice.
 func (KProV1Protocol) Encode(msg core.Message) ([]byte, error) {
 	if uint64(len(msg.Data)) > uint64(^uint32(0)) {
 		return nil, ErrFrameTooLarge
@@ -63,6 +71,7 @@ func (KProV1Protocol) Encode(msg core.Message) ([]byte, error) {
 	return buf, nil
 }
 
+// DecodePacket decodes one complete packet payload.
 func (k KProV1Protocol) DecodePacket(data []byte) (core.Message, error) {
 	if len(data) < FrameHeaderSize {
 		if len(data) == 0 {
@@ -92,6 +101,7 @@ func (k KProV1Protocol) DecodePacket(data []byte) (core.Message, error) {
 	return msg, nil
 }
 
+// EncodePacket serializes one message for packet transports.
 func (k KProV1Protocol) EncodePacket(msg core.Message) ([]byte, error) {
 	return k.Encode(msg)
 }
