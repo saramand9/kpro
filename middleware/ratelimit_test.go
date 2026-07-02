@@ -140,6 +140,120 @@ func TestConnRateLimitRemovesLimiterWhenSessionCloses(t *testing.T) {
 	})
 }
 
+func TestIPRateLimitSharesBucketAcrossPorts(t *testing.T) {
+	handler := IPRateLimit(RateLimitConfig{
+		Rate:        rate.Limit(0.001),
+		Burst:       1,
+		IdleTimeout: time.Second,
+	})(func(core.Invocation) error {
+		return nil
+	})
+
+	ctx1 := core.NewInvocation(core.InvocationOptions{Remote: "127.0.0.1:1000"})
+	ctx2 := core.NewInvocation(core.InvocationOptions{Remote: "127.0.0.1:2000"})
+
+	if err := handler(ctx1); err != nil {
+		t.Fatalf("first port should pass: %v", err)
+	}
+	if err := handler(ctx2); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("same IP on another port should be rate limited, got %v", err)
+	}
+}
+
+func TestIPRateLimitSeparatesIPs(t *testing.T) {
+	handler := IPRateLimit(RateLimitConfig{
+		Rate:        rate.Limit(0.001),
+		Burst:       1,
+		IdleTimeout: time.Second,
+	})(func(core.Invocation) error {
+		return nil
+	})
+
+	ctx1 := core.NewInvocation(core.InvocationOptions{Remote: "127.0.0.1:1000"})
+	ctx2 := core.NewInvocation(core.InvocationOptions{Remote: "127.0.0.2:1000"})
+
+	if err := handler(ctx1); err != nil {
+		t.Fatalf("first IP should pass: %v", err)
+	}
+	if err := handler(ctx2); err != nil {
+		t.Fatalf("different IP should have an independent bucket: %v", err)
+	}
+}
+
+func TestIPRateLimitParsesIPv6HostPort(t *testing.T) {
+	handler := IPRateLimit(RateLimitConfig{
+		Rate:        rate.Limit(0.001),
+		Burst:       1,
+		IdleTimeout: time.Second,
+	})(func(core.Invocation) error {
+		return nil
+	})
+
+	ctx1 := core.NewInvocation(core.InvocationOptions{Remote: "[::1]:1000"})
+	ctx2 := core.NewInvocation(core.InvocationOptions{Remote: "[::1]:2000"})
+
+	if err := handler(ctx1); err != nil {
+		t.Fatalf("first IPv6 port should pass: %v", err)
+	}
+	if err := handler(ctx2); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("same IPv6 on another port should be rate limited, got %v", err)
+	}
+}
+
+func TestIPRateLimitRemovesIdleLimiter(t *testing.T) {
+	handler := IPRateLimit(RateLimitConfig{
+		Rate:        rate.Limit(0.001),
+		Burst:       1,
+		IdleTimeout: time.Millisecond,
+	})(func(core.Invocation) error {
+		return nil
+	})
+
+	ctx := core.NewInvocation(core.InvocationOptions{Remote: "127.0.0.1:1000"})
+	if err := handler(ctx); err != nil {
+		t.Fatalf("first call should pass: %v", err)
+	}
+	if err := handler(ctx); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("second call should be rate limited, got %v", err)
+	}
+
+	time.Sleep(2 * time.Millisecond)
+	if err := handler(ctx); err != nil {
+		t.Fatalf("idle bucket should be recreated: %v", err)
+	}
+}
+
+func TestPacketLimitersComposeAcrossRateLimiters(t *testing.T) {
+	done := make(chan struct{})
+	t.Cleanup(func() { close(done) })
+
+	ctx := core.NewInvocation(core.InvocationOptions{
+		ConnID: 7,
+		Remote: "127.0.0.1:1000",
+		Done:   done,
+	})
+	handler := core.Chain(
+		IPRateLimit(RateLimitConfig{Rate: rate.Limit(0.001), Burst: 1, IdleTimeout: time.Second}),
+		ConnRateLimit(RateLimitConfig{Rate: rate.Limit(0.001), Burst: 2}),
+	)(func(core.Invocation) error {
+		return nil
+	})
+
+	if err := handler(ctx); err != nil {
+		t.Fatalf("first call should pass: %v", err)
+	}
+	value, ok := ctx.Get(core.PacketLimiterKey)
+	if !ok {
+		t.Fatal("packet limiter was not stored")
+	}
+	limiter, ok := value.(core.PacketLimiter)
+	if !ok {
+		t.Fatalf("packet limiter type = %T, want core.PacketLimiter", value)
+	}
+	if err := limiter(); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("packet limiter should include exhausted IP limiter, got %v", err)
+	}
+}
 func TestRateLimitUsesDefaults(t *testing.T) {
 	handler := RateLimit(RateLimitConfig{})(func(core.Invocation) error {
 		return nil

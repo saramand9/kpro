@@ -153,6 +153,13 @@ This applies to endpoints mounted before or after the call:
 TCP, UDP, WebSocket, HTTP, HTTPS, SSE, gRPC unary, gRPC stream
 ```
 
+Rate limiting can be scoped by the middleware users choose:
+
+| Middleware | Scope |
+|---|---|
+| `middleware.RateLimit` | one shared bucket for every invocation using that middleware instance |
+| `middleware.ConnRateLimit` | one bucket per `Invocation.ConnID()` |
+| `middleware.IPRateLimit` | one bucket per `Invocation.RemoteAddr()` IP; remote ports are ignored |
 Endpoint-level `Use` scopes middleware to one endpoint:
 
 ```go
