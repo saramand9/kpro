@@ -127,6 +127,68 @@ func TestServerClosesIdleUDPSessions(t *testing.T) {
 	}
 }
 
+func TestServerRejectsNewSessionWhenMaxSessionsReached(t *testing.T) {
+	serverConn := listenUDPTestConn(t)
+	defer serverConn.Close()
+
+	server := New(Config{
+		Protocol:      protocol.KProV1(),
+		MaxSessions:   1,
+		SendQueueSize: 1,
+	})
+	server.conn = serverConn
+
+	firstRemote := resolveUDPTestAddr(t, "127.0.0.1:10004")
+	first, ok := server.getOrCreateSession(firstRemote)
+	if !ok {
+		t.Fatal("create first UDP session failed")
+	}
+	defer first.Close()
+
+	secondRemote := resolveUDPTestAddr(t, "127.0.0.1:10005")
+	if _, ok := server.getOrCreateSession(secondRemote); ok {
+		t.Fatal("created UDP session after MaxSessions was reached")
+	}
+}
+
+func TestServerRejectsNewSessionAfterShutdown(t *testing.T) {
+	serverConn := listenUDPTestConn(t)
+
+	server := New(Config{
+		Protocol:      protocol.KProV1(),
+		SendQueueSize: 1,
+	})
+	server.conn = serverConn
+	if err := server.Shutdown(nil); err != nil {
+		t.Fatalf("shutdown UDP server: %v", err)
+	}
+
+	remote := resolveUDPTestAddr(t, "127.0.0.1:10006")
+	if _, ok := server.getOrCreateSession(remote); ok {
+		t.Fatal("created UDP session after shutdown")
+	}
+}
+
+func TestPacketSessionSendAfterCloseReturnsErrClosed(t *testing.T) {
+	serverConn := listenUDPTestConn(t)
+	defer serverConn.Close()
+
+	server := New(Config{
+		Protocol:      protocol.KProV1(),
+		SendQueueSize: 1,
+	})
+	server.conn = serverConn
+	session := newUDPTestPacketSession(server, "127.0.0.1:10007")
+	if err := session.Close(); err != nil {
+		t.Fatalf("close UDP session: %v", err)
+	}
+
+	err := session.Send(core.Message{ID: 1, Seq: 1})
+	if !errors.Is(err, core.ErrClosed) {
+		t.Fatalf("send after close = %v, want %v", err, core.ErrClosed)
+	}
+}
+
 func listenUDPTestConn(t *testing.T) *net.UDPConn {
 	t.Helper()
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
@@ -134,6 +196,15 @@ func listenUDPTestConn(t *testing.T) *net.UDPConn {
 		t.Fatalf("listen UDP test conn: %v", err)
 	}
 	return conn
+}
+
+func resolveUDPTestAddr(t *testing.T, remote string) *net.UDPAddr {
+	t.Helper()
+	addr, err := net.ResolveUDPAddr("udp", remote)
+	if err != nil {
+		t.Fatalf("resolve UDP remote %s: %v", remote, err)
+	}
+	return addr
 }
 
 func newUDPTestPacketSession(server *Server, remote string) *packetSession {

@@ -5,6 +5,7 @@ package sse
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"net"
@@ -433,7 +434,7 @@ func normalizeConfig(config Config) Config {
 }
 
 func ignoreServerClosed(err error) error {
-	if err == http.ErrServerClosed {
+	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
 	return err

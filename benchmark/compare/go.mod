@@ -1,6 +1,8 @@
 module github.com/saramand9/bignet/kpro/benchmark/compare
 
-go 1.20
+go 1.21
+
+toolchain go1.24.1
 
 require (
 	github.com/gofiber/fiber/v2 v2.52.13

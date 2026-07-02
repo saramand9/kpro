@@ -21,6 +21,7 @@ import (
 
 	"github.com/saramand9/bignet/kpro/core"
 	"github.com/saramand9/bignet/kpro/protocol"
+	"github.com/saramand9/bignet/kpro/transport/internal/streamutil"
 )
 
 const (
@@ -409,14 +410,13 @@ func writeFrame(w io.Writer, opcode byte, payload []byte) error {
 		header = append(header, 127, 0, 0, 0, 0, 0, 0, 0, 0)
 		binary.BigEndian.PutUint64(header[len(header)-8:], uint64(length))
 	}
-	if _, err := w.Write(header); err != nil {
+	if err := streamutil.WriteFull(w, header); err != nil {
 		return err
 	}
 	if len(payload) == 0 {
 		return nil
 	}
-	_, err := w.Write(payload)
-	return err
+	return streamutil.WriteFull(w, payload)
 }
 
 func isUpgradeRequest(r *http.Request) bool {

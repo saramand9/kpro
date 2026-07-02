@@ -33,6 +33,7 @@ func main() {
 	quicAddr := flag.String("quic", "", "quic listen address, disabled when empty")
 	quicCert := flag.String("quic-cert", "", "quic certificate file")
 	quicKey := flag.String("quic-key", "", "quic private key file")
+	quicMaxStreams := flag.Int("quic-max-streams", quictransport.DefaultMaxStreams, "quic max active bidirectional stream sessions")
 	udpAddr := flag.String("udp", ":8089", "udp listen address")
 	wsAddr := flag.String("ws", ":8091", "websocket listen address")
 	httpAddr := flag.String("http", ":8080", "http listen address")
@@ -61,19 +62,20 @@ func main() {
 	defer cleanup()
 
 	app := server.New(server.Config{Name: "kpro-universal"})
+	metrics := middleware.NewMetrics()
 
 	app.TCP(*tcpAddr, tcp.Config{
 		Protocol:     protocol.KProV1(),
 		MaxFrameSize: 64 * 1024,
 	}).
-		Use(middleware.Recover(), middleware.MaxPayload(64*1024)).
+		Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024)).
 		Handle(core.MsgEcho, echo)
 
 	app.KCP(*kcpAddr, kcp.Config{
 		Protocol:     protocol.KProV1(),
 		MaxFrameSize: 64 * 1024,
 	}).
-		Use(middleware.Recover(), middleware.MaxPayload(64*1024)).
+		Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024)).
 		Handle(core.MsgEcho, echo)
 
 	if *quicAddr != "" {
@@ -83,10 +85,11 @@ func main() {
 		app.QUIC(*quicAddr, quictransport.Config{
 			Protocol:     protocol.KProV1(),
 			MaxFrameSize: 64 * 1024,
+			MaxStreams:   *quicMaxStreams,
 			CertFile:     *quicCert,
 			KeyFile:      *quicKey,
 		}).
-			Use(middleware.Recover(), middleware.MaxPayload(64*1024)).
+			Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024)).
 			Handle(core.MsgEcho, echo)
 	}
 
@@ -94,16 +97,19 @@ func main() {
 		Protocol:      protocol.KProV1(),
 		MaxPacketSize: 2048,
 	}).
-		Use(middleware.Recover(), middleware.MaxPayload(1500)).
+		Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(1500)).
 		Handle(core.MsgEcho, echo)
 
 	app.WebSocket(*wsAddr, "/ws").
-		Use(middleware.Recover(), middleware.MaxPayload(64*1024)).
+		Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024)).
 		Handle(core.MsgEcho, echo)
 
 	app.HTTP(*httpAddr).
 		Get("/health", func(ctx *httpx.Context) error {
 			return ctx.Text(200, "ok\n")
+		}).
+		Get("/metrics", func(ctx *httpx.Context) error {
+			return ctx.JSON(200, metrics.Snapshot())
 		}).
 		Post("/echo", func(ctx *httpx.Context) error {
 			body, err := ctx.Body()
@@ -123,6 +129,9 @@ func main() {
 		}).
 			Get("/health", func(ctx *http3x.Context) error {
 				return ctx.Text(200, "ok\n")
+			}).
+			Get("/metrics", func(ctx *http3x.Context) error {
+				return ctx.JSON(200, metrics.Snapshot())
 			}).
 			Post("/echo", func(ctx *http3x.Context) error {
 				body, err := ctx.Body()
