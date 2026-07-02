@@ -1,3 +1,6 @@
+// File: server/server.go
+// Purpose: Implements or tests the high-level KPro server orchestration layer.
+
 package server
 
 import (
@@ -15,11 +18,13 @@ import (
 	"github.com/saramand9/bignet/kpro/transport/websocket"
 )
 
+// ErrNoTransports is returned when ListenAndServe starts without mounted transports.
 var ErrNoTransports = errors.New("no transports registered")
 
 // MiddlewareTarget can be implemented by custom runners that want app-level
 // middleware installed through Server.Use.
 type MiddlewareTarget interface {
+	// ApplyMiddleware installs middleware supplied by Server.Use.
 	ApplyMiddleware(...core.Middleware)
 }
 
@@ -30,11 +35,15 @@ var (
 	_ MiddlewareTarget = (*kprogrpc.Server)(nil)
 )
 
+// Config controls the high-level server and the router used by message transports.
 type Config struct {
-	Name   string
+	// Name is a human-readable server name used by examples and diagnostics.
+	Name string
+	// Router configures message transports mounted through TCP, UDP, or WebSocket.
 	Router core.RouterConfig
 }
 
+// Server coordinates one or more protocol runners under a shared lifecycle.
 type Server struct {
 	config Config
 
@@ -47,6 +56,7 @@ type Server struct {
 	wg     sync.WaitGroup
 }
 
+// New creates a Server with optional configuration.
 func New(config ...Config) *Server {
 	cfg := Config{Name: "kpro"}
 	if len(config) > 0 {
@@ -58,6 +68,7 @@ func New(config ...Config) *Server {
 	return &Server{config: cfg}
 }
 
+// Mount attaches a message transport such as TCP, UDP, or WebSocket.
 func (s *Server) Mount(transport transport.Server) *Endpoint {
 	endpoint := &Endpoint{
 		transport: transport,
@@ -71,6 +82,7 @@ func (s *Server) Mount(transport transport.Server) *Endpoint {
 	return endpoint
 }
 
+// MountRunner attaches a native protocol runner such as HTTP, SSE, or gRPC.
 func (s *Server) MountRunner(runner transport.Runner) transport.Runner {
 	s.mu.Lock()
 	middlewares := append([]core.Middleware(nil), s.middlewares...)
@@ -80,6 +92,7 @@ func (s *Server) MountRunner(runner transport.Runner) transport.Runner {
 	return runner
 }
 
+// Use installs app-level middleware on existing and future mounted runners.
 func (s *Server) Use(middlewares ...core.Middleware) *Server {
 	if len(middlewares) == 0 {
 		return s
@@ -102,6 +115,8 @@ func applyMiddlewares(runner transport.Runner, middlewares ...core.Middleware) {
 		target.ApplyMiddleware(middlewares...)
 	}
 }
+
+// TCP mounts a TCP message endpoint at addr.
 func (s *Server) TCP(addr string, config ...tcp.Config) *Endpoint {
 	cfg := tcp.Config{}
 	if len(config) > 0 {
@@ -111,6 +126,7 @@ func (s *Server) TCP(addr string, config ...tcp.Config) *Endpoint {
 	return s.Mount(tcp.New(cfg))
 }
 
+// UDP mounts a UDP packet endpoint at addr.
 func (s *Server) UDP(addr string, config ...udp.Config) *Endpoint {
 	cfg := udp.Config{}
 	if len(config) > 0 {
@@ -120,6 +136,7 @@ func (s *Server) UDP(addr string, config ...udp.Config) *Endpoint {
 	return s.Mount(udp.New(cfg))
 }
 
+// WebSocket mounts a WebSocket message endpoint at addr and path.
 func (s *Server) WebSocket(addr, path string, config ...websocket.Config) *Endpoint {
 	cfg := websocket.Config{}
 	if len(config) > 0 {
@@ -130,6 +147,7 @@ func (s *Server) WebSocket(addr, path string, config ...websocket.Config) *Endpo
 	return s.Mount(websocket.New(cfg))
 }
 
+// HTTP mounts a native HTTP endpoint at addr.
 func (s *Server) HTTP(addr string, config ...httpx.Config) *httpx.Endpoint {
 	cfg := httpx.Config{}
 	if len(config) > 0 {
@@ -141,6 +159,7 @@ func (s *Server) HTTP(addr string, config ...httpx.Config) *httpx.Endpoint {
 	return endpoint
 }
 
+// HTTPS mounts a native HTTPS endpoint at addr using config TLS files.
 func (s *Server) HTTPS(addr string, config httpx.Config) *httpx.Endpoint {
 	config.Addr = addr
 	config.TLS = true
@@ -149,12 +168,14 @@ func (s *Server) HTTPS(addr string, config httpx.Config) *httpx.Endpoint {
 	return endpoint
 }
 
+// GRPC mounts a gRPC server at addr.
 func (s *Server) GRPC(addr string, options ...kprogrpc.Option) *kprogrpc.Server {
 	endpoint := kprogrpc.NewServer(addr, options...)
 	s.MountRunner(endpoint)
 	return endpoint
 }
 
+// SSE mounts a Server-Sent Events endpoint at addr and path.
 func (s *Server) SSE(addr, path string, config ...sse.Config) *sse.Endpoint {
 	cfg := sse.Config{}
 	if len(config) > 0 {
@@ -167,6 +188,7 @@ func (s *Server) SSE(addr, path string, config ...sse.Config) *sse.Endpoint {
 	return endpoint
 }
 
+// ListenAndServe starts all mounted runners and stops the rest when one exits.
 func (s *Server) ListenAndServe() error {
 	s.mu.Lock()
 	if len(s.runners) == 0 {
@@ -195,6 +217,7 @@ func (s *Server) ListenAndServe() error {
 	return err
 }
 
+// Shutdown asks all mounted runners to stop and waits for the server lifecycle to drain.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	if s.cancel != nil {
@@ -226,43 +249,52 @@ func (s *Server) shutdownRunners(ctx context.Context, runners []transport.Runner
 	return nil
 }
 
+// Endpoint binds a message transport to a core Router.
 type Endpoint struct {
 	transport transport.Server
 	router    *core.Router
 }
 
+// Use installs middleware on the endpoint router and returns the endpoint for chaining.
 func (e *Endpoint) Use(middlewares ...core.Middleware) *Endpoint {
 	e.ApplyMiddleware(middlewares...)
 	return e
 }
 
+// ApplyMiddleware implements MiddlewareTarget for app-level Server.Use wiring.
 func (e *Endpoint) ApplyMiddleware(middlewares ...core.Middleware) {
 	e.router.Use(middlewares...)
 }
 
+// Handle registers a sync message handler.
 func (e *Endpoint) Handle(msgID uint32, h core.Handler) *Endpoint {
 	e.router.Handle(msgID, h)
 	return e
 }
 
+// HandleSync registers a per-session serialized message handler.
 func (e *Endpoint) HandleSync(msgID uint32, h core.Handler) *Endpoint {
 	e.router.HandleSync(msgID, h)
 	return e
 }
 
+// HandleAsync registers a message handler that runs through async workers.
 func (e *Endpoint) HandleAsync(msgID uint32, h core.Handler) *Endpoint {
 	e.router.HandleAsync(msgID, h)
 	return e
 }
 
+// Name returns the mounted transport name.
 func (e *Endpoint) Name() string {
 	return e.transport.Name()
 }
 
+// ListenAndServe starts the underlying message transport.
 func (e *Endpoint) ListenAndServe(ctx context.Context) error {
 	return e.transport.ListenAndServe(ctx, e.dispatch)
 }
 
+// Shutdown stops the underlying transport and router.
 func (e *Endpoint) Shutdown(ctx context.Context) error {
 	transportErr := e.transport.Shutdown(ctx)
 	routerErr := e.router.Shutdown(ctx)

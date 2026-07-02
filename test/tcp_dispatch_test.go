@@ -1,3 +1,6 @@
+// File: test/tcp_dispatch_test.go
+// Purpose: Exercises KPro protocol and transport behavior through integration tests.
+
 package test
 
 import (

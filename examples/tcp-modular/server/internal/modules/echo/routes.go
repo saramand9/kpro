@@ -1,3 +1,6 @@
+// File: examples/tcp-modular/server/internal/modules/echo/routes.go
+// Purpose: Provides runnable KPro example code.
+
 package echo
 
 import (

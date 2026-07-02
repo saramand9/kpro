@@ -1,3 +1,6 @@
+// File: core/router.go
+// Purpose: Defines shared KPro primitives used by transports, routers, and middleware.
+
 package core
 
 import (
@@ -9,28 +12,44 @@ import (
 )
 
 const (
-	DefaultSyncQueueSize         = 64
-	DefaultAsyncWorkers          = 0
-	DefaultAsyncQueueSize        = 1024
+	// DefaultSyncQueueSize is the default per-session sync dispatch queue size.
+	DefaultSyncQueueSize = 64
+	// DefaultAsyncWorkers lets the router derive worker count from GOMAXPROCS.
+	DefaultAsyncWorkers = 0
+	// DefaultAsyncQueueSize is the default shared async dispatch queue size.
+	DefaultAsyncQueueSize = 1024
+	// DefaultMaxInflightPerSession limits outstanding work per session.
 	DefaultMaxInflightPerSession = 128
-	DefaultSessionIdleTimeout    = time.Minute
+	// DefaultSessionIdleTimeout removes idle session executors.
+	DefaultSessionIdleTimeout = time.Minute
+	// DefaultRouterShutdownTimeout bounds graceful router shutdown.
 	DefaultRouterShutdownTimeout = 5 * time.Second
 )
 
+// DispatchMode controls whether a route is serialized per session or run by async workers.
 type DispatchMode uint8
 
 const (
+	// DispatchSync serializes handler execution per session.
 	DispatchSync DispatchMode = iota
+	// DispatchAsync runs handler execution through shared async workers.
 	DispatchAsync
 )
 
+// RouterConfig tunes message dispatch queues, worker counts, and shutdown behavior.
 type RouterConfig struct {
-	SyncQueueSize         int
-	AsyncWorkers          int
-	AsyncQueueSize        int
+	// SyncQueueSize is the per-session queue length for sync handlers.
+	SyncQueueSize int
+	// AsyncWorkers is the shared worker count for async handlers. Values <= 0 use a runtime-derived default.
+	AsyncWorkers int
+	// AsyncQueueSize is the shared queue length for async handler tasks.
+	AsyncQueueSize int
+	// MaxInflightPerSession caps queued or running work for one session.
 	MaxInflightPerSession int
-	SessionIdleTimeout    time.Duration
-	ShutdownTimeout       time.Duration
+	// SessionIdleTimeout removes a session executor after it becomes idle.
+	SessionIdleTimeout time.Duration
+	// ShutdownTimeout is used when Shutdown receives a context without deadline.
+	ShutdownTimeout time.Duration
 }
 
 type route struct {
@@ -45,6 +64,7 @@ type dispatchTask struct {
 	session     *sessionExecutor
 }
 
+// Router maps message ids to handlers and owns dispatch scheduling.
 type Router struct {
 	mu          sync.RWMutex
 	routes      map[uint32]route
@@ -62,6 +82,7 @@ type Router struct {
 	sessions   map[uint64]*sessionExecutor
 }
 
+// NewRouter creates a Router with normalized defaults.
 func NewRouter(config ...RouterConfig) *Router {
 	cfg := normalizeRouterConfig(firstRouterConfig(config))
 	r := &Router{
@@ -74,24 +95,29 @@ func NewRouter(config ...RouterConfig) *Router {
 	return r
 }
 
+// Use appends middleware that wraps all future dispatches through the router.
 func (r *Router) Use(middlewares ...Middleware) {
 	r.mu.Lock()
 	r.middlewares = append(r.middlewares, middlewares...)
 	r.mu.Unlock()
 }
 
+// Handle registers a sync handler for msgID.
 func (r *Router) Handle(msgID uint32, h Handler) {
 	r.HandleSync(msgID, h)
 }
 
+// HandleSync registers a handler that is serialized per session.
 func (r *Router) HandleSync(msgID uint32, h Handler) {
 	r.handle(msgID, h, DispatchSync)
 }
 
+// HandleAsync registers a handler that is run by shared async workers.
 func (r *Router) HandleAsync(msgID uint32, h Handler) {
 	r.handle(msgID, h, DispatchAsync)
 }
 
+// Dispatch submits a decoded message context to its registered route.
 func (r *Router) Dispatch(ctx Context) error {
 	msg := ctx.Message()
 
@@ -127,6 +153,7 @@ func (r *Router) Dispatch(ctx Context) error {
 	return err
 }
 
+// Close stops accepting dispatch work and releases queued contexts.
 func (r *Router) Close() {
 	r.closeOnce.Do(func() {
 		close(r.done)
@@ -144,6 +171,7 @@ func (r *Router) Close() {
 	})
 }
 
+// Shutdown closes the router and waits for in-flight handlers to finish or ctx to expire.
 func (r *Router) Shutdown(ctx context.Context) error {
 	r.Close()
 	if ctx == nil {

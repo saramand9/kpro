@@ -1,3 +1,6 @@
+// File: internal/yokalog/yokalog_bench_test.go
+// Purpose: Defines or benchmarks the internal logging helper.
+
 package yokalog
 
 import (

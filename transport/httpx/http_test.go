@@ -1,3 +1,6 @@
+// File: transport/httpx/http_test.go
+// Purpose: Implements the native HTTP/HTTPS transport adapter.
+
 package httpx
 
 import (

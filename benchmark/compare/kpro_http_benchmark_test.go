@@ -1,3 +1,6 @@
+// File: benchmark/compare/kpro_http_benchmark_test.go
+// Purpose: Benchmarks KPro transports and comparison baselines.
+
 package compare
 
 import (

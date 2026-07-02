@@ -1,3 +1,6 @@
+// File: legacy/conn.go
+// Purpose: Implements or tests the legacy TCP validation server.
+
 package legacy
 
 import (
@@ -10,6 +13,7 @@ import (
 	"github.com/saramand9/bignet/kpro/core"
 )
 
+// Conn represents one legacy TCP client connection.
 type Conn struct {
 	id       uint64
 	server   *Server
@@ -26,18 +30,22 @@ type Conn struct {
 	inflight int32
 }
 
+// ID returns the connection identifier.
 func (c *Conn) ID() uint64 {
 	return c.id
 }
 
+// RemoteIP returns the peer IP used for per-IP connection limits.
 func (c *Conn) RemoteIP() string {
 	return c.remoteIP
 }
 
+// Transport returns core.TransportTCP.
 func (c *Conn) Transport() core.Transport {
 	return core.TransportTCP
 }
 
+// RemoteAddr returns the underlying TCP remote address.
 func (c *Conn) RemoteAddr() net.Addr {
 	if c.raw == nil {
 		return nil
@@ -45,10 +53,12 @@ func (c *Conn) RemoteAddr() net.Addr {
 	return c.raw.RemoteAddr()
 }
 
+// LastSeen returns the last time a frame was read from this connection.
 func (c *Conn) LastSeen() time.Time {
 	return time.Unix(0, atomic.LoadInt64(&c.lastSeen))
 }
 
+// Send queues a framed message for the connection write loop.
 func (c *Conn) Send(msg Message) error {
 	if atomic.LoadInt32(&c.closed) != 0 {
 		return ErrClosed
@@ -69,6 +79,7 @@ func (c *Conn) Send(msg Message) error {
 	}
 }
 
+// Close closes the connection and removes it from the manager.
 func (c *Conn) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
@@ -81,6 +92,7 @@ func (c *Conn) Close() error {
 	return err
 }
 
+// Done is closed when the connection is closed.
 func (c *Conn) Done() <-chan struct{} {
 	return c.done
 }

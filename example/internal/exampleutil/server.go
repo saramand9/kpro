@@ -1,3 +1,6 @@
+// File: example/internal/exampleutil/server.go
+// Purpose: Provides runnable KPro example code.
+
 package exampleutil
 
 import (
@@ -12,11 +15,13 @@ import (
 	"github.com/saramand9/bignet/kpro/server"
 )
 
+// Echo replies with the incoming message id and payload.
 func Echo(ctx core.Context) error {
 	msg := ctx.Message()
 	return ctx.Reply(msg.ID, msg.Data)
 }
 
+// Run starts an example server and installs signal-triggered shutdown.
 func Run(app *server.Server) error {
 	go func() {
 		ch := make(chan os.Signal, 1)

@@ -1,3 +1,6 @@
+// File: transport/udp/server.go
+// Purpose: Implements the UDP transport adapter for KPro packet sessions.
+
 package udp
 
 import (
@@ -21,16 +24,25 @@ const (
 	DefaultCleanupInterval    = 30 * time.Second
 )
 
+// Config controls UDP listener, packet protocol, sessions, queues, and cleanup.
 type Config struct {
-	Addr               string
-	Protocol           protocol.PacketProtocol
-	MaxPacketSize      int
-	MaxSessions        int
-	SendQueueSize      int
+	// Addr is the UDP listen address.
+	Addr string
+	// Protocol decodes and encodes packet payloads. Nil uses protocol.KProV1().
+	Protocol protocol.PacketProtocol
+	// MaxPacketSize limits incoming datagram read size.
+	MaxPacketSize int
+	// MaxSessions caps active virtual peer sessions.
+	MaxSessions int
+	// SendQueueSize is the per-peer outbound packet queue length.
+	SendQueueSize int
+	// SessionIdleTimeout closes virtual sessions with no recent packets.
 	SessionIdleTimeout time.Duration
-	CleanupInterval    time.Duration
+	// CleanupInterval controls how often idle UDP sessions are swept.
+	CleanupInterval time.Duration
 }
 
+// Server maps UDP peers to virtual sessions and dispatches decoded packets.
 type Server struct {
 	config Config
 	conn   *net.UDPConn
@@ -40,6 +52,7 @@ type Server struct {
 	closed   bool
 }
 
+// New creates a UDP transport with normalized defaults.
 func New(config Config) *Server {
 	return &Server{
 		config:   normalizeConfig(config),
@@ -47,14 +60,17 @@ func New(config Config) *Server {
 	}
 }
 
+// NewServer is an alias for New.
 func NewServer(config Config) *Server {
 	return New(config)
 }
 
+// Name returns the transport name.
 func (s *Server) Name() string {
 	return "udp"
 }
 
+// ListenAndServe reads UDP packets until ctx is cancelled or the socket fails.
 func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error {
 	addr, err := net.ResolveUDPAddr("udp", s.config.Addr)
 	if err != nil {
@@ -104,6 +120,7 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 	}
 }
 
+// Shutdown closes the UDP socket and all virtual sessions.
 func (s *Server) Shutdown(context.Context) error {
 	s.mu.Lock()
 	s.closed = true

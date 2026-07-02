@@ -1,3 +1,6 @@
+// File: transport/sse/sse.go
+// Purpose: Implements the Server-Sent Events transport adapter.
+
 package sse
 
 import (
@@ -19,18 +22,28 @@ const (
 	DefaultShutdownTimeout = 5 * time.Second
 )
 
+// Config controls SSE listener, path, TLS, and shutdown settings.
 type Config struct {
-	Addr            string
-	Path            string
-	TLS             bool
-	CertFile        string
-	KeyFile         string
-	WriteTimeout    time.Duration
+	// Addr is the HTTP listen address for the SSE endpoint.
+	Addr string
+	// Path is the SSE route path, for example "/events".
+	Path string
+	// TLS switches ListenAndServe to ListenAndServeTLS.
+	TLS bool
+	// CertFile is the TLS certificate path used when TLS is true.
+	CertFile string
+	// KeyFile is the TLS key path used when TLS is true.
+	KeyFile string
+	// WriteTimeout is passed to net/http.Server.
+	WriteTimeout time.Duration
+	// ShutdownTimeout bounds graceful shutdown after the parent context is cancelled.
 	ShutdownTimeout time.Duration
 }
 
+// Handler writes events to one SSE stream.
 type Handler func(*Context) error
 
+// Endpoint serves one SSE stream route and wraps it with middleware.
 type Endpoint struct {
 	config Config
 	server *http.Server
@@ -40,25 +53,30 @@ type Endpoint struct {
 	middlewares []core.Middleware
 }
 
+// New creates an SSE endpoint with normalized defaults.
 func New(config Config) *Endpoint {
 	return &Endpoint{config: normalizeConfig(config)}
 }
 
+// Name returns the transport name.
 func (e *Endpoint) Name() string {
 	return string(core.TransportSSE)
 }
 
+// Use installs middleware on the SSE stream and returns the endpoint.
 func (e *Endpoint) Use(middlewares ...core.Middleware) *Endpoint {
 	e.ApplyMiddleware(middlewares...)
 	return e
 }
 
+// ApplyMiddleware implements server.MiddlewareTarget for app-level middleware.
 func (e *Endpoint) ApplyMiddleware(middlewares ...core.Middleware) {
 	e.mu.Lock()
 	e.middlewares = append(e.middlewares, middlewares...)
 	e.mu.Unlock()
 }
 
+// Handle registers the SSE stream handler.
 func (e *Endpoint) Handle(h Handler) *Endpoint {
 	e.mu.Lock()
 	e.handler = h
@@ -66,6 +84,7 @@ func (e *Endpoint) Handle(h Handler) *Endpoint {
 	return e
 }
 
+// ListenAndServe starts the SSE HTTP server until ctx is cancelled or serving fails.
 func (e *Endpoint) ListenAndServe(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc(e.config.Path, e.serve)
@@ -89,6 +108,7 @@ func (e *Endpoint) ListenAndServe(ctx context.Context) error {
 	return ignoreServerClosed(server.ListenAndServe())
 }
 
+// Shutdown gracefully stops the SSE HTTP server.
 func (e *Endpoint) Shutdown(ctx context.Context) error {
 	e.mu.RLock()
 	server := e.server
@@ -240,6 +260,7 @@ func (e errorsText) Error() string {
 	return string(e)
 }
 
+// Context wraps the HTTP response state for one SSE stream.
 type Context struct {
 	http.ResponseWriter
 	Request *http.Request
@@ -247,10 +268,12 @@ type Context struct {
 	mu      sync.Mutex
 }
 
+// Done returns the request cancellation channel.
 func (c *Context) Done() <-chan struct{} {
 	return c.Request.Context().Done()
 }
 
+// Send writes one SSE event and flushes the stream.
 func (c *Context) Send(event string, data []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

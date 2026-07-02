@@ -1,3 +1,6 @@
+// File: protocol/errors.go
+// Purpose: Defines or tests KPro wire protocol encoding and decoding.
+
 package protocol
 
 import "errors"

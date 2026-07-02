@@ -1,3 +1,6 @@
+// File: test/http_sse_file_compare_test.go
+// Purpose: Exercises KPro protocol and transport behavior through integration tests.
+
 package test
 
 import (

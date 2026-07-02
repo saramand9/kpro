@@ -1,3 +1,6 @@
+// File: kprogrpc/helloworld.go
+// Purpose: Implements or tests the gRPC integration for KPro.
+
 package kprogrpc
 
 import (
@@ -29,6 +32,7 @@ type greeterClient struct {
 	cc grpc.ClientConnInterface
 }
 
+// NewGreeterClient creates a client for the example Greeter service.
 func NewGreeterClient(cc grpc.ClientConnInterface) GreeterClient {
 	return &greeterClient{cc: cc}
 }
@@ -65,6 +69,7 @@ func (c *greeterClient) EchoBytes(ctx context.Context, in *wrapperspb.BytesValue
 	return out, nil
 }
 
+// GreeterServer is the server contract for the example Greeter service.
 type GreeterServer interface {
 	SayHello(context.Context, *wrapperspb.StringValue) (*wrapperspb.StringValue, error)
 	SayGoodbye(context.Context, *wrapperspb.StringValue) (*wrapperspb.StringValue, error)
@@ -72,28 +77,35 @@ type GreeterServer interface {
 	EchoBytes(context.Context, *wrapperspb.BytesValue) (*wrapperspb.BytesValue, error)
 }
 
+// UnimplementedGreeterServer can be embedded for forward-compatible service implementations.
 type UnimplementedGreeterServer struct{}
 
+// SayHello returns an unimplemented status.
 func (UnimplementedGreeterServer) SayHello(context.Context, *wrapperspb.StringValue) (*wrapperspb.StringValue, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SayHello not implemented")
 }
 
+// SayGoodbye returns an unimplemented status.
 func (UnimplementedGreeterServer) SayGoodbye(context.Context, *wrapperspb.StringValue) (*wrapperspb.StringValue, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SayGoodbye not implemented")
 }
 
+// GetNameLength returns an unimplemented status.
 func (UnimplementedGreeterServer) GetNameLength(context.Context, *wrapperspb.StringValue) (*wrapperspb.Int32Value, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetNameLength not implemented")
 }
 
+// EchoBytes returns an unimplemented status.
 func (UnimplementedGreeterServer) EchoBytes(context.Context, *wrapperspb.BytesValue) (*wrapperspb.BytesValue, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method EchoBytes not implemented")
 }
 
+// RegisterGreeter registers the example Greeter service with a gRPC registrar.
 func RegisterGreeter(s grpc.ServiceRegistrar, srv GreeterServer) {
 	s.RegisterService(&GreeterServiceDesc, srv)
 }
 
+// GreeterServiceDesc describes the example Greeter gRPC service.
 var GreeterServiceDesc = grpc.ServiceDesc{
 	ServiceName: "helloworld.v1.Greeter",
 	HandlerType: (*GreeterServer)(nil),

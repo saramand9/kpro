@@ -1,3 +1,6 @@
+// File: examples/https-modular/server/internal/app/routes.go
+// Purpose: Provides runnable KPro example code.
+
 package app
 
 import (

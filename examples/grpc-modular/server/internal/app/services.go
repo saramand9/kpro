@@ -1,3 +1,6 @@
+// File: examples/grpc-modular/server/internal/app/services.go
+// Purpose: Provides runnable KPro example code.
+
 package app
 
 import (

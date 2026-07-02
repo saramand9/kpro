@@ -1,3 +1,6 @@
+// File: examples/tcp-modular/server/internal/modules/echo/handler.go
+// Purpose: Provides runnable KPro example code.
+
 package echo
 
 import "github.com/saramand9/bignet/kpro/core"
