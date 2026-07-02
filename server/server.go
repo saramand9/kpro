@@ -28,6 +28,12 @@ type MiddlewareTarget interface {
 	ApplyMiddleware(...core.Middleware)
 }
 
+// ManagedResource is stopped after mounted protocol runners stop.
+type ManagedResource interface {
+	// Shutdown releases the resource and honors ctx cancellation.
+	Shutdown(context.Context) error
+}
+
 var (
 	_ MiddlewareTarget = (*Endpoint)(nil)
 	_ MiddlewareTarget = (*httpx.Endpoint)(nil)
@@ -50,10 +56,13 @@ type Server struct {
 	mu          sync.Mutex
 	runners     []transport.Runner
 	middlewares []core.Middleware
+	resources   []ManagedResource
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	ctx          context.Context
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
+	resourceOnce sync.Once
+	resourceErr  error
 }
 
 // New creates a Server with optional configuration.
@@ -90,6 +99,17 @@ func (s *Server) MountRunner(runner transport.Runner) transport.Runner {
 	s.mu.Unlock()
 	applyMiddlewares(runner, middlewares...)
 	return runner
+}
+
+// Manage registers resources that should shut down after mounted runners stop.
+func (s *Server) Manage(resources ...ManagedResource) *Server {
+	if len(resources) == 0 {
+		return s
+	}
+	s.mu.Lock()
+	s.resources = append(s.resources, resources...)
+	s.mu.Unlock()
+	return s
 }
 
 // Use installs app-level middleware on existing and future mounted runners.
@@ -210,15 +230,19 @@ func (s *Server) ListenAndServe() error {
 		}()
 	}
 
-	err := <-errCh
+	runnerErr := <-errCh
 	s.cancel()
-	_ = s.shutdownRunners(context.Background(), runners)
+	shutdownErr := s.shutdownRunners(context.Background(), runners)
 	s.wg.Wait()
-	return err
+	resourceErr := s.shutdownResources(context.Background())
+	return errors.Join(runnerErr, shutdownErr, resourceErr)
 }
 
 // Shutdown asks all mounted runners to stop and waits for the server lifecycle to drain.
 func (s *Server) Shutdown(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s.mu.Lock()
 	if s.cancel != nil {
 		s.cancel()
@@ -226,7 +250,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	runners := append([]transport.Runner(nil), s.runners...)
 	s.mu.Unlock()
 
-	err := s.shutdownRunners(ctx, runners)
+	runnerErr := s.shutdownRunners(ctx, runners)
 	done := make(chan struct{})
 	go func() {
 		s.wg.Wait()
@@ -234,19 +258,34 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}()
 	select {
 	case <-done:
-		return err
+		resourceErr := s.shutdownResources(ctx)
+		return errors.Join(runnerErr, resourceErr)
 	case <-ctx.Done():
-		return ctx.Err()
+		return errors.Join(runnerErr, ctx.Err())
 	}
 }
 
 func (s *Server) shutdownRunners(ctx context.Context, runners []transport.Runner) error {
+	var err error
 	for _, runner := range runners {
-		if err := runner.Shutdown(ctx); err != nil {
-			return err
-		}
+		err = errors.Join(err, runner.Shutdown(ctx))
 	}
-	return nil
+	return err
+}
+
+func (s *Server) shutdownResources(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.resourceOnce.Do(func() {
+		s.mu.Lock()
+		resources := append([]ManagedResource(nil), s.resources...)
+		s.mu.Unlock()
+		for i := len(resources) - 1; i >= 0; i-- {
+			s.resourceErr = errors.Join(s.resourceErr, resources[i].Shutdown(ctx))
+		}
+	})
+	return s.resourceErr
 }
 
 // Endpoint binds a message transport to a core Router.

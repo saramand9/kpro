@@ -241,6 +241,10 @@ func remoteFromConn(conn net.Conn) string {
 	return conn.RemoteAddr().String()
 }
 
+// ServeHTTP lets Endpoint be mounted in standard net/http servers and tests.
+func (e *Endpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	e.serve(w, r)
+}
 func (e *Endpoint) serve(w http.ResponseWriter, r *http.Request) {
 	routes, _ := e.compiled.Load().(compiledRoutes)
 	methods := routes[r.URL.Path]
@@ -465,6 +469,14 @@ type Context struct {
 	bodyRead    bool
 	status      int
 	wroteHeader bool
+}
+
+// Context returns the request cancellation and deadline context.
+func (c *Context) Context() context.Context {
+	if c == nil || c.r == nil {
+		return context.Background()
+	}
+	return c.r.Context()
 }
 
 // Header returns the mutable response headers.
