@@ -5,11 +5,17 @@ package middleware
 
 import (
 	"errors"
+	"net"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/saramand9/bignet/kpro/core"
 	"golang.org/x/time/rate"
 )
+
+// DefaultIPRateLimitIdleTimeout removes idle IP buckets after this duration.
+const DefaultIPRateLimitIdleTimeout = time.Minute
 
 // ErrRateLimited is returned when a rate limiter rejects an invocation.
 var ErrRateLimited = errors.New("rate limit exceeded")
@@ -20,6 +26,8 @@ type RateLimitConfig struct {
 	Rate rate.Limit
 	// Burst is the token bucket burst size. Values <= 0 derive from Rate.
 	Burst int
+	// IdleTimeout removes idle key-based buckets. Values <= 0 use the default.
+	IdleTimeout time.Duration
 }
 
 // RateLimit applies one shared token bucket across all invocations.
@@ -80,16 +88,70 @@ func ConnRateLimit(config RateLimitConfig) core.Middleware {
 	return func(next core.InvocationHandler) core.InvocationHandler {
 		return func(ctx core.Invocation) error {
 			limiter := limiterFor(ctx)
-			ctx.Set(core.PacketLimiterKey, core.PacketLimiter(func() error {
-				if !limiter.Allow() {
-					return ErrRateLimited
-				}
-				return nil
-			}))
+			appendPacketLimiter(ctx, packetLimiter(limiter))
 			if !limiter.Allow() {
 				return ErrRateLimited
 			}
 			return next(ctx)
+		}
+	}
+}
+
+// IPRateLimit applies one token bucket per remote IP address.
+//
+// Remote ports are ignored, so 127.0.0.1:1000 and 127.0.0.1:2000 share
+// one bucket. Empty or unparsable remote addresses share a single fallback key.
+func IPRateLimit(config RateLimitConfig) core.Middleware {
+	config = normalizeIPRateLimitConfig(config)
+
+	var mu sync.Mutex
+	limiters := make(map[string]*ipLimiterEntry)
+	var lastCleanup time.Time
+
+	limiterFor := func(ctx core.Invocation) *rate.Limiter {
+		key := remoteIPKey(ctx.RemoteAddr())
+		now := time.Now()
+
+		mu.Lock()
+		if lastCleanup.IsZero() || now.Sub(lastCleanup) >= config.IdleTimeout {
+			pruneIdleIPLimiters(limiters, now, config.IdleTimeout)
+			lastCleanup = now
+		}
+		entry := limiters[key]
+		if entry == nil {
+			entry = &ipLimiterEntry{
+				limiter: rate.NewLimiter(config.Rate, config.Burst),
+			}
+			limiters[key] = entry
+		}
+		entry.lastSeen = now
+		limiter := entry.limiter
+		mu.Unlock()
+
+		return limiter
+	}
+
+	return func(next core.InvocationHandler) core.InvocationHandler {
+		return func(ctx core.Invocation) error {
+			limiter := limiterFor(ctx)
+			appendPacketLimiter(ctx, packetLimiter(limiter))
+			if !limiter.Allow() {
+				return ErrRateLimited
+			}
+			return next(ctx)
+		}
+	}
+}
+
+type ipLimiterEntry struct {
+	limiter  *rate.Limiter
+	lastSeen time.Time
+}
+
+func pruneIdleIPLimiters(limiters map[string]*ipLimiterEntry, now time.Time, idleTimeout time.Duration) {
+	for key, entry := range limiters {
+		if now.Sub(entry.lastSeen) >= idleTimeout {
+			delete(limiters, key)
 		}
 	}
 }
@@ -105,6 +167,62 @@ func normalizeRateLimitConfig(config RateLimitConfig) RateLimitConfig {
 		}
 	}
 	return config
+}
+
+func normalizeIPRateLimitConfig(config RateLimitConfig) RateLimitConfig {
+	config = normalizeRateLimitConfig(config)
+	if config.IdleTimeout <= 0 {
+		config.IdleTimeout = DefaultIPRateLimitIdleTimeout
+	}
+	return config
+}
+
+func appendPacketLimiter(ctx core.Invocation, limiter core.PacketLimiter) {
+	if limiter == nil {
+		return
+	}
+	if existing, ok := ctx.Get(core.PacketLimiterKey); ok {
+		if previous, ok := existing.(core.PacketLimiter); ok && previous != nil {
+			ctx.Set(core.PacketLimiterKey, core.PacketLimiter(func() error {
+				if err := previous(); err != nil {
+					return err
+				}
+				return limiter()
+			}))
+			return
+		}
+	}
+	ctx.Set(core.PacketLimiterKey, limiter)
+}
+
+func packetLimiter(limiter *rate.Limiter) core.PacketLimiter {
+	return func() error {
+		if !limiter.Allow() {
+			return ErrRateLimited
+		}
+		return nil
+	}
+}
+
+func remoteIPKey(remote string) string {
+	remote = strings.TrimSpace(remote)
+	if remote == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(remote); err == nil {
+		return normalizeIP(host)
+	}
+	return normalizeIP(remote)
+}
+
+func normalizeIP(host string) string {
+	host = strings.TrimSpace(host)
+	host = strings.TrimPrefix(host, "[")
+	host = strings.TrimSuffix(host, "]")
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String()
+	}
+	return host
 }
 
 func invocationDone(ctx core.Invocation) <-chan struct{} {
