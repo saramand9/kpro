@@ -293,11 +293,13 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 func (s *Server) shutdownRunners(ctx context.Context, runners []transport.Runner) error {
-	var err error
+	var shutdownErr error
 	for _, runner := range runners {
-		err = errors.Join(err, runner.Shutdown(ctx))
+		if err := runner.Shutdown(ctx); err != nil {
+			shutdownErr = errors.Join(shutdownErr, err)
+		}
 	}
-	return err
+	return shutdownErr
 }
 
 func (s *Server) shutdownResources(ctx context.Context) error {

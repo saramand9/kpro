@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"net"
 	"os"
@@ -96,22 +97,40 @@ func TestQUICMultipleStreamsOnOneConnection(t *testing.T) {
 
 	const streams = 4
 	var wg sync.WaitGroup
+	errCh := make(chan error, streams)
 	for i := 0; i < streams; i++ {
 		i := i
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			stream := openQUICTestStream(t, conn)
+			stream, err := openQUICTestStreamResult(conn)
+			if err != nil {
+				errCh <- fmt.Errorf("open quic stream: %w", err)
+				return
+			}
 			defer stream.Close()
 			want := core.Message{ID: core.MsgEcho, Seq: uint64(i + 1), Data: []byte{byte('a' + i)}}
-			writeQUICTestMessage(t, stream, want)
-			got := readQUICTestMessage(t, stream)
+			if err := writeQUICTestMessageResult(stream, want); err != nil {
+				errCh <- fmt.Errorf("write quic message: %w", err)
+				return
+			}
+			got, err := readQUICTestMessageResult(stream)
+			if err != nil {
+				errCh <- fmt.Errorf("read quic message: %w", err)
+				return
+			}
 			if got.ID != want.ID || got.Seq != want.Seq || string(got.Data) != string(want.Data) {
-				t.Fatalf("stream response = id=%d seq=%d data=%q", got.ID, got.Seq, string(got.Data))
+				errCh <- fmt.Errorf("stream response = id=%d seq=%d data=%q", got.ID, got.Seq, string(got.Data))
 			}
 		}()
 	}
 	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func TestQUICOversizedFrameClosesWithoutDispatch(t *testing.T) {
@@ -138,6 +157,26 @@ func TestQUICOversizedFrameClosesWithoutDispatch(t *testing.T) {
 	waitForQUICActiveCount(t, server, 0)
 	if handled.Load() != 0 {
 		t.Fatalf("handler calls = %d, want 0", handled.Load())
+	}
+}
+
+func TestNormalizeConfigUsesMaxStreams(t *testing.T) {
+	config := normalizeConfig(Config{MaxStreams: 7, MaxConnections: 3})
+	if config.MaxStreams != 7 {
+		t.Fatalf("max streams = %d, want 7", config.MaxStreams)
+	}
+	if config.MaxConnections != 7 {
+		t.Fatalf("legacy max connections = %d, want mirrored max streams 7", config.MaxConnections)
+	}
+}
+
+func TestNormalizeConfigKeepsLegacyMaxConnectionsCompatibility(t *testing.T) {
+	config := normalizeConfig(Config{MaxConnections: 5})
+	if config.MaxStreams != 5 {
+		t.Fatalf("max streams = %d, want legacy max connections 5", config.MaxStreams)
+	}
+	if config.MaxConnections != 5 {
+		t.Fatalf("legacy max connections = %d, want 5", config.MaxConnections)
 	}
 }
 
@@ -201,35 +240,54 @@ func dialQUICTest(t *testing.T, addr string) quicgo.Connection {
 func openQUICTestStream(t *testing.T, conn quicgo.Connection) quicgo.Stream {
 	t.Helper()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	stream, err := conn.OpenStreamSync(ctx)
+	stream, err := openQUICTestStreamResult(conn)
 	if err != nil {
 		t.Fatalf("open quic stream: %v", err)
 	}
 	return stream
 }
 
+func openQUICTestStreamResult(conn quicgo.Connection) (quicgo.Stream, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	return conn.OpenStreamSync(ctx)
+}
+
 func writeQUICTestMessage(t *testing.T, stream quicgo.Stream, msg core.Message) {
 	t.Helper()
-	frame, err := protocol.KProV1().Encode(msg)
-	if err != nil {
-		t.Fatalf("encode message: %v", err)
-	}
-	_ = stream.SetWriteDeadline(time.Now().Add(time.Second))
-	if _, err := stream.Write(frame); err != nil {
+	if err := writeQUICTestMessageResult(stream, msg); err != nil {
 		t.Fatalf("write quic message: %v", err)
 	}
 }
 
+func writeQUICTestMessageResult(stream quicgo.Stream, msg core.Message) error {
+	frame, err := protocol.KProV1().Encode(msg)
+	if err != nil {
+		return fmt.Errorf("encode message: %w", err)
+	}
+	_ = stream.SetWriteDeadline(time.Now().Add(time.Second))
+	if _, err := stream.Write(frame); err != nil {
+		return err
+	}
+	return nil
+}
+
 func readQUICTestMessage(t *testing.T, stream quicgo.Stream) core.Message {
 	t.Helper()
-	_ = stream.SetReadDeadline(time.Now().Add(time.Second))
-	result, err := protocol.KProV1().Read(stream, 64*1024)
+	msg, err := readQUICTestMessageResult(stream)
 	if err != nil {
 		t.Fatalf("read quic message: %v", err)
 	}
-	return result.Message
+	return msg
+}
+
+func readQUICTestMessageResult(stream quicgo.Stream) (core.Message, error) {
+	_ = stream.SetReadDeadline(time.Now().Add(time.Second))
+	result, err := protocol.KProV1().Read(stream, 64*1024)
+	if err != nil {
+		return core.Message{}, err
+	}
+	return result.Message, nil
 }
 
 func assertQUICStreamClosed(t *testing.T, stream quicgo.Stream) {

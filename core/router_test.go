@@ -107,6 +107,66 @@ func TestRouterAsyncHandlerDoesNotWaitForBlockedSyncHandler(t *testing.T) {
 	close(syncRelease)
 }
 
+func TestRouterShutdownDrainsQueuedAsyncTasks(t *testing.T) {
+	router := NewRouter(RouterConfig{
+		SyncQueueSize:         4,
+		AsyncWorkers:          1,
+		AsyncQueueSize:        4,
+		MaxInflightPerSession: 4,
+		SessionIdleTimeout:    time.Minute,
+		ShutdownTimeout:       time.Second,
+	})
+
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondHandled := make(chan struct{})
+	router.HandleAsync(10, func(ctx Context) error {
+		switch ctx.Message().Seq {
+		case 1:
+			close(firstStarted)
+			<-releaseFirst
+		case 2:
+			close(secondHandled)
+		}
+		return nil
+	})
+
+	session := newFakeSession(1)
+	if err := router.Dispatch(NewContext(session, Message{ID: 10, Seq: 1})); err != nil {
+		t.Fatalf("dispatch first async: %v", err)
+	}
+	waitForClosed(t, firstStarted, "first async handler did not start")
+	if err := router.Dispatch(NewContext(session, Message{ID: 10, Seq: 2})); err != nil {
+		t.Fatalf("dispatch second async: %v", err)
+	}
+
+	shutdownDone := make(chan error, 1)
+	go func() {
+		shutdownDone <- router.Shutdown(context.Background())
+	}()
+
+	select {
+	case err := <-shutdownDone:
+		t.Fatalf("shutdown completed before blocked async handler was released: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseFirst)
+	select {
+	case <-secondHandled:
+	case <-time.After(time.Second):
+		t.Fatal("queued async handler did not run during shutdown")
+	}
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("shutdown router: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not complete after async queue drained")
+	}
+}
+
 func TestRouterRejectsWhenSessionInflightLimitIsReached(t *testing.T) {
 	router := NewRouter(RouterConfig{
 		SyncQueueSize:         4,
@@ -258,6 +318,15 @@ func waitForRouterSessionCount(t *testing.T, router *Router, want int) {
 	got := len(router.sessions)
 	router.sessionsMu.Unlock()
 	t.Fatalf("router session count = %d, want %d", got, want)
+}
+
+func waitForClosed(t *testing.T, ch <-chan struct{}, message string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal(message)
+	}
 }
 
 func TestBaseContextValuesAreLazy(t *testing.T) {

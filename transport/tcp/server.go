@@ -13,6 +13,7 @@ import (
 
 	"github.com/saramand9/bignet/kpro/core"
 	"github.com/saramand9/bignet/kpro/protocol"
+	"github.com/saramand9/bignet/kpro/transport/internal/streamutil"
 )
 
 const (
@@ -212,7 +213,7 @@ func (s *session) writeLoop() {
 					return
 				}
 			}
-			if err := writeFull(s.raw, data); err != nil {
+			if err := streamutil.WriteFull(s.raw, data); err != nil {
 				_ = s.Close()
 				return
 			}
@@ -244,15 +245,4 @@ func normalizeConfig(config Config) Config {
 		config.WriteTimeout = DefaultWriteTimeout
 	}
 	return config
-}
-
-func writeFull(w io.Writer, data []byte) error {
-	for len(data) > 0 {
-		n, err := w.Write(data)
-		if err != nil {
-			return err
-		}
-		data = data[n:]
-	}
-	return nil
 }

@@ -13,13 +13,15 @@ import (
 	quicgo "github.com/quic-go/quic-go"
 	"github.com/saramand9/bignet/kpro/core"
 	"github.com/saramand9/bignet/kpro/protocol"
+	"github.com/saramand9/bignet/kpro/transport/internal/streamutil"
 )
 
 const (
 	DefaultAddr           = ":8444"
 	DefaultALPN           = "kpro-quic"
 	DefaultMaxFrameSize   = 64 * 1024
-	DefaultMaxConnections = 10000
+	DefaultMaxStreams     = 10000
+	DefaultMaxConnections = DefaultMaxStreams
 	DefaultSendQueueSize  = 64
 	DefaultReadTimeout    = 90 * time.Second
 	DefaultWriteTimeout   = 5 * time.Second
@@ -31,7 +33,8 @@ type Config struct {
 	Addr                 string
 	Protocol             protocol.StreamProtocol
 	MaxFrameSize         uint32
-	MaxConnections       int
+	MaxStreams           int
+	MaxConnections       int // Deprecated: use MaxStreams. QUIC sessions are bidirectional streams.
 	SendQueueSize        int
 	ReadTimeout          time.Duration
 	WriteTimeout         time.Duration
@@ -117,7 +120,7 @@ func (s *Server) acceptStreams(ctx context.Context, conn quicgo.Connection, hand
 		if err != nil {
 			return
 		}
-		if s.config.MaxConnections > 0 && atomic.LoadInt64(&s.active) >= int64(s.config.MaxConnections) {
+		if s.config.MaxStreams > 0 && atomic.LoadInt64(&s.active) >= int64(s.config.MaxStreams) {
 			stream.CancelRead(0)
 			stream.CancelWrite(0)
 			continue
@@ -229,7 +232,7 @@ func (s *session) writeLoop() {
 					return
 				}
 			}
-			if err := writeFull(s.stream, data); err != nil {
+			if err := streamutil.WriteFull(s.stream, data); err != nil {
 				_ = s.Close()
 				return
 			}
@@ -249,9 +252,13 @@ func normalizeConfig(config Config) Config {
 	if config.MaxFrameSize == 0 {
 		config.MaxFrameSize = DefaultMaxFrameSize
 	}
-	if config.MaxConnections <= 0 {
-		config.MaxConnections = DefaultMaxConnections
+	if config.MaxStreams <= 0 {
+		config.MaxStreams = config.MaxConnections
 	}
+	if config.MaxStreams <= 0 {
+		config.MaxStreams = DefaultMaxStreams
+	}
+	config.MaxConnections = config.MaxStreams
 	if config.SendQueueSize <= 0 {
 		config.SendQueueSize = DefaultSendQueueSize
 	}
@@ -299,15 +306,4 @@ func buildQUICConfig(config Config) *quicgo.Config {
 	cfg.HandshakeIdleTimeout = config.HandshakeIdleTimeout
 	cfg.MaxIdleTimeout = config.IdleTimeout
 	return cfg
-}
-
-func writeFull(w io.Writer, data []byte) error {
-	for len(data) > 0 {
-		n, err := w.Write(data)
-		if err != nil {
-			return err
-		}
-		data = data[n:]
-	}
-	return nil
 }

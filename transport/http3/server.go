@@ -10,6 +10,7 @@ import (
 
 	"github.com/quic-go/quic-go"
 	qh3 "github.com/quic-go/quic-go/http3"
+	"github.com/saramand9/bignet/kpro/core"
 	"github.com/saramand9/bignet/kpro/transport/httpx"
 )
 
@@ -31,7 +32,7 @@ type Config struct {
 }
 
 type Handler = httpx.Handler
-type Middleware = httpx.Middleware
+type Middleware = core.Middleware
 type Context = httpx.Context
 
 type Endpoint struct {

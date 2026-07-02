@@ -79,7 +79,8 @@ app.UDP(":8089", udp.Config{
 
 QUIC uses bidirectional QUIC streams as `core.Session` instances. It listens on
 UDP, requires TLS certificates, and runs KPro messages directly over each
-stream.
+stream. `quictransport.Config.MaxStreams` limits active stream sessions; the
+older `MaxConnections` field is kept as a compatibility alias.
 
 ```go
 app.QUIC(":8444", quictransport.Config{

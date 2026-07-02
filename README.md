@@ -101,7 +101,7 @@ transport/grpcx/
   Middleware bridge        unary/stream RPC -> core.Invocation
 
 middleware/
-  Recover / RateLimit / MaxPayload
+  Recover / RateLimit / MaxPayload / Metrics
                            unified invocation middleware
 
 server/
@@ -220,40 +220,43 @@ import (
 
 func main() {
 	app := server.New(server.Config{Name: "gateway"})
-	app.Use(middleware.Recover())
+	metrics := middleware.NewMetrics()
 
 	app.TCP(":8088", tcp.Config{
 		Protocol: protocol.KProV1(),
-	}).Use(middleware.Recover()).
+	}).Use(middleware.Recover(), metrics.Middleware()).
 		Handle(core.MsgEcho, echo)
 
 	app.KCP(":8090", kcp.Config{
 		Protocol: protocol.KProV1(),
-	}).Use(middleware.Recover()).
+	}).Use(middleware.Recover(), metrics.Middleware()).
 		Handle(core.MsgEcho, echo)
 
 	app.QUIC(":8444", quictransport.Config{
 		Protocol: protocol.KProV1(),
 		CertFile: "server.crt",
 		KeyFile:  "server.key",
-	}).Use(middleware.Recover()).
+	}).Use(middleware.Recover(), metrics.Middleware()).
 		Handle(core.MsgEcho, echo)
 
 	app.UDP(":8089", udp.Config{
 		Protocol:      protocol.KProV1(),
 		MaxPacketSize: 2048,
-	}).Use(middleware.Recover()).
+	}).Use(middleware.Recover(), metrics.Middleware()).
 		Handle(core.MsgEcho, echo)
 
 	app.WebSocket(":8091", "/ws", websocket.Config{
 		Protocol:   protocol.KProV1(),
 		MaxMessage: 64 * 1024,
-	}).Use(middleware.Recover()).
+	}).Use(middleware.Recover(), metrics.Middleware()).
 		Handle(core.MsgEcho, echo)
 
 	app.HTTP(":8080").
 		Get("/health", func(ctx *httpx.Context) error {
 			return ctx.Text(200, "ok\n")
+		}).
+		Get("/metrics", func(ctx *httpx.Context) error {
+			return ctx.JSON(200, metrics.Snapshot())
 		}).
 		Post("/echo", func(ctx *httpx.Context) error {
 			body, err := ctx.Body()
@@ -317,6 +320,12 @@ certificates and listens on UDP:
 go run .\cmd\kpro-universal-server -quic :8444 -quic-cert server.crt -quic-key server.key
 ```
 
+Limit active QUIC stream sessions with:
+
+```powershell
+go run .\cmd\kpro-universal-server -quic :8444 -quic-cert server.crt -quic-key server.key -quic-max-streams 10000
+```
+
 TCP validation:
 
 ```powershell
@@ -375,7 +384,7 @@ This path is useful for TCP load validation only. New framework code should use 
 - UDP and WebSocket have message boundaries, so they use `protocol.PacketProtocol`.
 - HTTP/HTTPS keep native method + path routing for REST-style APIs and do not convert requests into `core.Message`.
 - HTTP/3 uses the same path-routing handler model over QUIC/UDP and requires TLS certificates.
-- QUIC uses bidirectional QUIC streams as `core.Session` instances and runs KPro messages directly over them.
+- QUIC uses bidirectional QUIC streams as `core.Session` instances and runs KPro messages directly over them. `quic.Config.MaxStreams` limits active stream sessions; the older `MaxConnections` field is kept as a compatibility alias.
 - `server.Server.Use(...)` installs unified `core.Middleware` for TCP, UDP, WebSocket, HTTP, HTTPS, SSE and gRPC endpoints mounted before or after the call.
 - `core.Middleware` runs on `core.Invocation`; TCP, UDP and WebSocket build the invocation at real handler execution time after Router scheduling.
 - SSE is one-way server push and has its own `sse.Context`; the stream setup can reuse unified `core.Middleware`.
@@ -389,5 +398,15 @@ This path is useful for TCP load validation only. New framework code should use 
 
 ```powershell
 $env:GOCACHE='C:\tmp\go-build-bignet-kpro'
+gofmt -l .
 go test ./...
+go vet ./...
+
+Push/PR CI also runs:
+
+go test -race ./...
+
+cd .\benchmark\compare
+go test ./...
+go vet ./...
 ```

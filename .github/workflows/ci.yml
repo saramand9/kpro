@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting
+        run: |
+          files="$(gofmt -l .)"
+          if [ -n "$files" ]; then
+            echo "$files"
+            exit 1
+          fi
+
+      - name: Test root module
+        run: go test ./...
+
+      - name: Vet root module
+        run: go vet ./...
+
+      - name: Race test root module
+        run: go test -race ./...
+
+      - name: Test benchmark compare module
+        working-directory: benchmark/compare
+        run: go test ./...
+
+      - name: Vet benchmark compare module
+        working-directory: benchmark/compare
+        run: go vet ./...

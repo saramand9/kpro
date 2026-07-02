@@ -5,49 +5,16 @@ package httpx
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
-	"io"
-	"log"
 	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/saramand9/bignet/kpro/core"
 )
-
-const (
-	DefaultAddr            = ":8080"
-	DefaultShutdownTimeout = 5 * time.Second
-)
-
-// Config controls HTTP/HTTPS listener, TLS, timeouts, and logging.
-type Config struct {
-	// Addr is the listen address, for example ":8080" or "127.0.0.1:8080".
-	Addr string
-	// TLS switches ListenAndServe to ListenAndServeTLS.
-	TLS bool
-	// CertFile is the TLS certificate path used when TLS is true.
-	CertFile string
-	// KeyFile is the TLS key path used when TLS is true.
-	KeyFile string
-	// ReadTimeout is passed to net/http.Server.
-	ReadTimeout time.Duration
-	// WriteTimeout is passed to net/http.Server.
-	WriteTimeout time.Duration
-	// IdleTimeout is passed to net/http.Server.
-	IdleTimeout time.Duration
-	// ShutdownTimeout bounds graceful shutdown after the parent context is cancelled.
-	ShutdownTimeout time.Duration
-	// Logger receives net/http server error log output when provided.
-	Logger interface {
-		Printf(string, ...interface{})
-	}
-}
 
 // Handler processes one native HTTP request.
 type Handler func(*Context) error
@@ -264,15 +231,24 @@ func (e *Endpoint) serve(w http.ResponseWriter, r *http.Request) {
 
 func (e *Endpoint) serveHandler(h Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := &Context{w: w, r: r}
+		ctx := &Context{w: w, r: r, maxBody: e.config.MaxBodyBytes}
 		if err := h(ctx); err != nil {
 			if ctx.wroteHeader {
 				return
 			}
-			w.WriteHeader(http.StatusInternalServerError)
+			status := httpStatusForError(err)
+			w.WriteHeader(status)
 			_, _ = w.Write([]byte(err.Error()))
 		}
 	}
+}
+
+func httpStatusForError(err error) int {
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		return http.StatusRequestEntityTooLarge
+	}
+	return http.StatusInternalServerError
 }
 
 func (e *Endpoint) lookupHandler(path, method string) Handler {
@@ -458,228 +434,4 @@ func (p *BodyPayload) LimitPayload(size int) error {
 	}
 	p.ctx.r.Body = http.MaxBytesReader(p.ctx.w, p.ctx.r.Body, int64(size))
 	return nil
-}
-
-// Context is backed by net/http. Body caches the request body on first read so
-// handlers can call Body and CopyBody in either order.
-type Context struct {
-	w           http.ResponseWriter
-	r           *http.Request
-	header      http.Header
-	body        []byte
-	bodyRead    bool
-	status      int
-	wroteHeader bool
-}
-
-// Context returns the request cancellation and deadline context.
-func (c *Context) Context() context.Context {
-	if c == nil || c.r == nil {
-		return context.Background()
-	}
-	return c.r.Context()
-}
-
-// Header returns the mutable response headers.
-func (c *Context) Header() http.Header {
-	if c.header == nil {
-		c.header = c.w.Header()
-	}
-	return c.header
-}
-
-// WriteHeader sends the response status once.
-func (c *Context) WriteHeader(status int) {
-	if c.wroteHeader {
-		return
-	}
-	c.wroteHeader = true
-	c.status = status
-	c.w.WriteHeader(status)
-}
-
-// Write sends a response body, defaulting the status to 200.
-func (c *Context) Write(body []byte) (int, error) {
-	if !c.wroteHeader {
-		c.WriteHeader(http.StatusOK)
-	}
-	return c.w.Write(body)
-}
-
-func (c *Context) setContentType(contentType string) {
-	if contentType == "" {
-		return
-	}
-	c.w.Header().Set("Content-Type", contentType)
-}
-
-// Body reads and caches the request body.
-func (c *Context) Body() ([]byte, error) {
-	if c.bodyRead {
-		return c.body, nil
-	}
-	if c.r.Body == nil {
-		c.bodyRead = true
-		return nil, nil
-	}
-	body, err := io.ReadAll(c.r.Body)
-	if err != nil {
-		return nil, err
-	}
-	c.body = body
-	c.bodyRead = true
-	return c.body, nil
-}
-
-// Method returns the HTTP method.
-func (c *Context) Method() string {
-	return c.r.Method
-}
-
-// MethodBytes returns the HTTP method as bytes.
-func (c *Context) MethodBytes() []byte {
-	return []byte(c.r.Method)
-}
-
-// Path returns the URL path.
-func (c *Context) Path() string {
-	if c.r.URL == nil {
-		return ""
-	}
-	return c.r.URL.Path
-}
-
-// PathBytes returns the URL path as bytes.
-func (c *Context) PathBytes() []byte {
-	return []byte(c.Path())
-}
-
-// RawQuery returns the URL query string without the leading question mark.
-func (c *Context) RawQuery() string {
-	if c.r.URL == nil {
-		return ""
-	}
-	return c.r.URL.RawQuery
-}
-
-// Host returns the request host.
-func (c *Context) Host() string {
-	return c.r.Host
-}
-
-// ContentLength returns the declared or cached request body length.
-func (c *Context) ContentLength() int {
-	if c.r.ContentLength > 0 {
-		return int(c.r.ContentLength)
-	}
-	body, err := c.Body()
-	if err != nil {
-		return 0
-	}
-	return len(body)
-}
-
-// Bytes writes a byte response with status and content type.
-func (c *Context) Bytes(status int, contentType string, body []byte) error {
-	c.setContentType(contentType)
-	c.WriteHeader(status)
-	if len(body) == 0 {
-		return nil
-	}
-	_, err := c.w.Write(body)
-	return err
-}
-
-// Stream copies reader to the response with status and content type.
-func (c *Context) Stream(status int, contentType string, reader io.Reader) error {
-	c.setContentType(contentType)
-	c.WriteHeader(status)
-	if reader == nil {
-		return nil
-	}
-	_, err := io.Copy(c.w, reader)
-	return err
-}
-
-// CopyBody copies the current request body into the response.
-// Use Body directly only when the handler consumes the data before returning.
-func (c *Context) CopyBody(status int, contentType string) error {
-	body, err := c.Body()
-	if err != nil {
-		return err
-	}
-	c.setContentType(contentType)
-	c.WriteHeader(status)
-	if len(body) == 0 {
-		return nil
-	}
-	copied := make([]byte, len(body))
-	copy(copied, body)
-	_, err = c.w.Write(copied)
-	return err
-}
-
-// Text writes a plain-text response.
-func (c *Context) Text(status int, text string) error {
-	c.setContentType("text/plain; charset=utf-8")
-	c.WriteHeader(status)
-	_, err := io.WriteString(c.w, text)
-	return err
-}
-
-// JSON marshals value and writes an application/json response.
-func (c *Context) JSON(status int, value interface{}) error {
-	body, err := json.Marshal(value)
-	if err != nil {
-		return err
-	}
-	c.setContentType("application/json; charset=utf-8")
-	c.WriteHeader(status)
-	_, err = c.w.Write(body)
-	return err
-}
-
-// Query returns a query parameter value.
-func (c *Context) Query(key string) string {
-	if c.r.URL == nil {
-		return ""
-	}
-	return c.r.URL.Query().Get(key)
-}
-
-func normalizeConfig(config Config) Config {
-	if config.Addr == "" {
-		config.Addr = DefaultAddr
-	}
-	if config.ShutdownTimeout <= 0 {
-		config.ShutdownTimeout = DefaultShutdownTimeout
-	}
-	return config
-}
-
-func ignoreServerClosed(err error) error {
-	if errors.Is(err, http.ErrServerClosed) {
-		return nil
-	}
-	return err
-}
-
-func errorLogger(logger interface {
-	Printf(string, ...interface{})
-}) *log.Logger {
-	if logger == nil {
-		return nil
-	}
-	return log.New(&logWriter{logger: logger}, "", 0)
-}
-
-type logWriter struct {
-	logger interface {
-		Printf(string, ...interface{})
-	}
-}
-
-func (l *logWriter) Write(p []byte) (int, error) {
-	l.logger.Printf("%s", string(p))
-	return len(p), nil
 }
