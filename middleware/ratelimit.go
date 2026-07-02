@@ -79,7 +79,14 @@ func ConnRateLimit(config RateLimitConfig) core.Middleware {
 
 	return func(next core.InvocationHandler) core.InvocationHandler {
 		return func(ctx core.Invocation) error {
-			if !limiterFor(ctx).Allow() {
+			limiter := limiterFor(ctx)
+			ctx.Set(core.PacketLimiterKey, core.PacketLimiter(func() error {
+				if !limiter.Allow() {
+					return ErrRateLimited
+				}
+				return nil
+			}))
+			if !limiter.Allow() {
 				return ErrRateLimited
 			}
 			return next(ctx)
@@ -101,6 +108,11 @@ func normalizeRateLimitConfig(config RateLimitConfig) RateLimitConfig {
 }
 
 func invocationDone(ctx core.Invocation) <-chan struct{} {
+	if connDoneCtx, ok := ctx.(interface{ ConnDone() <-chan struct{} }); ok {
+		if done := connDoneCtx.ConnDone(); done != nil {
+			return done
+		}
+	}
 	if doneCtx, ok := ctx.(interface{ Done() <-chan struct{} }); ok {
 		if done := doneCtx.Done(); done != nil {
 			return done

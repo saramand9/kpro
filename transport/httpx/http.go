@@ -54,6 +54,31 @@ type Handler func(*Context) error
 
 type compiledRoutes map[string]map[string]Handler
 
+type connContextKey struct{}
+
+type connState struct {
+	id        uint64
+	remote    string
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+func (s *connState) Done() <-chan struct{} {
+	if s == nil {
+		return nil
+	}
+	return s.done
+}
+
+func (s *connState) close() {
+	if s == nil {
+		return
+	}
+	s.closeOnce.Do(func() {
+		close(s.done)
+	})
+}
+
 // Endpoint routes native HTTP requests and exposes them to middleware as invocations.
 type Endpoint struct {
 	config Config
@@ -63,6 +88,10 @@ type Endpoint struct {
 	routes      map[string]map[string]Handler
 	middlewares []core.Middleware
 	compiled    atomic.Value
+
+	connMu     sync.Mutex
+	conns      map[net.Conn]*connState
+	nextConnID uint64
 }
 
 // New creates an HTTP endpoint with normalized defaults.
@@ -71,6 +100,7 @@ func New(config Config) *Endpoint {
 	e := &Endpoint{
 		config: config,
 		routes: make(map[string]map[string]Handler),
+		conns:  make(map[net.Conn]*connState),
 	}
 	e.compiled.Store(compiledRoutes{})
 	return e
@@ -168,7 +198,47 @@ func (e *Endpoint) buildServer() *http.Server {
 		WriteTimeout: e.config.WriteTimeout,
 		IdleTimeout:  e.config.IdleTimeout,
 		ErrorLog:     errorLogger(e.config.Logger),
+		ConnContext:  e.connContext,
+		ConnState:    e.trackConnState,
 	}
+}
+
+func (e *Endpoint) connContext(ctx context.Context, conn net.Conn) context.Context {
+	state := &connState{
+		id:     atomic.AddUint64(&e.nextConnID, 1),
+		remote: remoteFromConn(conn),
+		done:   make(chan struct{}),
+	}
+	e.connMu.Lock()
+	e.conns[conn] = state
+	e.connMu.Unlock()
+	return context.WithValue(ctx, connContextKey{}, state)
+}
+
+func (e *Endpoint) trackConnState(conn net.Conn, state http.ConnState) {
+	if state != http.StateClosed && state != http.StateHijacked {
+		return
+	}
+	e.connMu.Lock()
+	tracked := e.conns[conn]
+	delete(e.conns, conn)
+	e.connMu.Unlock()
+	tracked.close()
+}
+
+func httpConnStateFromContext(ctx context.Context) *connState {
+	if ctx == nil {
+		return nil
+	}
+	state, _ := ctx.Value(connContextKey{}).(*connState)
+	return state
+}
+
+func remoteFromConn(conn net.Conn) string {
+	if conn == nil || conn.RemoteAddr() == nil {
+		return ""
+	}
+	return conn.RemoteAddr().String()
 }
 
 func (e *Endpoint) serve(w http.ResponseWriter, r *http.Request) {
@@ -245,20 +315,27 @@ func newHTTPInvocation(ctx *Context, tls bool, operation string, payload any) co
 		transport = core.TransportHTTPS
 	}
 	remote := ""
-	if addr := parseRemoteAddr(ctx.r.RemoteAddr); addr != nil {
+	connID := sessionIDFromRemote(ctx.r.RemoteAddr)
+	var connDone <-chan struct{}
+	if state := httpConnStateFromContext(ctx.r.Context()); state != nil {
+		connID = state.id
+		remote = state.remote
+		connDone = state.Done()
+	} else if addr := parseRemoteAddr(ctx.r.RemoteAddr); addr != nil {
 		remote = addr.String()
 	}
 	return core.NewInvocation(core.InvocationOptions{
 		Context:   ctx.r.Context(),
 		Transport: transport,
 		Operation: operation,
-		ConnID:    sessionIDFromRemote(ctx.r.RemoteAddr),
+		ConnID:    connID,
 		Remote:    remote,
 		Headers:   httpHeaders(ctx.r),
 		Meta:      httpMeta(ctx.r),
 		Payload:   payload,
 		Native:    ctx,
 		Done:      ctx.r.Context().Done(),
+		ConnDone:  connDone,
 	})
 }
 
