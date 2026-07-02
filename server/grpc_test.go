@@ -2,10 +2,12 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"testing"
 	"time"
 
+	"github.com/saramand9/bignet/kpro/core"
 	"github.com/saramand9/bignet/kpro/kprogrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -22,6 +24,17 @@ func (grpcTestGreeter) SayHello(_ context.Context, req *wrapperspb.StringValue) 
 
 func TestServerGRPCRunsWithAppLifecycle(t *testing.T) {
 	app := New()
+	callSeen := make(chan struct{}, 1)
+	middlewareErr := make(chan error, 1)
+	app.Use(func(next core.InvocationHandler) core.InvocationHandler {
+		return func(ctx core.Invocation) error {
+			if ctx.Transport() != core.TransportGRPC {
+				return recordServerTestMiddlewareError(middlewareErr, fmt.Errorf("transport = %s", ctx.Transport()))
+			}
+			callSeen <- struct{}{}
+			return next(ctx)
+		}
+	})
 	endpoint := app.GRPC("127.0.0.1:0")
 	kprogrpc.RegisterGreeter(endpoint, grpcTestGreeter{})
 
@@ -43,6 +56,8 @@ func TestServerGRPCRunsWithAppLifecycle(t *testing.T) {
 	if resp.Value != "hello server" {
 		t.Fatalf("response = %q", resp.Value)
 	}
+	assertNoServerTestMiddlewareError(t, middlewareErr)
+	waitForSignal(t, callSeen, "grpc middleware")
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer shutdownCancel()

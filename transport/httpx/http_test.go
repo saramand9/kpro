@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/bignet/kpro/middleware"
 )
 
 func TestContextBytes(t *testing.T) {
@@ -128,6 +129,28 @@ func TestMiddlewareSnapshotRebuildsAfterUse(t *testing.T) {
 		if got := resp.Header().Get("X-Middleware"); got != "hit" {
 			t.Fatalf("%s middleware header = %q", path, got)
 		}
+	}
+}
+
+func TestMaxPayloadRejectsByContentLengthWithoutReadingBody(t *testing.T) {
+	endpoint := New(Config{})
+	handlerCalled := false
+	endpoint.Use(middleware.MaxPayload(3))
+	endpoint.Post("/limited", func(ctx *Context) error {
+		handlerCalled = true
+		return ctx.Text(http.StatusOK, "unexpected")
+	})
+
+	resp := executeTestRequest(endpoint, http.MethodPost, "/limited", "toolong")
+
+	if handlerCalled {
+		t.Fatal("handler should not be called")
+	}
+	if resp.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusInternalServerError)
+	}
+	if got := resp.Body.String(); !strings.Contains(got, "payload too large") {
+		t.Fatalf("body = %q, want payload too large error", got)
 	}
 }
 

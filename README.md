@@ -25,7 +25,7 @@ SSE         implemented
 gRPC        implemented through kprogrpc and server.GRPC
 ```
 
-There is also a legacy production TCP baseline in the root `kpro` package. The universal server is built in subpackages such as `server`, `core`, `protocol` and `transport`.
+There is also a legacy TCP validation baseline in `kpro/legacy`. The universal server in `server`, `core`, `protocol` and `transport` is the framework direction.
 
 ## Architecture
 
@@ -57,7 +57,7 @@ flowchart TD
 
 ```text
 cmd/
-  kpro-client/             TCP benchmark client
+  kpro-client/             legacy TCP benchmark client
   kpro-server/             legacy TCP echo server
   kpro-universal-server/   multi-transport example server
 
@@ -298,7 +298,7 @@ See [examples/README.md](examples/README.md) for startup commands.
 
 ## Legacy TCP Server
 
-The root package also contains the earlier production-oriented TCP baseline:
+The `kpro/legacy` package contains the earlier TCP validation baseline:
 
 ```text
 accept loop
@@ -315,7 +315,7 @@ Run it with:
 go run .\cmd\kpro-server -host 0.0.0.0 -port 8088 -max-conns 10000 -workers 16
 ```
 
-This path is useful for TCP load validation. The universal server path is the framework direction.
+This path is useful for TCP load validation only. New framework code should use `server.New` and transports under `transport/`.
 
 ## Design Notes
 

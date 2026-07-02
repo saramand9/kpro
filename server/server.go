@@ -17,6 +17,19 @@ import (
 
 var ErrNoTransports = errors.New("no transports registered")
 
+// MiddlewareTarget can be implemented by custom runners that want app-level
+// middleware installed through Server.Use.
+type MiddlewareTarget interface {
+	ApplyMiddleware(...core.Middleware)
+}
+
+var (
+	_ MiddlewareTarget = (*Endpoint)(nil)
+	_ MiddlewareTarget = (*httpx.Endpoint)(nil)
+	_ MiddlewareTarget = (*sse.Endpoint)(nil)
+	_ MiddlewareTarget = (*kprogrpc.Server)(nil)
+)
+
 type Config struct {
 	Name   string
 	Router core.RouterConfig
@@ -85,15 +98,8 @@ func applyMiddlewares(runner transport.Runner, middlewares ...core.Middleware) {
 	if len(middlewares) == 0 {
 		return
 	}
-	switch endpoint := runner.(type) {
-	case *Endpoint:
-		endpoint.Use(middlewares...)
-	case *httpx.Endpoint:
-		endpoint.Use(middlewares...)
-	case *sse.Endpoint:
-		endpoint.Use(middlewares...)
-	case *kprogrpc.Server:
-		endpoint.Use(middlewares...)
+	if target, ok := runner.(MiddlewareTarget); ok {
+		target.ApplyMiddleware(middlewares...)
 	}
 }
 func (s *Server) TCP(addr string, config ...tcp.Config) *Endpoint {
@@ -226,8 +232,12 @@ type Endpoint struct {
 }
 
 func (e *Endpoint) Use(middlewares ...core.Middleware) *Endpoint {
-	e.router.Use(middlewares...)
+	e.ApplyMiddleware(middlewares...)
 	return e
+}
+
+func (e *Endpoint) ApplyMiddleware(middlewares ...core.Middleware) {
+	e.router.Use(middlewares...)
 }
 
 func (e *Endpoint) Handle(msgID uint32, h core.Handler) *Endpoint {
