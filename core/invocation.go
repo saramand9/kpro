@@ -10,6 +10,12 @@ import (
 
 const messageOperationPrefix = "message/"
 
+// PacketLimiterKey stores an optional packet-level limiter on native contexts.
+const PacketLimiterKey = "kpro.packet_limiter"
+
+// PacketLimiter rejects protocol packets or stream events before they are processed.
+type PacketLimiter func() error
+
 // InvocationHandler processes one protocol-level invocation.
 type InvocationHandler func(Invocation) error
 
@@ -73,6 +79,8 @@ type InvocationOptions struct {
 	Native any
 	// Done optionally carries the transport/session cancellation signal.
 	Done <-chan struct{}
+	// ConnDone optionally carries the underlying connection cancellation signal.
+	ConnDone <-chan struct{}
 }
 
 // BaseInvocation is the default Invocation implementation.
@@ -87,6 +95,7 @@ type BaseInvocation struct {
 	payload   any
 	native    any
 	done      <-chan struct{}
+	connDone  <-chan struct{}
 	values    map[string]any
 }
 
@@ -107,6 +116,7 @@ func NewInvocation(opts InvocationOptions) *BaseInvocation {
 		payload:   opts.Payload,
 		native:    opts.Native,
 		done:      opts.Done,
+		connDone:  opts.ConnDone,
 	}
 }
 
@@ -194,6 +204,11 @@ func (c *BaseInvocation) Native() any {
 // Done returns the cancellation channel associated with the invocation.
 func (c *BaseInvocation) Done() <-chan struct{} {
 	return c.done
+}
+
+// ConnDone returns the cancellation channel associated with the underlying connection.
+func (c *BaseInvocation) ConnDone() <-chan struct{} {
+	return c.connDone
 }
 
 // Set stores a middleware-local value, delegating to Native when supported.

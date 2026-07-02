@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/stats"
 )
 
 // DefaultShutdownTimeout is the fallback graceful-stop timeout.
@@ -32,6 +33,7 @@ type Server struct {
 	serverOptions   []grpc.ServerOption
 	middlewares     []core.Middleware
 	middlewareValue atomic.Value
+	connTracker     *connStatsHandler
 	shutdownTimeout time.Duration
 
 	mu sync.Mutex
@@ -42,6 +44,7 @@ type Server struct {
 func NewServer(addr string, opts ...Option) *Server {
 	s := &Server{
 		addr:            addr,
+		connTracker:     &connStatsHandler{},
 		shutdownTimeout: DefaultShutdownTimeout,
 	}
 	s.middlewareValue.Store([]core.Middleware{})
@@ -210,8 +213,74 @@ type StreamInvocationNative struct {
 	Info *grpc.StreamServerInfo
 }
 
+type connContextKey struct{}
+
+type connState struct {
+	id        uint64
+	remote    string
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+func (s *connState) Done() <-chan struct{} {
+	if s == nil {
+		return nil
+	}
+	return s.done
+}
+
+func (s *connState) close() {
+	if s == nil {
+		return
+	}
+	s.closeOnce.Do(func() {
+		close(s.done)
+	})
+}
+
+type connStatsHandler struct {
+	nextID uint64
+}
+
+func (h *connStatsHandler) TagConn(ctx context.Context, info *stats.ConnTagInfo) context.Context {
+	state := &connState{
+		id:     atomic.AddUint64(&h.nextID, 1),
+		remote: grpcRemoteFromAddr(info.RemoteAddr),
+		done:   make(chan struct{}),
+	}
+	return context.WithValue(ctx, connContextKey{}, state)
+}
+
+func (h *connStatsHandler) HandleConn(ctx context.Context, stat stats.ConnStats) {
+	if _, ok := stat.(*stats.ConnEnd); ok {
+		grpcConnStateFromContext(ctx).close()
+	}
+}
+
+func (h *connStatsHandler) TagRPC(ctx context.Context, _ *stats.RPCTagInfo) context.Context {
+	return ctx
+}
+
+func (h *connStatsHandler) HandleRPC(context.Context, stats.RPCStats) {}
+
+func grpcConnStateFromContext(ctx context.Context) *connState {
+	if ctx == nil {
+		return nil
+	}
+	state, _ := ctx.Value(connContextKey{}).(*connState)
+	return state
+}
+
+func grpcRemoteFromAddr(addr net.Addr) string {
+	if addr == nil {
+		return ""
+	}
+	return addr.String()
+}
+
 func (s *Server) newGRPCServer() *grpc.Server {
 	opts := append([]grpc.ServerOption(nil), s.serverOptions...)
+	opts = append(opts, grpc.StatsHandler(s.connTracker))
 	opts = append(opts,
 		grpc.ChainUnaryInterceptor(s.unaryCallInterceptor()),
 		grpc.ChainStreamInterceptor(s.streamCallInterceptor()),
@@ -245,9 +314,17 @@ func (s *Server) streamCallInterceptor() grpc.StreamServerInterceptor {
 			return handler(srv, stream)
 		}
 
+		limited := &middlewareServerStream{
+			ServerStream: stream,
+		}
 		inv := newStreamInvocation(srv, stream, info)
-		invHandler := core.Chain(middlewares...)(func(core.Invocation) error {
-			return handler(srv, stream)
+		invHandler := core.Chain(middlewares...)(func(ctx core.Invocation) error {
+			if value, ok := ctx.Get(core.PacketLimiterKey); ok {
+				if limiter, ok := value.(core.PacketLimiter); ok {
+					limited.packetLimiter = limiter
+				}
+			}
+			return handler(srv, limited)
 		})
 		return invHandler(inv)
 	}
@@ -258,17 +335,40 @@ func (s *Server) middlewaresSnapshot() []core.Middleware {
 	return middlewares
 }
 
-func newUnaryInvocation(ctx context.Context, req any, info *grpc.UnaryServerInfo) core.Invocation {
-	remote := ""
-	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
-		remote = p.Addr.String()
+type middlewareServerStream struct {
+	grpc.ServerStream
+	packetLimiter core.PacketLimiter
+}
+
+func (s *middlewareServerStream) RecvMsg(msg any) error {
+	if err := s.ServerStream.RecvMsg(msg); err != nil {
+		return err
 	}
+	return s.runMessageMiddlewares("recv", msg)
+}
+
+func (s *middlewareServerStream) SendMsg(msg any) error {
+	if err := s.runMessageMiddlewares("send", msg); err != nil {
+		return err
+	}
+	return s.ServerStream.SendMsg(msg)
+}
+
+func (s *middlewareServerStream) runMessageMiddlewares(string, any) error {
+	if s.packetLimiter == nil {
+		return nil
+	}
+	return s.packetLimiter()
+}
+
+func newUnaryInvocation(ctx context.Context, req any, info *grpc.UnaryServerInfo) core.Invocation {
+	remote, connID, connDone := grpcConnectionInfo(ctx)
 	service, method := splitFullMethod(info.FullMethod)
 	return core.NewInvocation(core.InvocationOptions{
 		Context:   ctx,
 		Transport: core.TransportGRPC,
 		Operation: info.FullMethod,
-		ConnID:    connIDFromRemote(remote),
+		ConnID:    connID,
 		Remote:    remote,
 		Headers:   metadataHeaders(ctx),
 		Meta: map[string]any{
@@ -282,22 +382,20 @@ func newUnaryInvocation(ctx context.Context, req any, info *grpc.UnaryServerInfo
 			Request: req,
 			Info:    info,
 		},
-		Done: ctx.Done(),
+		Done:     ctx.Done(),
+		ConnDone: connDone,
 	})
 }
 
 func newStreamInvocation(srv any, stream grpc.ServerStream, info *grpc.StreamServerInfo) core.Invocation {
 	ctx := stream.Context()
-	remote := ""
-	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
-		remote = p.Addr.String()
-	}
+	remote, connID, connDone := grpcConnectionInfo(ctx)
 	service, method := splitFullMethod(info.FullMethod)
 	return core.NewInvocation(core.InvocationOptions{
 		Context:   ctx,
 		Transport: core.TransportGRPC,
 		Operation: info.FullMethod,
-		ConnID:    connIDFromRemote(remote),
+		ConnID:    connID,
 		Remote:    remote,
 		Headers:   metadataHeaders(ctx),
 		Meta: map[string]any{
@@ -313,10 +411,21 @@ func newStreamInvocation(srv any, stream grpc.ServerStream, info *grpc.StreamSer
 			Stream: stream,
 			Info:   info,
 		},
-		Done: ctx.Done(),
+		Done:     ctx.Done(),
+		ConnDone: connDone,
 	})
 }
 
+func grpcConnectionInfo(ctx context.Context) (string, uint64, <-chan struct{}) {
+	if state := grpcConnStateFromContext(ctx); state != nil {
+		return state.remote, state.id, state.Done()
+	}
+	remote := ""
+	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
+		remote = p.Addr.String()
+	}
+	return remote, connIDFromRemote(remote), nil
+}
 func metadataHeaders(ctx context.Context) map[string]string {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok || len(md) == 0 {
