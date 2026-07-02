@@ -1,3 +1,6 @@
+// File: middleware/limit.go
+// Purpose: Defines or tests reusable KPro invocation middleware.
+
 package middleware
 
 import (
@@ -6,6 +9,7 @@ import (
 	"github.com/saramand9/bignet/kpro/core"
 )
 
+// MaxPayload rejects invocations whose payload size exceeds size.
 func MaxPayload(size int) core.Middleware {
 	return func(next core.InvocationHandler) core.InvocationHandler {
 		return func(ctx core.Invocation) error {

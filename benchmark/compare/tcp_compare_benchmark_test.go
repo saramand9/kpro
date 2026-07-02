@@ -1,3 +1,6 @@
+// File: benchmark/compare/tcp_compare_benchmark_test.go
+// Purpose: Benchmarks KPro transports and comparison baselines.
+
 package compare
 
 import (

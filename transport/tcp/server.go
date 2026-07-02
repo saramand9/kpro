@@ -1,3 +1,6 @@
+// File: transport/tcp/server.go
+// Purpose: Implements the TCP transport adapter for KPro message sessions.
+
 package tcp
 
 import (
@@ -21,16 +24,25 @@ const (
 	DefaultWriteTimeout   = 5 * time.Second
 )
 
+// Config controls TCP listener, protocol, queue, and timeout settings.
 type Config struct {
-	Addr           string
-	Protocol       protocol.StreamProtocol
-	MaxFrameSize   uint32
+	// Addr is the TCP listen address.
+	Addr string
+	// Protocol decodes and encodes stream frames. Nil uses protocol.KProV1().
+	Protocol protocol.StreamProtocol
+	// MaxFrameSize limits decoded frame payload size.
+	MaxFrameSize uint32
+	// MaxConnections caps active TCP sessions.
 	MaxConnections int
-	SendQueueSize  int
-	ReadTimeout    time.Duration
-	WriteTimeout   time.Duration
+	// SendQueueSize is the per-session outbound message queue length.
+	SendQueueSize int
+	// ReadTimeout is applied before each frame read.
+	ReadTimeout time.Duration
+	// WriteTimeout is applied before each frame write.
+	WriteTimeout time.Duration
 }
 
+// Server accepts TCP connections and turns frames into core.Message contexts.
 type Server struct {
 	config Config
 	ln     net.Listener
@@ -40,18 +52,22 @@ type Server struct {
 	sessions sync.Map
 }
 
+// New creates a TCP transport with normalized defaults.
 func New(config Config) *Server {
 	return &Server{config: normalizeConfig(config)}
 }
 
+// NewServer is an alias for New.
 func NewServer(config Config) *Server {
 	return New(config)
 }
 
+// Name returns the transport name.
 func (s *Server) Name() string {
 	return "tcp"
 }
 
+// ListenAndServe accepts TCP connections until ctx is cancelled or the listener fails.
 func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error {
 	ln, err := net.Listen("tcp", s.config.Addr)
 	if err != nil {
@@ -92,6 +108,7 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 	}
 }
 
+// Shutdown closes the listener and all active TCP sessions.
 func (s *Server) Shutdown(context.Context) error {
 	if s.ln != nil {
 		_ = s.ln.Close()

@@ -1,3 +1,6 @@
+// File: example/internal/wsclient/wsclient.go
+// Purpose: Provides runnable KPro example code.
+
 package wsclient
 
 import (
@@ -21,13 +24,16 @@ const (
 	OpPong   = 0xa
 )
 
+// ErrBadHandshake reports a non-101 WebSocket upgrade response.
 var ErrBadHandshake = errors.New("bad websocket handshake")
 
+// Conn is a minimal WebSocket client connection for examples.
 type Conn struct {
 	net.Conn
 	reader *bufio.Reader
 }
 
+// Dial opens a minimal WebSocket connection.
 func Dial(rawURL string, timeout time.Duration) (*Conn, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -70,14 +76,17 @@ func Dial(rawURL string, timeout time.Duration) (*Conn, error) {
 	return &Conn{Conn: conn, reader: reader}, nil
 }
 
+// ReadFrame reads one frame from the connection.
 func (c *Conn) ReadFrame(maxSize int) (byte, []byte, error) {
 	return ReadFrame(c.reader, maxSize)
 }
 
+// WriteFrame writes one masked client frame.
 func (c *Conn) WriteFrame(opcode byte, payload []byte) error {
 	return WriteFrame(c.Conn, opcode, payload, true)
 }
 
+// ReadFrame parses one WebSocket frame from r.
 func ReadFrame(r io.Reader, maxSize int) (byte, []byte, error) {
 	var header [2]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
@@ -123,6 +132,7 @@ func ReadFrame(r io.Reader, maxSize int) (byte, []byte, error) {
 	return opcode, payload, nil
 }
 
+// WriteFrame serializes one WebSocket frame.
 func WriteFrame(w io.Writer, opcode byte, payload []byte, masked bool) error {
 	header := []byte{0x80 | opcode}
 	length := len(payload)

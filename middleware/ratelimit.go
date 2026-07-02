@@ -1,3 +1,6 @@
+// File: middleware/ratelimit.go
+// Purpose: Defines or tests reusable KPro invocation middleware.
+
 package middleware
 
 import (
@@ -8,13 +11,18 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// ErrRateLimited is returned when a rate limiter rejects an invocation.
 var ErrRateLimited = errors.New("rate limit exceeded")
 
+// RateLimitConfig configures token-bucket middleware limits.
 type RateLimitConfig struct {
-	Rate  rate.Limit
+	// Rate is the allowed event rate. Values <= 0 use a default of 1000.
+	Rate rate.Limit
+	// Burst is the token bucket burst size. Values <= 0 derive from Rate.
 	Burst int
 }
 
+// RateLimit applies one shared token bucket across all invocations.
 func RateLimit(config RateLimitConfig) core.Middleware {
 	config = normalizeRateLimitConfig(config)
 	limiter := rate.NewLimiter(config.Rate, config.Burst)
@@ -29,6 +37,7 @@ func RateLimit(config RateLimitConfig) core.Middleware {
 	}
 }
 
+// ConnRateLimit applies one token bucket per invocation connection id.
 func ConnRateLimit(config RateLimitConfig) core.Middleware {
 	config = normalizeRateLimitConfig(config)
 

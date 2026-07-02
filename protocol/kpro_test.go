@@ -1,3 +1,6 @@
+// File: protocol/kpro_test.go
+// Purpose: Defines or tests KPro wire protocol encoding and decoding.
+
 package protocol
 
 import (

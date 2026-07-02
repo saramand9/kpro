@@ -1,3 +1,6 @@
+// File: examples/internal/wire/websocket.go
+// Purpose: Provides runnable KPro example code.
+
 package wire
 
 import (
@@ -16,6 +19,7 @@ import (
 
 const wsMagic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
+// DialWebSocket performs a minimal client WebSocket upgrade.
 func DialWebSocket(rawURL string) (net.Conn, *bufio.Reader, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -66,6 +70,7 @@ func DialWebSocket(rawURL string) (net.Conn, *bufio.Reader, error) {
 	return conn, reader, nil
 }
 
+// WriteWebSocketBinary writes one masked binary WebSocket frame.
 func WriteWebSocketBinary(w io.Writer, payload []byte) error {
 	header := []byte{0x82}
 	length := len(payload)
@@ -95,6 +100,7 @@ func WriteWebSocketBinary(w io.Writer, payload []byte) error {
 	return err
 }
 
+// ReadWebSocketBinary reads one text or binary WebSocket payload.
 func ReadWebSocketBinary(r *bufio.Reader, maxSize int) ([]byte, error) {
 	var header [2]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {

@@ -1,3 +1,6 @@
+// File: legacy/server.go
+// Purpose: Implements or tests the legacy TCP validation server.
+
 package legacy
 
 import (
@@ -20,6 +23,7 @@ type requestTask struct {
 	msg  Message
 }
 
+// Server is the legacy TCP validation server retained for load testing.
 type Server struct {
 	config  Config
 	ln      net.Listener
@@ -38,6 +42,7 @@ type Server struct {
 	middlewares []core.Middleware
 }
 
+// NewServer creates a legacy TCP validation server.
 func NewServer(c Config) *Server {
 	c = normalizeConfig(c)
 	if c.WorkerCount <= 0 {
@@ -55,22 +60,26 @@ func NewServer(c Config) *Server {
 	}
 }
 
+// Handle registers a handler for a legacy message id.
 func (s *Server) Handle(msgID uint32, h Handler) {
 	s.routerMu.Lock()
 	s.handlers[msgID] = h
 	s.routerMu.Unlock()
 }
 
+// Use installs middleware on legacy message dispatch.
 func (s *Server) Use(middlewares ...core.Middleware) {
 	s.routerMu.Lock()
 	s.middlewares = append(s.middlewares, middlewares...)
 	s.routerMu.Unlock()
 }
 
+// Metrics returns the live metrics collector.
 func (s *Server) Metrics() *Metrics {
 	return s.metrics
 }
 
+// ListenAndServe starts the legacy TCP listener and optional metrics server.
 func (s *Server) ListenAndServe() error {
 	addr := fmt.Sprintf("%s:%d", s.config.Host, s.config.Port)
 	ln, err := net.Listen("tcp", addr)
@@ -95,6 +104,7 @@ func (s *Server) ListenAndServe() error {
 	return s.acceptLoop()
 }
 
+// Shutdown stops the listener, closes active connections, and waits for workers.
 func (s *Server) Shutdown() {
 	s.cancel()
 	if s.ln != nil {

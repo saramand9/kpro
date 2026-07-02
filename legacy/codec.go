@@ -1,3 +1,6 @@
+// File: legacy/codec.go
+// Purpose: Implements or tests the legacy TCP validation server.
+
 package legacy
 
 import (
@@ -20,6 +23,7 @@ const (
 	MsgError     = core.MsgError
 )
 
+// Message aliases the shared core message type for legacy callers.
 type Message = core.Message
 
 func readFrame(r io.Reader, maxSize uint32) (Message, error) {

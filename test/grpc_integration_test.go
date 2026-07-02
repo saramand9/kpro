@@ -1,3 +1,6 @@
+// File: test/grpc_integration_test.go
+// Purpose: Exercises KPro protocol and transport behavior through integration tests.
+
 package test
 
 import (

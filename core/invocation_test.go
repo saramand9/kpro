@@ -1,3 +1,6 @@
+// File: core/invocation_test.go
+// Purpose: Defines shared KPro primitives used by transports, routers, and middleware.
+
 package core
 
 import (

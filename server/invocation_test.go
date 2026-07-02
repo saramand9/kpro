@@ -1,3 +1,6 @@
+// File: server/invocation_test.go
+// Purpose: Implements or tests the high-level KPro server orchestration layer.
+
 package server
 
 import (

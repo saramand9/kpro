@@ -1,3 +1,6 @@
+// File: protocol/protocol.go
+// Purpose: Defines or tests KPro wire protocol encoding and decoding.
+
 package protocol
 
 import (
@@ -8,20 +11,28 @@ import (
 
 // ReadResult contains a decoded message and its wire size.
 type ReadResult struct {
+	// Message is the decoded business message.
 	Message core.Message
-	Bytes   int
+	// Bytes is the number of wire bytes consumed for the message.
+	Bytes int
 }
 
 // StreamProtocol describes a protocol carried by stream transports such as TCP.
 type StreamProtocol interface {
+	// Name returns a stable protocol identifier for diagnostics.
 	Name() string
+	// Read reads exactly one message from r, enforcing maxBodySize.
 	Read(r io.Reader, maxBodySize uint32) (ReadResult, error)
+	// Encode serializes one message into stream frame bytes.
 	Encode(msg core.Message) ([]byte, error)
 }
 
 // PacketProtocol describes a protocol carried by packet transports such as UDP.
 type PacketProtocol interface {
+	// Name returns a stable protocol identifier for diagnostics.
 	Name() string
+	// DecodePacket decodes one complete packet payload into a message.
 	DecodePacket(data []byte) (core.Message, error)
+	// EncodePacket serializes one message into one packet payload.
 	EncodePacket(msg core.Message) ([]byte, error)
 }

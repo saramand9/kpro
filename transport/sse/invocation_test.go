@@ -1,3 +1,6 @@
+// File: transport/sse/invocation_test.go
+// Purpose: Implements the Server-Sent Events transport adapter.
+
 package sse
 
 import (

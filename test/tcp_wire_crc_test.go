@@ -1,3 +1,6 @@
+// File: test/tcp_wire_crc_test.go
+// Purpose: Exercises KPro protocol and transport behavior through integration tests.
+
 package test
 
 import (

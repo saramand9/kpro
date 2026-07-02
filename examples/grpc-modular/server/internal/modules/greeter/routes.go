@@ -1,3 +1,6 @@
+// File: examples/grpc-modular/server/internal/modules/greeter/routes.go
+// Purpose: Provides runnable KPro example code.
+
 package greeter
 
 import (

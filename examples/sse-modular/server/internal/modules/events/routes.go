@@ -1,3 +1,6 @@
+// File: examples/sse-modular/server/internal/modules/events/routes.go
+// Purpose: Provides runnable KPro example code.
+
 package events
 
 import "github.com/saramand9/bignet/kpro/transport/sse"

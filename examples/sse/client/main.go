@@ -1,3 +1,6 @@
+// File: examples/sse/client/main.go
+// Purpose: Provides runnable KPro example code.
+
 package main
 
 import (

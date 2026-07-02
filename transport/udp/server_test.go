@@ -1,3 +1,6 @@
+// File: transport/udp/server_test.go
+// Purpose: Implements the UDP transport adapter for KPro packet sessions.
+
 package udp
 
 import (

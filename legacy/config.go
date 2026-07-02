@@ -1,3 +1,6 @@
+// File: legacy/config.go
+// Purpose: Implements or tests the legacy TCP validation server.
+
 package legacy
 
 import (
@@ -24,27 +27,47 @@ const (
 	DefaultMaxInflightPerConn  = 32
 )
 
+// Config controls the legacy TCP validation server.
 type Config struct {
-	Name                string
-	Host                string
-	Port                int
-	MetricsHost         string
-	MetricsPort         int
-	EnableMetrics       bool
-	MaxConnections      int
+	// Name labels log and metrics output.
+	Name string
+	// Host is the TCP listen host.
+	Host string
+	// Port is the TCP listen port.
+	Port int
+	// MetricsHost is the HTTP metrics listen host.
+	MetricsHost string
+	// MetricsPort is the HTTP metrics listen port.
+	MetricsPort int
+	// EnableMetrics starts the metrics and pprof HTTP server when true.
+	EnableMetrics bool
+	// MaxConnections caps active TCP connections.
+	MaxConnections int
+	// MaxConnectionsPerIP optionally caps active connections from one IP. Zero disables the limit.
 	MaxConnectionsPerIP int
-	MaxFrameSize        uint32
-	SendQueueSize       int
-	WorkerCount         int
-	WorkerQueueSize     int
-	ReadTimeout         time.Duration
-	WriteTimeout        time.Duration
-	IdleTimeout         time.Duration
-	SweepInterval       time.Duration
-	MaxInflightPerConn  int32
-	Protocol            protocol.StreamProtocol
+	// MaxFrameSize limits decoded frame payload size.
+	MaxFrameSize uint32
+	// SendQueueSize is the per-connection outbound frame queue length.
+	SendQueueSize int
+	// WorkerCount is the number of request workers. Values <= 0 derive from GOMAXPROCS.
+	WorkerCount int
+	// WorkerQueueSize is the shared request task queue length.
+	WorkerQueueSize int
+	// ReadTimeout is applied before each frame read.
+	ReadTimeout time.Duration
+	// WriteTimeout is applied before each frame write.
+	WriteTimeout time.Duration
+	// IdleTimeout closes connections that have not read frames recently.
+	IdleTimeout time.Duration
+	// SweepInterval controls how often idle connections are checked.
+	SweepInterval time.Duration
+	// MaxInflightPerConn limits queued or running requests per connection.
+	MaxInflightPerConn int32
+	// Protocol decodes and encodes frames. Nil uses protocol.KProV1().
+	Protocol protocol.StreamProtocol
 }
 
+// DefaultConfig returns the legacy TCP validation defaults.
 func DefaultConfig() Config {
 	return Config{
 		Name:                "kpro",

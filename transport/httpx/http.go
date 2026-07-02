@@ -1,3 +1,6 @@
+// File: transport/httpx/http.go
+// Purpose: Implements the native HTTP/HTTPS transport adapter.
+
 package httpx
 
 import (
@@ -22,24 +25,36 @@ const (
 	DefaultShutdownTimeout = 5 * time.Second
 )
 
+// Config controls HTTP/HTTPS listener, TLS, timeouts, and logging.
 type Config struct {
-	Addr            string
-	TLS             bool
-	CertFile        string
-	KeyFile         string
-	ReadTimeout     time.Duration
-	WriteTimeout    time.Duration
-	IdleTimeout     time.Duration
+	// Addr is the listen address, for example ":8080" or "127.0.0.1:8080".
+	Addr string
+	// TLS switches ListenAndServe to ListenAndServeTLS.
+	TLS bool
+	// CertFile is the TLS certificate path used when TLS is true.
+	CertFile string
+	// KeyFile is the TLS key path used when TLS is true.
+	KeyFile string
+	// ReadTimeout is passed to net/http.Server.
+	ReadTimeout time.Duration
+	// WriteTimeout is passed to net/http.Server.
+	WriteTimeout time.Duration
+	// IdleTimeout is passed to net/http.Server.
+	IdleTimeout time.Duration
+	// ShutdownTimeout bounds graceful shutdown after the parent context is cancelled.
 	ShutdownTimeout time.Duration
-	Logger          interface {
+	// Logger receives net/http server error log output when provided.
+	Logger interface {
 		Printf(string, ...interface{})
 	}
 }
 
+// Handler processes one native HTTP request.
 type Handler func(*Context) error
 
 type compiledRoutes map[string]map[string]Handler
 
+// Endpoint routes native HTTP requests and exposes them to middleware as invocations.
 type Endpoint struct {
 	config Config
 	server *http.Server
@@ -50,6 +65,7 @@ type Endpoint struct {
 	compiled    atomic.Value
 }
 
+// New creates an HTTP endpoint with normalized defaults.
 func New(config Config) *Endpoint {
 	config = normalizeConfig(config)
 	e := &Endpoint{
@@ -60,6 +76,7 @@ func New(config Config) *Endpoint {
 	return e
 }
 
+// Name returns http or https according to the endpoint configuration.
 func (e *Endpoint) Name() string {
 	if e.config.TLS {
 		return "https"
@@ -67,11 +84,13 @@ func (e *Endpoint) Name() string {
 	return "http"
 }
 
+// Use installs middleware on all registered HTTP routes and returns the endpoint.
 func (e *Endpoint) Use(middlewares ...core.Middleware) *Endpoint {
 	e.ApplyMiddleware(middlewares...)
 	return e
 }
 
+// ApplyMiddleware implements server.MiddlewareTarget for app-level middleware.
 func (e *Endpoint) ApplyMiddleware(middlewares ...core.Middleware) {
 	e.mu.Lock()
 	e.middlewares = append(e.middlewares, middlewares...)
@@ -79,22 +98,27 @@ func (e *Endpoint) ApplyMiddleware(middlewares ...core.Middleware) {
 	e.mu.Unlock()
 }
 
+// Get registers a GET route.
 func (e *Endpoint) Get(path string, h Handler) *Endpoint {
 	return e.Handle(http.MethodGet, path, h)
 }
 
+// Post registers a POST route.
 func (e *Endpoint) Post(path string, h Handler) *Endpoint {
 	return e.Handle(http.MethodPost, path, h)
 }
 
+// Put registers a PUT route.
 func (e *Endpoint) Put(path string, h Handler) *Endpoint {
 	return e.Handle(http.MethodPut, path, h)
 }
 
+// Delete registers a DELETE route.
 func (e *Endpoint) Delete(path string, h Handler) *Endpoint {
 	return e.Handle(http.MethodDelete, path, h)
 }
 
+// Handle registers a native HTTP route for method and path.
 func (e *Endpoint) Handle(method, path string, h Handler) *Endpoint {
 	e.mu.Lock()
 	if e.routes[path] == nil {
@@ -106,6 +130,7 @@ func (e *Endpoint) Handle(method, path string, h Handler) *Endpoint {
 	return e
 }
 
+// ListenAndServe starts the HTTP server until ctx is cancelled or serving fails.
 func (e *Endpoint) ListenAndServe(ctx context.Context) error {
 	server := e.buildServer()
 	e.mu.Lock()
@@ -124,6 +149,7 @@ func (e *Endpoint) ListenAndServe(ctx context.Context) error {
 	return ignoreServerClosed(server.ListenAndServe())
 }
 
+// Shutdown gracefully stops the HTTP server.
 func (e *Endpoint) Shutdown(ctx context.Context) error {
 	e.mu.RLock()
 	server := e.server
@@ -310,10 +336,12 @@ type BodyPayload struct {
 	ctx *Context
 }
 
+// NewBodyPayload creates a lazy body payload view for middleware.
 func NewBodyPayload(ctx *Context) *BodyPayload {
 	return &BodyPayload{ctx: ctx}
 }
 
+// Bytes reads and caches the request body through the native Context.
 func (p *BodyPayload) Bytes() ([]byte, error) {
 	if p == nil || p.ctx == nil {
 		return nil, nil
@@ -321,6 +349,7 @@ func (p *BodyPayload) Bytes() ([]byte, error) {
 	return p.ctx.Body()
 }
 
+// PayloadSize reports the known body size without forcing a read when possible.
 func (p *BodyPayload) PayloadSize() (int, bool) {
 	if p == nil || p.ctx == nil || p.ctx.r == nil {
 		return 0, true
@@ -334,6 +363,7 @@ func (p *BodyPayload) PayloadSize() (int, bool) {
 	return 0, false
 }
 
+// LimitPayload installs an HTTP max-bytes reader when the body has not been read.
 func (p *BodyPayload) LimitPayload(size int) error {
 	if p == nil || p.ctx == nil || p.ctx.r == nil || size < 0 {
 		return nil
@@ -360,6 +390,7 @@ type Context struct {
 	wroteHeader bool
 }
 
+// Header returns the mutable response headers.
 func (c *Context) Header() http.Header {
 	if c.header == nil {
 		c.header = c.w.Header()
@@ -367,6 +398,7 @@ func (c *Context) Header() http.Header {
 	return c.header
 }
 
+// WriteHeader sends the response status once.
 func (c *Context) WriteHeader(status int) {
 	if c.wroteHeader {
 		return
@@ -376,6 +408,7 @@ func (c *Context) WriteHeader(status int) {
 	c.w.WriteHeader(status)
 }
 
+// Write sends a response body, defaulting the status to 200.
 func (c *Context) Write(body []byte) (int, error) {
 	if !c.wroteHeader {
 		c.WriteHeader(http.StatusOK)
@@ -390,6 +423,7 @@ func (c *Context) setContentType(contentType string) {
 	c.w.Header().Set("Content-Type", contentType)
 }
 
+// Body reads and caches the request body.
 func (c *Context) Body() ([]byte, error) {
 	if c.bodyRead {
 		return c.body, nil
@@ -407,14 +441,17 @@ func (c *Context) Body() ([]byte, error) {
 	return c.body, nil
 }
 
+// Method returns the HTTP method.
 func (c *Context) Method() string {
 	return c.r.Method
 }
 
+// MethodBytes returns the HTTP method as bytes.
 func (c *Context) MethodBytes() []byte {
 	return []byte(c.r.Method)
 }
 
+// Path returns the URL path.
 func (c *Context) Path() string {
 	if c.r.URL == nil {
 		return ""
@@ -422,10 +459,12 @@ func (c *Context) Path() string {
 	return c.r.URL.Path
 }
 
+// PathBytes returns the URL path as bytes.
 func (c *Context) PathBytes() []byte {
 	return []byte(c.Path())
 }
 
+// RawQuery returns the URL query string without the leading question mark.
 func (c *Context) RawQuery() string {
 	if c.r.URL == nil {
 		return ""
@@ -433,10 +472,12 @@ func (c *Context) RawQuery() string {
 	return c.r.URL.RawQuery
 }
 
+// Host returns the request host.
 func (c *Context) Host() string {
 	return c.r.Host
 }
 
+// ContentLength returns the declared or cached request body length.
 func (c *Context) ContentLength() int {
 	if c.r.ContentLength > 0 {
 		return int(c.r.ContentLength)
@@ -448,6 +489,7 @@ func (c *Context) ContentLength() int {
 	return len(body)
 }
 
+// Bytes writes a byte response with status and content type.
 func (c *Context) Bytes(status int, contentType string, body []byte) error {
 	c.setContentType(contentType)
 	c.WriteHeader(status)
@@ -458,6 +500,7 @@ func (c *Context) Bytes(status int, contentType string, body []byte) error {
 	return err
 }
 
+// Stream copies reader to the response with status and content type.
 func (c *Context) Stream(status int, contentType string, reader io.Reader) error {
 	c.setContentType(contentType)
 	c.WriteHeader(status)
@@ -486,6 +529,7 @@ func (c *Context) CopyBody(status int, contentType string) error {
 	return err
 }
 
+// Text writes a plain-text response.
 func (c *Context) Text(status int, text string) error {
 	c.setContentType("text/plain; charset=utf-8")
 	c.WriteHeader(status)
@@ -493,6 +537,7 @@ func (c *Context) Text(status int, text string) error {
 	return err
 }
 
+// JSON marshals value and writes an application/json response.
 func (c *Context) JSON(status int, value interface{}) error {
 	body, err := json.Marshal(value)
 	if err != nil {
@@ -504,6 +549,7 @@ func (c *Context) JSON(status int, value interface{}) error {
 	return err
 }
 
+// Query returns a query parameter value.
 func (c *Context) Query(key string) string {
 	if c.r.URL == nil {
 		return ""

@@ -1,3 +1,6 @@
+// File: internal/yokalog/yokalog.go
+// Purpose: Defines or benchmarks the internal logging helper.
+
 package yokalog
 
 import (
@@ -11,14 +14,21 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
+// Config controls zap and file-rotation logging.
 type Config struct {
-	Level      string
-	FileName   string
-	MaxSize    int
+	// Level is the zap log level, for example "debug", "info", or "error".
+	Level string
+	// FileName is the log file path used by lumberjack rotation.
+	FileName string
+	// MaxSize is the per-file size limit in megabytes.
+	MaxSize int
+	// MaxBackups is the number of rotated files to keep.
 	MaxBackups int
-	MaxAge     int
+	// MaxAge is the number of days to keep rotated files.
+	MaxAge int
 }
 
+// DefaultConfig returns logging defaults for a service name.
 func DefaultConfig(service string) Config {
 	return Config{
 		Level:      "info",
@@ -29,6 +39,7 @@ func DefaultConfig(service string) Config {
 	}
 }
 
+// Init creates a zap logger, installs global redirects, and returns cleanup.
 func Init(cfg Config) (*zap.Logger, func(), error) {
 	if cfg.Level == "" {
 		cfg.Level = "info"

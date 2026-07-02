@@ -1,3 +1,6 @@
+// File: examples/https-modular/server/internal/modules/users/handler.go
+// Purpose: Provides runnable KPro example code.
+
 package users
 
 import "github.com/saramand9/bignet/kpro/transport/httpx"
