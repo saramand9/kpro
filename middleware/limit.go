@@ -9,12 +9,28 @@ import (
 func MaxPayload(size int) core.Middleware {
 	return func(next core.InvocationHandler) core.InvocationHandler {
 		return func(ctx core.Invocation) error {
-			if payloadSize, ok := payloadSize(ctx.Payload()); size >= 0 && ok && payloadSize > size {
-				return fmt.Errorf("payload too large: %d > %d", payloadSize, size)
+			payload := ctx.Payload()
+			if size >= 0 {
+				if limiter, ok := payload.(payloadLimiter); ok {
+					if err := limiter.LimitPayload(size); err != nil {
+						return err
+					}
+				}
+				if payloadSize, ok := payloadSize(payload); ok && payloadSize > size {
+					return fmt.Errorf("payload too large: %d > %d", payloadSize, size)
+				}
 			}
 			return next(ctx)
 		}
 	}
+}
+
+type payloadLimiter interface {
+	LimitPayload(size int) error
+}
+
+type payloadSizer interface {
+	PayloadSize() (int, bool)
 }
 
 func payloadSize(payload any) (int, bool) {
@@ -25,6 +41,8 @@ func payloadSize(payload any) (int, bool) {
 		return len(value), true
 	case string:
 		return len(value), true
+	case payloadSizer:
+		return value.PayloadSize()
 	case core.Message:
 		return len(value.Data), true
 	case *core.Message:

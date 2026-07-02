@@ -1,6 +1,6 @@
-# KPro TCP framework
+# Legacy KPro TCP validation server
 
-KPro is a production-oriented TCP entry layer example for this repository. It is designed for validating about 10k long-lived connections with bounded queues, timeout protection, worker isolation, and HTTP metrics.
+This document describes the legacy TCP validation server in `kpro/legacy`. It is designed for validating about 10k long-lived connections with bounded queues, timeout protection, worker isolation, and HTTP metrics.
 
 ## Architecture
 
@@ -20,12 +20,12 @@ Go's runtime netpoller provides the underlying non-blocking I/O multiplexing. KP
 Protocol parsing is now a configurable package boundary:
 
 ```go
-cfg := kpro.DefaultConfig()
+cfg := legacy.DefaultConfig()
 cfg.Protocol = protocol.KProV1()
-server := kpro.NewServer(cfg)
+server := legacy.NewServer(cfg)
 ```
 
-The TCP transport only owns connections, deadlines and queues. `kpro/protocol`
+The legacy TCP server owns connections, deadlines and queues. `kpro/protocol`
 owns wire format parsing and encoding, and `kpro/core.Message` is the business
 packet passed to handlers.
 
@@ -53,17 +53,17 @@ Built-in message ids:
 ## Handler API
 
 ```go
-s := kpro.NewServer(kpro.DefaultConfig())
+s := legacy.NewServer(legacy.DefaultConfig())
 
-s.Use(func(next kpro.InvocationHandler) kpro.InvocationHandler {
-	return func(inv kpro.Invocation) error {
+s.Use(func(next legacy.InvocationHandler) legacy.InvocationHandler {
+	return func(inv legacy.Invocation) error {
 		// auth, rate limit, trace, etc.
 		return next(inv)
 	}
 })
 
-s.Handle(kpro.MsgEcho, func(ctx kpro.Context) error {
-	return ctx.Reply(kpro.MsgEcho, ctx.Message().Data)
+s.Handle(legacy.MsgEcho, func(ctx legacy.Context) error {
+	return ctx.Reply(legacy.MsgEcho, ctx.Message().Data)
 })
 ```
 
@@ -74,7 +74,7 @@ s.Handle(kpro.MsgEcho, func(ctx kpro.Context) error {
 ```text
 kpro/core      Message and shared business concepts
 kpro/protocol  StreamProtocol and PacketProtocol implementations
-kpro           current TCP server, context, router and metrics
+kpro/legacy    legacy TCP validation server, context and metrics
 ```
 
 UDP and WebSocket transports reuse `core.Message` and protocol

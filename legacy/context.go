@@ -1,4 +1,4 @@
-package kpro
+package legacy
 
 import "github.com/saramand9/bignet/kpro/core"
 

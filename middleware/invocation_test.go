@@ -75,6 +75,39 @@ func TestInvocationMaxPayloadRejectsOversizedPayload(t *testing.T) {
 	}
 }
 
+func TestInvocationMaxPayloadUsesLimiter(t *testing.T) {
+	limited := &fakePayloadLimiter{size: 7}
+	handlerCalled := false
+	handler := MaxPayload(3)(func(core.Invocation) error {
+		handlerCalled = true
+		return nil
+	})
+
+	err := handler(core.NewInvocation(core.InvocationOptions{Payload: limited}))
+	if err == nil || !strings.Contains(err.Error(), "payload too large") {
+		t.Fatalf("expected payload error, got %v", err)
+	}
+	if !limited.called {
+		t.Fatal("limiter was not called")
+	}
+	if handlerCalled {
+		t.Fatal("handler should not be called")
+	}
+}
+
+type fakePayloadLimiter struct {
+	size   int
+	called bool
+}
+
+func (p *fakePayloadLimiter) LimitPayload(size int) error {
+	p.called = true
+	if p.size > size {
+		return errors.New("payload too large")
+	}
+	return nil
+}
+
 func TestInvocationRecoverConvertsPanicToError(t *testing.T) {
 	handler := Recover()(func(core.Invocation) error {
 		panic("boom")

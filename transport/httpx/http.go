@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"hash/fnv"
 	"io"
 	"log"
@@ -67,11 +68,15 @@ func (e *Endpoint) Name() string {
 }
 
 func (e *Endpoint) Use(middlewares ...core.Middleware) *Endpoint {
+	e.ApplyMiddleware(middlewares...)
+	return e
+}
+
+func (e *Endpoint) ApplyMiddleware(middlewares ...core.Middleware) {
 	e.mu.Lock()
 	e.middlewares = append(e.middlewares, middlewares...)
 	e.rebuildCompiledLocked()
 	e.mu.Unlock()
-	return e
 }
 
 func (e *Endpoint) Get(path string, h Handler) *Endpoint {
@@ -200,11 +205,7 @@ func (e *Endpoint) wrapRoute(method, path string, h Handler) Handler {
 	operation := httpOperation(method, path)
 	middlewares := append([]core.Middleware(nil), e.middlewares...)
 	return func(ctx *Context) error {
-		body, err := ctx.Body()
-		if err != nil {
-			return err
-		}
-		inv := newHTTPInvocation(ctx, e.config.TLS, operation, body)
+		inv := newHTTPInvocation(ctx, e.config.TLS, operation, NewBodyPayload(ctx))
 		handler := core.Chain(middlewares...)(func(core.Invocation) error {
 			return h(ctx)
 		})
@@ -212,7 +213,7 @@ func (e *Endpoint) wrapRoute(method, path string, h Handler) Handler {
 	}
 }
 
-func newHTTPInvocation(ctx *Context, tls bool, operation string, payload []byte) core.Invocation {
+func newHTTPInvocation(ctx *Context, tls bool, operation string, payload any) core.Invocation {
 	transport := core.TransportHTTP
 	if tls {
 		transport = core.TransportHTTPS
@@ -300,6 +301,51 @@ func httpOperation(method, path string) string {
 		path = "/"
 	}
 	return method + " " + path
+}
+
+// BodyPayload is a lazy view of an HTTP request body exposed through
+// core.Invocation.Payload. It lets middleware inspect size or install a limit
+// without forcing every request body to be read before the handler runs.
+type BodyPayload struct {
+	ctx *Context
+}
+
+func NewBodyPayload(ctx *Context) *BodyPayload {
+	return &BodyPayload{ctx: ctx}
+}
+
+func (p *BodyPayload) Bytes() ([]byte, error) {
+	if p == nil || p.ctx == nil {
+		return nil, nil
+	}
+	return p.ctx.Body()
+}
+
+func (p *BodyPayload) PayloadSize() (int, bool) {
+	if p == nil || p.ctx == nil || p.ctx.r == nil {
+		return 0, true
+	}
+	if p.ctx.bodyRead {
+		return len(p.ctx.body), true
+	}
+	if p.ctx.r.ContentLength >= 0 {
+		return int(p.ctx.r.ContentLength), true
+	}
+	return 0, false
+}
+
+func (p *BodyPayload) LimitPayload(size int) error {
+	if p == nil || p.ctx == nil || p.ctx.r == nil || size < 0 {
+		return nil
+	}
+	if payloadSize, ok := p.PayloadSize(); ok && payloadSize > size {
+		return fmt.Errorf("payload too large: %d > %d", payloadSize, size)
+	}
+	if p.ctx.bodyRead || p.ctx.r.Body == nil {
+		return nil
+	}
+	p.ctx.r.Body = http.MaxBytesReader(p.ctx.w, p.ctx.r.Body, int64(size))
+	return nil
 }
 
 // Context is backed by net/http. Body caches the request body on first read so

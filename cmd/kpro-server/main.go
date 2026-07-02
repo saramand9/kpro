@@ -7,11 +7,11 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/saramand9/bignet/kpro"
+	legacy "github.com/saramand9/bignet/kpro/legacy"
 )
 
 func main() {
-	cfg := kpro.DefaultConfig()
+	cfg := legacy.DefaultConfig()
 	flag.StringVar(&cfg.Host, "host", cfg.Host, "listen host")
 	flag.IntVar(&cfg.Port, "port", cfg.Port, "listen port")
 	flag.StringVar(&cfg.MetricsHost, "metrics-host", cfg.MetricsHost, "metrics listen host")
@@ -25,9 +25,9 @@ func main() {
 	flag.Parse()
 	cfg.MaxFrameSize = uint32(maxFrameSize)
 
-	s := kpro.NewServer(cfg)
-	s.Handle(kpro.MsgEcho, func(ctx kpro.Context) error {
-		return ctx.Reply(kpro.MsgEcho, ctx.Message().Data)
+	s := legacy.NewServer(cfg)
+	s.Handle(legacy.MsgEcho, func(ctx legacy.Context) error {
+		return ctx.Reply(legacy.MsgEcho, ctx.Message().Data)
 	})
 
 	go func() {

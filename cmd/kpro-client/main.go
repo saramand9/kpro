@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/saramand9/bignet/kpro"
+	legacy "github.com/saramand9/bignet/kpro/legacy"
 )
 
 type counters struct {
@@ -111,7 +111,7 @@ func runConn(wg *sync.WaitGroup, cs *counters, addr string, rate int, payload []
 			return
 		case <-ticker.C:
 			seq++
-			if err := writeFrame(conn, kpro.MsgEcho, seq, payload); err != nil {
+			if err := writeFrame(conn, legacy.MsgEcho, seq, payload); err != nil {
 				recordError(cs, "write", err)
 				close(done)
 				return
@@ -128,7 +128,7 @@ func readLoop(conn net.Conn, cs *counters, done <-chan struct{}) {
 			return
 		default:
 		}
-		var header [kpro.FrameHeaderSize]byte
+		var header [legacy.FrameHeaderSize]byte
 		if _, err := io.ReadFull(conn, header[:]); err != nil {
 			select {
 			case <-done:
@@ -156,13 +156,13 @@ func readLoop(conn net.Conn, cs *counters, done <-chan struct{}) {
 }
 
 func writeFrame(conn net.Conn, msgID uint32, seq uint64, data []byte) error {
-	buf := make([]byte, kpro.FrameHeaderSize+len(data))
-	binary.BigEndian.PutUint16(buf[0:2], kpro.FrameMagic)
-	buf[2] = kpro.FrameVersion
+	buf := make([]byte, legacy.FrameHeaderSize+len(data))
+	binary.BigEndian.PutUint16(buf[0:2], legacy.FrameMagic)
+	buf[2] = legacy.FrameVersion
 	binary.BigEndian.PutUint32(buf[4:8], msgID)
 	binary.BigEndian.PutUint64(buf[8:16], seq)
 	binary.BigEndian.PutUint32(buf[16:20], uint32(len(data)))
-	copy(buf[kpro.FrameHeaderSize:], data)
+	copy(buf[legacy.FrameHeaderSize:], data)
 	for len(buf) > 0 {
 		n, err := conn.Write(buf)
 		if err != nil {
