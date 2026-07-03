@@ -18,10 +18,8 @@ func (s *Store[T]) Delete(ctx context.Context, id any) (sql.Result, error) {
 	if s == nil || s.database == nil {
 		return nil, sql.ErrConnDone
 	}
-	if gormDB := s.database.GORM(); gormDB != nil {
-		var model T
-		err := gormDB.WithContext(ctx).Table(s.table).Delete(&model, id).Error
-		return nil, err
+	if result, ok, err := s.deleteWithGORM(ctx, id); ok {
+		return result, err
 	}
 	query, args, err := s.deleteSQL(id)
 	if err != nil {

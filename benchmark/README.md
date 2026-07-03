@@ -47,3 +47,4 @@ BenchmarkSSE_Events
 Concurrent HTTP benchmarks run the same `POST /echo` workload with 16 and 64 workers.
 Fiber and gnet comparison benchmarks live in `benchmark/compare` so their dependencies do not enter the main kpro module.
 That module includes KPro-vs-Fiber HTTP echo and KPro-vs-gnet TCP echo comparisons.
+

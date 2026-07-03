@@ -8,15 +8,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/protocol"
 )
 
 func TestPartialFrameReadTimeoutClosesConnection(t *testing.T) {
 	var handled atomic.Int32
 	server, addr, stop := startTCPTestServer(t, Config{
 		Addr:         freeTCPTestAddr(t),
-		Protocol:     protocol.KProV1(),
+		Codec:        codec.KProV1(),
 		ReadTimeout:  50 * time.Millisecond,
 		WriteTimeout: 50 * time.Millisecond,
 	}, func(core.Context) error {
@@ -45,7 +45,7 @@ func TestOversizedFrameClosesConnectionWithoutDispatch(t *testing.T) {
 	var handled atomic.Int32
 	server, addr, stop := startTCPTestServer(t, Config{
 		Addr:         freeTCPTestAddr(t),
-		Protocol:     protocol.KProV1(),
+		Codec:        codec.KProV1(),
 		MaxFrameSize: 1,
 		ReadTimeout:  time.Second,
 		WriteTimeout: 50 * time.Millisecond,
@@ -61,7 +61,7 @@ func TestOversizedFrameClosesConnectionWithoutDispatch(t *testing.T) {
 	}
 	defer conn.Close()
 
-	frame, err := protocol.KProV1().Encode(core.Message{ID: core.MsgEcho, Seq: 1, Data: []byte("xx")})
+	frame, err := codec.KProV1().Encode(core.Message{ID: testMsgEcho, Seq: 1, Data: []byte("xx")})
 	if err != nil {
 		t.Fatalf("encode oversized frame: %v", err)
 	}

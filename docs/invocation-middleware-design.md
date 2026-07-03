@@ -2,7 +2,7 @@
 
 This document describes the unified middleware model used by KPro.
 
-![KPro unified Invocation middleware design](invocation-middleware-design.svg)
+![KPro unified Invocation middleware design](assets/invocation-middleware-design.svg)
 
 ## Problem
 
@@ -167,3 +167,4 @@ app.TCP(":8088").Use(middleware.MaxPayload(64 * 1024))
 ```
 
 All universal-server endpoints use `core.Middleware`; native protocols keep native business handlers, not native middleware APIs.
+

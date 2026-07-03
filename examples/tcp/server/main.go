@@ -5,11 +5,12 @@ package main
 
 import (
 	"flag"
+	"github.com/saramand9/bignet/kpro/examples/internal/msgid"
 	"log"
 
+	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
 	"github.com/saramand9/bignet/kpro/middleware"
-	"github.com/saramand9/bignet/kpro/protocol"
 	"github.com/saramand9/bignet/kpro/server"
 	"github.com/saramand9/bignet/kpro/transport/tcp"
 	"golang.org/x/time/rate"
@@ -22,7 +23,7 @@ func main() {
 	flag.Parse()
 
 	app := server.New(server.Config{Name: "tcp-example"})
-	endpoint := app.TCP(*addr, tcp.Config{Protocol: protocol.KProV1()})
+	endpoint := app.TCP(*addr, tcp.Config{Codec: codec.KProV1()})
 	endpoint.Use(middleware.Recover())
 	if *connRate > 0 {
 		endpoint.Use(middleware.ConnRateLimit(middleware.RateLimitConfig{
@@ -30,7 +31,7 @@ func main() {
 			Burst: *connBurst,
 		}))
 	}
-	endpoint.Handle(core.MsgEcho, echo)
+	endpoint.Handle(msgid.Echo, echo)
 
 	log.Printf("tcp example server listening on %s", *addr)
 	log.Fatal(app.ListenAndServe())

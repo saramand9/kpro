@@ -4,9 +4,9 @@
 package app
 
 import (
+	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/examples/udp-modular/server/internal/modules/echo"
 	"github.com/saramand9/bignet/kpro/middleware"
-	"github.com/saramand9/bignet/kpro/protocol"
 	"github.com/saramand9/bignet/kpro/server"
 	"github.com/saramand9/bignet/kpro/transport/udp"
 )
@@ -21,7 +21,7 @@ type MessageModule interface {
 
 func RegisterRoutes(app *server.Server, cfg Config) {
 	endpoint := app.UDP(cfg.Addr, udp.Config{
-		Protocol:      protocol.KProV1(),
+		Codec:         codec.KProV1(),
 		MaxPacketSize: 2048,
 	}).Use(middleware.Recover(), middleware.MaxPayload(1500))
 

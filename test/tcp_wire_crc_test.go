@@ -19,8 +19,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/protocol"
 	"github.com/saramand9/bignet/kpro/transport/tcp"
 )
 
@@ -395,7 +395,7 @@ func TestTCPWireProtocolFaultStrict1000(t *testing.T) {
 			name: "bad_version",
 			build: func(i int) []byte {
 				frame := strictFaultFrame(t, i)
-				frame[2] = protocol.FrameVersion + 1
+				frame[2] = codec.FrameVersion + 1
 				return frame
 			},
 		},
@@ -404,14 +404,14 @@ func TestTCPWireProtocolFaultStrict1000(t *testing.T) {
 			build: func(i int) []byte {
 				frame := strictFaultFrame(t, i)
 				binary.BigEndian.PutUint32(frame[16:20], 64*1024+1)
-				return frame[:protocol.FrameHeaderSize]
+				return frame[:codec.FrameHeaderSize]
 			},
 		},
 		{
 			name: "short_header",
 			build: func(i int) []byte {
 				frame := strictFaultFrame(t, i)
-				return frame[:1+i%(protocol.FrameHeaderSize-1)]
+				return frame[:1+i%(codec.FrameHeaderSize-1)]
 			},
 			closeWrite: true,
 		},
@@ -542,7 +542,7 @@ func startStrictWireServer(
 		serverSent:     trace.log("server_sent.ndjson"),
 		clientReceived: trace.log("client_received.ndjson"),
 	}
-	wireProtocol := &recordingStreamProtocol{
+	wireCodec := &recordingStreamCodec{
 		serverReceived: logs.serverReceived,
 		serverSent:     logs.serverSent,
 	}
@@ -553,7 +553,7 @@ func startStrictWireServer(
 	register(router, control)
 	transport := tcp.New(tcp.Config{
 		Addr:          addr,
-		Protocol:      wireProtocol,
+		Codec:         wireCodec,
 		SendQueueSize: sendQueueSize,
 		ReadTimeout:   10 * time.Second,
 		WriteTimeout:  10 * time.Second,
@@ -726,28 +726,28 @@ func runTCPWireCRCHalfCloseAfterRoundTripScenario(
 	return logs
 }
 
-type recordingStreamProtocol struct {
+type recordingStreamCodec struct {
 	serverReceived *strictWireLog
 	serverSent     *strictWireLog
 }
 
-func (p *recordingStreamProtocol) Name() string {
-	return protocol.KProV1().Name()
+func (p *recordingStreamCodec) Name() string {
+	return codec.KProV1().Name()
 }
 
-func (p *recordingStreamProtocol) Read(r io.Reader, maxBodySize uint32) (protocol.ReadResult, error) {
+func (p *recordingStreamCodec) Read(r io.Reader, maxBodySize uint32) (codec.ReadResult, error) {
 	frame, msg, err := readStrictWireFrame(r, maxBodySize)
 	if err != nil {
-		return protocol.ReadResult{}, err
+		return codec.ReadResult{}, err
 	}
 	if err := p.serverReceived.appendFrame(msg, frame); err != nil {
-		return protocol.ReadResult{}, err
+		return codec.ReadResult{}, err
 	}
-	return protocol.ReadResult{Message: msg, Bytes: len(frame)}, nil
+	return codec.ReadResult{Message: msg, Bytes: len(frame)}, nil
 }
 
-func (p *recordingStreamProtocol) Encode(msg core.Message) ([]byte, error) {
-	frame, err := protocol.KProV1().Encode(msg)
+func (p *recordingStreamCodec) Encode(msg core.Message) ([]byte, error) {
+	frame, err := codec.KProV1().Encode(msg)
 	if err != nil {
 		return nil, err
 	}
@@ -915,7 +915,7 @@ func (l *strictRawLog) count() int {
 
 func writeStrictWireMessage(t *testing.T, conn net.Conn, log *strictWireLog, msg core.Message) {
 	t.Helper()
-	frame, err := protocol.KProV1().Encode(msg)
+	frame, err := codec.KProV1().Encode(msg)
 	if err != nil {
 		t.Fatalf("encode strict wire message: %v", err)
 	}
@@ -938,7 +938,7 @@ func writeStrictWireMessagesCoalesced(t *testing.T, conn net.Conn, log *strictWi
 	t.Helper()
 	var batch bytes.Buffer
 	for _, msg := range messages {
-		frame, err := protocol.KProV1().Encode(msg)
+		frame, err := codec.KProV1().Encode(msg)
 		if err != nil {
 			t.Fatalf("encode coalesced strict wire message: %v", err)
 		}
@@ -957,14 +957,14 @@ func writeStrictWireMessagesCoalesced(t *testing.T, conn net.Conn, log *strictWi
 func writeStrictWireMessagesFragmented(t *testing.T, conn net.Conn, log *strictWireLog, messages []core.Message) {
 	t.Helper()
 	for _, msg := range messages {
-		frame, err := protocol.KProV1().Encode(msg)
+		frame, err := codec.KProV1().Encode(msg)
 		if err != nil {
 			t.Fatalf("encode fragmented strict wire message: %v", err)
 		}
 		if err := log.appendFrame(msg, frame); err != nil {
 			t.Fatalf("append fragmented client sent strict wire frame: %v", err)
 		}
-		cuts := []int{1, 5, protocol.FrameHeaderSize, len(frame)}
+		cuts := []int{1, 5, codec.FrameHeaderSize, len(frame)}
 		start := 0
 		for _, end := range cuts {
 			if end > len(frame) {
@@ -994,22 +994,22 @@ func readStrictWireMessage(t *testing.T, conn net.Conn, log *strictWireLog) core
 }
 
 func readStrictWireFrame(r io.Reader, maxBodySize uint32) ([]byte, core.Message, error) {
-	var header [protocol.FrameHeaderSize]byte
+	var header [codec.FrameHeaderSize]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
 		return nil, core.Message{}, err
 	}
 	bodyLen := binary.BigEndian.Uint32(header[16:20])
 	if bodyLen > maxBodySize {
-		return nil, core.Message{}, protocol.ErrFrameTooLarge
+		return nil, core.Message{}, codec.ErrFrameTooLarge
 	}
-	frame := make([]byte, protocol.FrameHeaderSize+int(bodyLen))
+	frame := make([]byte, codec.FrameHeaderSize+int(bodyLen))
 	copy(frame, header[:])
 	if bodyLen > 0 {
-		if _, err := io.ReadFull(r, frame[protocol.FrameHeaderSize:]); err != nil {
+		if _, err := io.ReadFull(r, frame[codec.FrameHeaderSize:]); err != nil {
 			return nil, core.Message{}, err
 		}
 	}
-	msg, err := protocol.KProV1().DecodePacket(frame)
+	msg, err := codec.KProV1().DecodePacket(frame)
 	if err != nil {
 		return nil, core.Message{}, err
 	}
@@ -1045,7 +1045,7 @@ func strictMessage(msgID uint32, seq uint64, label string) core.Message {
 
 func strictFaultFrame(t *testing.T, seq int) []byte {
 	t.Helper()
-	frame, err := protocol.KProV1().Encode(strictMessage(msgStrictSyncEcho, uint64(seq), "fault"))
+	frame, err := codec.KProV1().Encode(strictMessage(msgStrictSyncEcho, uint64(seq), "fault"))
 	if err != nil {
 		t.Fatalf("encode strict fault frame: %v", err)
 	}
@@ -1333,10 +1333,10 @@ func assertNoStrictWireResponse(t *testing.T, conn net.Conn) {
 
 func strictWireRecordPayload(record strictWireRecord) []byte {
 	frame, err := hex.DecodeString(record.FrameHex)
-	if err != nil || len(frame) < protocol.FrameHeaderSize {
+	if err != nil || len(frame) < codec.FrameHeaderSize {
 		return nil
 	}
-	return frame[protocol.FrameHeaderSize:]
+	return frame[codec.FrameHeaderSize:]
 }
 
 func strictWirePayloadEqual(record strictWireRecord, data []byte) bool {

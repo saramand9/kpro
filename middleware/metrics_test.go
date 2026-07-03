@@ -13,7 +13,7 @@ import (
 
 func TestMetricsRecordsSuccessAndError(t *testing.T) {
 	metrics := NewMetrics()
-	ctx := core.NewInvocation(core.InvocationOptions{Operation: core.MessageOperation(core.MsgEcho)})
+	ctx := core.NewInvocation(core.InvocationOptions{Operation: core.MessageOperation(testMsgEcho)})
 
 	success := metrics.Middleware()(func(core.Invocation) error {
 		time.Sleep(time.Millisecond)
@@ -51,7 +51,7 @@ func TestMetricsRecordsSuccessAndError(t *testing.T) {
 
 func TestMetricsRecordsAndRethrowsPanic(t *testing.T) {
 	metrics := NewMetrics()
-	ctx := core.NewInvocation(core.InvocationOptions{Operation: core.MessageOperation(core.MsgEcho)})
+	ctx := core.NewInvocation(core.InvocationOptions{Operation: core.MessageOperation(testMsgEcho)})
 	handler := metrics.Middleware()(func(core.Invocation) error {
 		panic("boom")
 	})
@@ -77,7 +77,7 @@ func TestMetricsRecordsAndRethrowsPanic(t *testing.T) {
 
 func TestMetricsServeHTTP(t *testing.T) {
 	metrics := NewMetrics()
-	ctx := core.NewInvocation(core.InvocationOptions{Operation: core.MessageOperation(core.MsgEcho)})
+	ctx := core.NewInvocation(core.InvocationOptions{Operation: core.MessageOperation(testMsgEcho)})
 	handler := metrics.Middleware()(func(core.Invocation) error {
 		return nil
 	})

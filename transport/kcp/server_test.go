@@ -7,15 +7,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/protocol"
 	kcpgo "github.com/xtaci/kcp-go"
 )
 
 func TestKCPEchoDispatch(t *testing.T) {
 	server, addr, stop := startKCPTestServer(t, Config{
 		Addr:         freeKCPTestAddr(t),
-		Protocol:     protocol.KProV1(),
+		Codec:        codec.KProV1(),
 		ReadTimeout:  time.Second,
 		WriteTimeout: time.Second,
 	}, func(ctx core.Context) error {
@@ -30,7 +30,7 @@ func TestKCPEchoDispatch(t *testing.T) {
 	conn := dialKCPTest(t, addr)
 	defer conn.Close()
 
-	want := core.Message{ID: core.MsgEcho, Seq: 7, Data: []byte("hello kcp")}
+	want := core.Message{ID: testMsgEcho, Seq: 7, Data: []byte("hello kcp")}
 	writeKCPTestMessage(t, conn, want)
 	got := readKCPTestMessage(t, conn)
 	if got.ID != want.ID || got.Seq != want.Seq || string(got.Data) != string(want.Data) {
@@ -43,7 +43,7 @@ func TestKCPHeartbeatBypassesRouter(t *testing.T) {
 	var handled atomic.Int32
 	_, addr, stop := startKCPTestServer(t, Config{
 		Addr:         freeKCPTestAddr(t),
-		Protocol:     protocol.KProV1(),
+		Codec:        codec.KProV1(),
 		ReadTimeout:  time.Second,
 		WriteTimeout: time.Second,
 	}, func(core.Context) error {
@@ -69,7 +69,7 @@ func TestKCPOversizedFrameClosesWithoutDispatch(t *testing.T) {
 	var handled atomic.Int32
 	server, addr, stop := startKCPTestServer(t, Config{
 		Addr:         freeKCPTestAddr(t),
-		Protocol:     protocol.KProV1(),
+		Codec:        codec.KProV1(),
 		MaxFrameSize: 1,
 		ReadTimeout:  time.Second,
 		WriteTimeout: 50 * time.Millisecond,
@@ -82,7 +82,7 @@ func TestKCPOversizedFrameClosesWithoutDispatch(t *testing.T) {
 	conn := dialKCPTest(t, addr)
 	defer conn.Close()
 
-	writeKCPTestMessage(t, conn, core.Message{ID: core.MsgEcho, Seq: 1, Data: []byte("xx")})
+	writeKCPTestMessage(t, conn, core.Message{ID: testMsgEcho, Seq: 1, Data: []byte("xx")})
 	assertKCPConnectionClosed(t, conn)
 	waitForKCPActiveCount(t, server, 0)
 	if handled.Load() != 0 {
@@ -137,7 +137,7 @@ func dialKCPTest(t *testing.T, addr string) *kcpgo.UDPSession {
 
 func writeKCPTestMessage(t *testing.T, conn *kcpgo.UDPSession, msg core.Message) {
 	t.Helper()
-	frame, err := protocol.KProV1().Encode(msg)
+	frame, err := codec.KProV1().Encode(msg)
 	if err != nil {
 		t.Fatalf("encode message: %v", err)
 	}
@@ -150,7 +150,7 @@ func writeKCPTestMessage(t *testing.T, conn *kcpgo.UDPSession, msg core.Message)
 func readKCPTestMessage(t *testing.T, conn *kcpgo.UDPSession) core.Message {
 	t.Helper()
 	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
-	result, err := protocol.KProV1().Read(conn, 64*1024)
+	result, err := codec.KProV1().Read(conn, 64*1024)
 	if err != nil {
 		t.Fatalf("read kcp message: %v", err)
 	}

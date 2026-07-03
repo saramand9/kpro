@@ -80,6 +80,93 @@ func TestOpenWithGORMDialector(t *testing.T) {
 	assertUserCount(t, database.DB(), 1)
 }
 
+func TestGORMStoreCRUDPaths(t *testing.T) {
+	database, err := Open(context.Background(), Config{
+		GORMDialector: sqlite.Open(":memory:"),
+		Dialect:       SQLite,
+		MaxOpenConns:  1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTestDatabase(t, database)
+	createTestUsersTable(t, database.DB())
+
+	store := NewStore[testUser](database, "users")
+	user := testUser{Name: "Ada", Age: 37, Ignored: "not a column"}
+	createResult, err := store.Create(context.Background(), &user)
+	if err != nil {
+		t.Fatalf("gorm create: %v", err)
+	}
+	if rows, err := createResult.RowsAffected(); err != nil || rows != 1 {
+		t.Fatalf("create rows = %d, err = %v, want 1", rows, err)
+	}
+	id, err := createResult.LastInsertId()
+	if err != nil {
+		t.Fatalf("create last insert id: %v", err)
+	}
+	if id == 0 || user.ID != id {
+		t.Fatalf("gorm create id result/model = %d/%d, want non-zero matching ids", id, user.ID)
+	}
+
+	found, err := store.Find(context.Background(), id)
+	if err != nil {
+		t.Fatalf("gorm find: %v", err)
+	}
+	if found.Name != "Ada" || found.Age != 37 {
+		t.Fatalf("found = %#v", found)
+	}
+
+	updateResult, err := store.Update(context.Background(), &testUser{ID: id, Name: "Ada Lovelace", Age: 38})
+	if err != nil {
+		t.Fatalf("gorm update: %v", err)
+	}
+	if rows, err := updateResult.RowsAffected(); err != nil || rows != 1 {
+		t.Fatalf("update rows = %d, err = %v, want 1", rows, err)
+	}
+	assertUserName(t, database.DB(), id, "Ada Lovelace")
+
+	upsertStore := NewStore[testUpsertUser](database, "users")
+	if _, err := upsertStore.Upsert(context.Background(), &testUpsertUser{ID: id, Name: "Ada", Age: 39}, Conflict("id")); err != nil {
+		t.Fatalf("gorm upsert update: %v", err)
+	}
+	assertUserName(t, database.DB(), id, "Ada")
+
+	batchResult, err := store.BatchCreate(context.Background(), []testUser{{Name: "Grace", Age: 30}, {Name: "Linus", Age: 40}})
+	if err != nil {
+		t.Fatalf("gorm batch create: %v", err)
+	}
+	if rows, err := batchResult.RowsAffected(); err != nil || rows != 2 {
+		t.Fatalf("batch rows = %d, err = %v, want 2", rows, err)
+	}
+	assertUserCount(t, database.DB(), 3)
+
+	deleteResult, err := store.Delete(context.Background(), id)
+	if err != nil {
+		t.Fatalf("gorm delete: %v", err)
+	}
+	if rows, err := deleteResult.RowsAffected(); err != nil || rows != 1 {
+		t.Fatalf("delete rows = %d, err = %v, want 1", rows, err)
+	}
+	assertUserCount(t, database.DB(), 2)
+
+	asyncUser := testUser{Name: "Async GORM", Age: 41}
+	future, err := store.Async().Create(context.Background(), &asyncUser)
+	if err != nil {
+		t.Fatalf("gorm async create submit: %v", err)
+	}
+	asyncResult, err := future.Wait(context.Background())
+	if err != nil {
+		t.Fatalf("gorm async create wait: %v", err)
+	}
+	if rows, err := asyncResult.RowsAffected(); err != nil || rows != 1 {
+		t.Fatalf("async create rows = %d, err = %v, want 1", rows, err)
+	}
+	if asyncUser.ID == 0 {
+		t.Fatalf("async user id = %d, want database id", asyncUser.ID)
+	}
+	assertUserCount(t, database.DB(), 3)
+}
 func TestGenericStoreCreateAndAsync(t *testing.T) {
 	database := openTestSQLite(t)
 	defer closeTestDatabase(t, database)

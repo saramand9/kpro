@@ -20,8 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/protocol"
 	wstransport "github.com/saramand9/bignet/kpro/transport/websocket"
 )
 
@@ -314,7 +314,7 @@ func startWebSocketTraceServer(t *testing.T, routerConfig core.RouterConfig, rec
 	transport := wstransport.New(wstransport.Config{
 		Addr:       addr,
 		Path:       "/ws",
-		Protocol:   protocol.KProV1(),
+		Codec:      codec.KProV1(),
 		MaxMessage: 64 * 1024,
 	})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -368,7 +368,7 @@ func sendWebSocketTraced(t *testing.T, log *tcpTraceLog, client *webSocketTraceC
 	if err := log.appendMessage(msg); err != nil {
 		t.Fatalf("append WebSocket sent trace: %v", err)
 	}
-	packet, err := protocol.KProV1().EncodePacket(msg)
+	packet, err := codec.KProV1().EncodePacket(msg)
 	if err != nil {
 		t.Fatalf("encode WebSocket packet: %v", err)
 	}
@@ -382,7 +382,7 @@ func sendWebSocketFragmentedTraced(t *testing.T, log *tcpTraceLog, client *webSo
 	if err := log.appendMessage(msg); err != nil {
 		t.Fatalf("append fragmented WebSocket sent trace: %v", err)
 	}
-	packet, err := protocol.KProV1().EncodePacket(msg)
+	packet, err := codec.KProV1().EncodePacket(msg)
 	if err != nil {
 		t.Fatalf("encode fragmented WebSocket packet: %v", err)
 	}
@@ -397,7 +397,7 @@ func readWebSocketTraced(t *testing.T, log *tcpTraceLog, client *webSocketTraceC
 	if err != nil {
 		t.Fatalf("read WebSocket frame: %v", err)
 	}
-	msg, err := protocol.KProV1().DecodePacket(packet)
+	msg, err := codec.KProV1().DecodePacket(packet)
 	if err != nil {
 		t.Fatalf("decode WebSocket packet: %v", err)
 	}

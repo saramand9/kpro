@@ -4,7 +4,7 @@
 package echo
 
 import (
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/bignet/kpro/examples/internal/msgid"
 	"github.com/saramand9/bignet/kpro/server"
 	"github.com/saramand9/bignet/kpro/transport/httpx"
 )
@@ -16,5 +16,5 @@ func (Module) RegisterHTTP(e *httpx.Endpoint) {
 }
 
 func (Module) RegisterMessage(e *server.Endpoint) {
-	e.HandleSync(core.MsgEcho, messageEcho)
+	e.HandleSync(msgid.Echo, messageEcho)
 }
