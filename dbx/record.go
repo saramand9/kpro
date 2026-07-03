@@ -19,6 +19,14 @@ type columnValue struct {
 }
 
 func mapRecord(record any) ([]columnValue, error) {
+	return mapRecordWithOptions(record, false)
+}
+
+func mapRecordSchema(record any) ([]columnValue, error) {
+	return mapRecordWithOptions(record, true)
+}
+
+func mapRecordWithOptions(record any, includeOmitEmpty bool) ([]columnValue, error) {
 	if record == nil {
 		return nil, fmt.Errorf("%w: nil record", ErrNoColumns)
 	}
@@ -28,7 +36,7 @@ func mapRecord(record any) ([]columnValue, error) {
 	}
 	switch value.Kind() {
 	case reflect.Struct:
-		return mapStructRecord(value)
+		return mapStructRecord(value, includeOmitEmpty)
 	case reflect.Map:
 		return mapMapRecord(value)
 	default:
@@ -46,7 +54,7 @@ func reflectValue(input any) reflect.Value {
 	}
 	return value
 }
-func mapStructRecord(value reflect.Value) ([]columnValue, error) {
+func mapStructRecord(value reflect.Value, includeOmitEmpty bool) ([]columnValue, error) {
 	valueType := value.Type()
 	columns := make([]columnValue, 0, value.NumField())
 	for i := 0; i < value.NumField(); i++ {
@@ -66,7 +74,7 @@ func mapStructRecord(value reflect.Value) ([]columnValue, error) {
 		if !column.primary && strings.EqualFold(field.Name, "id") {
 			column.primary = true
 		}
-		if column.omitempty && fieldValue.IsZero() {
+		if column.omitempty && fieldValue.IsZero() && !includeOmitEmpty {
 			continue
 		}
 		columns = append(columns, column)

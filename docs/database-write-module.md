@@ -7,13 +7,14 @@ an optional ORM handle when applications need richer model/query behavior.
 The recommended application shape is:
 
 ```text
-protocol route -> Entity[T] -> CRUDService[T] -> dbx.Store[T] -> DB / GORM
+protocol route -> request DTO -> Entity[T] -> CRUDService[T] -> dbx.Store[T] -> DB / GORM
 ```
 
-Handlers/adapters adapt TCP, HTTP, gRPC, or another protocol into entity inputs.
-`Entity[T]` is the model-centric entry point for common CRUD. `dbx.Store[T]`
-owns data access. `dbx.Database` owns connection-pool setup, transactions,
-optional async write workers, and optional GORM integration.
+Handlers adapt TCP, HTTP, gRPC, or another protocol into validated request DTOs
+and then map those DTOs to entity inputs. `Entity[T]` is the model-centric entry
+point for common CRUD. `dbx.Store[T]` owns data access. `dbx.Database` owns
+connection-pool setup, transactions, optional async write workers, and optional
+GORM integration.
 
 ## Opening A Database
 
@@ -49,9 +50,8 @@ app.Manage(database)
 
 ## Entity CRUD
 
-For common create/read/update/delete resources, applications do not need to
-write a dedicated service and handler per model. Define the model and create an
-`appx.Entity[T]`:
+For common create/read/update/delete resources, define the storage model and
+create an `appx.Entity[T]`:
 
 ```go
 type User struct {
@@ -61,10 +61,41 @@ type User struct {
 }
 
 users := appx.NewEntity[User](database, appx.EntityConfig{Table: "users"})
-appx.BindHTTPEntity(app.HTTP(":8080"), users, appx.HTTPEntityConfig{Path: "/users"})
 ```
 
-The generated HTTP adapter parses requests into `EntityRequest[User]` and registers:
+Business HTTP handlers should decode request-specific DTOs, validate them, and
+then call the entity:
+
+```go
+type CreateUserRequest struct {
+	Name string `json:"name"`
+	Age  int    `json:"age"`
+}
+
+func (r CreateUserRequest) ToUser() User {
+	return User{Name: strings.TrimSpace(r.Name), Age: r.Age}
+}
+
+endpoint := app.HTTP(":8080")
+endpoint.Post("/users", func(ctx *httpx.Context) error {
+	var req CreateUserRequest
+	if err := ctx.JSONBody(&req); err != nil {
+		return ctx.JSON(http.StatusBadRequest, map[string]string{"error": "invalid json"})
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		return ctx.JSON(http.StatusBadRequest, map[string]string{"error": "name is required"})
+	}
+	user := req.ToUser()
+	created, err := users.Create(ctx.Context(), &user)
+	if err != nil {
+		return err
+	}
+	return ctx.JSON(http.StatusCreated, created)
+})
+```
+
+`appx.BindHTTPEntity` remains available for simple internal CRUD surfaces where
+HTTP JSON intentionally matches the storage model exactly. It registers:
 
 ```text
 GET    /users       list rows
@@ -74,8 +105,9 @@ PUT    /users       update one row from JSON
 DELETE /users?id=1  delete one row
 ```
 
-Write a custom Service only when the model needs business rules such as password
-hashing, order state transitions, permissions, or cross-table transactions.
+Use explicit DTO handlers when the HTTP shape differs from the storage model,
+or when the route needs business rules such as password hashing, order state
+transitions, permissions, or cross-table transactions.
 
 ## Store Access
 
@@ -118,11 +150,11 @@ or `dbx.Store[T]`; complex ORM behavior can use `database.GORM()` or
 
 ```go
 type UsersModule struct {
-	users *appx.Entity[User]
+	users *users.Service
 }
 
 func (m UsersModule) RegisterHTTP(e *httpx.Endpoint) {
-	appx.BindHTTPEntity(e, m.users, appx.HTTPEntityConfig{Path: "/users"})
+	users.RegisterHTTP(e, m.users)
 }
 
 appx.RegisterHTTP(app.HTTP(":8080"), usersModule)
@@ -131,7 +163,7 @@ appx.RegisterHTTP(app.HTTP(":8080"), usersModule)
 The runnable example at `examples/dbx-http/server` shows:
 
 ```text
-HTTP Adapter -> EntityRequest[User] -> Entity[User] -> CRUDService[User] -> dbx.Store[User] -> DB/GORM
+HTTP DTO handler -> users.Service -> Entity[User] -> CRUDService[User] -> dbx.Store[User] -> DB/GORM
 ```
 
 ## Raw SQL
