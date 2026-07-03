@@ -90,7 +90,7 @@ func (s *Store[T]) deleteSQL(id any) (string, []any, error) {
 
 func (s *Store[T]) selectSQL(where string) (string, []any, []columnValue, error) {
 	var model T
-	columns, err := mapRecord(model)
+	columns, err := mapRecordSchema(model)
 	if err != nil {
 		return "", nil, nil, err
 	}
@@ -118,7 +118,7 @@ func (s *Store[T]) selectSQL(where string) (string, []any, []columnValue, error)
 
 func (s *Store[T]) primaryKeyWhere() string {
 	var model T
-	columns, err := mapRecord(model)
+	columns, err := mapRecordSchema(model)
 	if err == nil {
 		if pk := primaryColumn(columns); pk.name != "" {
 			quoted, quoteErr := s.database.Dialect().quoteColumn(pk.name)

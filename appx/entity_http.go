@@ -20,6 +20,8 @@ type HTTPEntityConfig struct {
 }
 
 // BindHTTPEntity binds HTTP routes to a protocol-neutral Entity.
+// It is intended for simple internal CRUD surfaces where HTTP JSON matches T.
+// Business APIs should prefer explicit DTO handlers.
 func BindHTTPEntity[T any](endpoint *httpx.Endpoint, entity *Entity[T], config HTTPEntityConfig) {
 	adapter := &httpEntityAdapter[T]{
 		entity: entity,

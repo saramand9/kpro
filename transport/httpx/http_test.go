@@ -103,6 +103,28 @@ func TestContextBodyRejectsOversizedRequest(t *testing.T) {
 	}
 }
 
+func TestContextJSONBody(t *testing.T) {
+	endpoint := New(Config{})
+	endpoint.Post("/json", func(ctx *Context) error {
+		var request struct {
+			Name string `json:"name"`
+		}
+		if err := ctx.JSONBody(&request); err != nil {
+			return err
+		}
+		return ctx.JSON(http.StatusOK, request)
+	})
+
+	resp := executeTestRequest(endpoint, http.MethodPost, "/json", `{"name":"Ada"}`)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
+	}
+	if got := resp.Body.String(); !strings.Contains(got, `"name":"Ada"`) {
+		t.Fatalf("body = %q", got)
+	}
+}
+
 func TestContextContentTypeKeepsExistingHeaderMap(t *testing.T) {
 	endpoint := New(Config{})
 	endpoint.Get("/text", func(ctx *Context) error {

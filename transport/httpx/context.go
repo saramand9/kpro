@@ -176,6 +176,15 @@ func (c *Context) JSON(status int, value interface{}) error {
 	return err
 }
 
+// JSONBody decodes the cached request body into dest.
+func (c *Context) JSONBody(dest any) error {
+	body, err := c.Body()
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(body, dest)
+}
+
 func (c *Context) Query(key string) string {
 	if c.r.URL == nil {
 		return ""
