@@ -6,7 +6,6 @@ package app
 import (
 	"context"
 
-	"github.com/saramand9/bignet/kpro/appx"
 	"github.com/saramand9/bignet/kpro/dbx"
 	"github.com/saramand9/bignet/kpro/examples/dbx-http/server/internal/users"
 	"github.com/saramand9/bignet/kpro/server"
@@ -22,7 +21,6 @@ func RegisterRoutes(ctx context.Context, app *server.Server, database *dbx.Datab
 	if err := users.Init(ctx, database); err != nil {
 		return err
 	}
-	entity := appx.NewEntity[users.User](database, appx.EntityConfig{Table: "users"})
-	appx.BindHTTPEntity(app.HTTP(config.HTTPAddr), entity, appx.HTTPEntityConfig{Path: "/users"})
+	users.RegisterHTTP(app.HTTP(config.HTTPAddr), users.NewService(database))
 	return nil
 }
