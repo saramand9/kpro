@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/protocol"
 	"github.com/saramand9/bignet/kpro/server"
 	"github.com/saramand9/bignet/kpro/transport/tcp"
 )
@@ -56,7 +56,7 @@ func runTCPMultiClientRandomOrderStrict(t *testing.T, clients, messagesPerClient
 		},
 	})
 	app.TCP(addr, tcp.Config{
-		Protocol:      protocol.KProV1(),
+		Codec:         codec.KProV1(),
 		SendQueueSize: messagesPerClient + 16,
 		ReadTimeout:   2 * time.Minute,
 		WriteTimeout:  2 * time.Minute,
@@ -172,7 +172,7 @@ func runTCPOrderStressClient(addr string, clientID, messagesPerClient int, deadl
 	go func() {
 		received := make([]uint64, 0, messagesPerClient)
 		for i := 0; i < messagesPerClient; i++ {
-			result, err := protocol.KProV1().Read(conn, 64*1024)
+			result, err := codec.KProV1().Read(conn, 64*1024)
 			if err != nil {
 				receivedCh <- tcpOrderClientResult{err: fmt.Errorf("client %d read response %d/%d: %w", clientID, i+1, messagesPerClient, err)}
 				return
@@ -206,7 +206,7 @@ func runTCPOrderStressClient(addr string, clientID, messagesPerClient int, deadl
 	for writeIndex, randomValue := range order {
 		token := tcpOrderToken(clientID, randomValue)
 		payload := encodeTCPOrderPayload(clientID, writeIndex, token)
-		frame, err := protocol.KProV1().Encode(core.Message{ID: msgTCPOrderStress, Seq: token, Data: payload})
+		frame, err := codec.KProV1().Encode(core.Message{ID: msgTCPOrderStress, Seq: token, Data: payload})
 		if err != nil {
 			return nil, nil, fmt.Errorf("client %d encode %d: %w", clientID, writeIndex, err)
 		}

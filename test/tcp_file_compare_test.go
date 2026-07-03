@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/protocol"
 	"github.com/saramand9/bignet/kpro/transport/tcp"
 )
 
@@ -705,7 +705,7 @@ func startTCPTraceServer(t *testing.T, routerConfig core.RouterConfig, received 
 
 	transport := tcp.New(tcp.Config{
 		Addr:          addr,
-		Protocol:      protocol.KProV1(),
+		Codec:         codec.KProV1(),
 		ReadTimeout:   5 * time.Second,
 		WriteTimeout:  5 * time.Second,
 		SendQueueSize: 16,

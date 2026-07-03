@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/protocol"
 )
 
 func TestPacketSessionSendUsesQueueAndWriteLoop(t *testing.T) {
@@ -20,7 +20,7 @@ func TestPacketSessionSendUsesQueueAndWriteLoop(t *testing.T) {
 	defer clientConn.Close()
 
 	server := New(Config{
-		Protocol:      protocol.KProV1(),
+		Codec:         codec.KProV1(),
 		SendQueueSize: 1,
 	})
 	server.conn = serverConn
@@ -45,7 +45,7 @@ func TestPacketSessionSendUsesQueueAndWriteLoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read queued UDP packet: %v", err)
 	}
-	got, err := protocol.KProV1().DecodePacket(buf[:n])
+	got, err := codec.KProV1().DecodePacket(buf[:n])
 	if err != nil {
 		t.Fatalf("decode queued UDP packet: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestPacketSessionSendQueueFullIsPerSession(t *testing.T) {
 	defer serverConn.Close()
 
 	server := New(Config{
-		Protocol:      protocol.KProV1(),
+		Codec:         codec.KProV1(),
 		SendQueueSize: 1,
 	})
 	server.conn = serverConn
@@ -96,7 +96,7 @@ func TestServerClosesIdleUDPSessions(t *testing.T) {
 	defer serverConn.Close()
 
 	server := New(Config{
-		Protocol:           protocol.KProV1(),
+		Codec:              codec.KProV1(),
 		SendQueueSize:      1,
 		SessionIdleTimeout: time.Millisecond,
 		CleanupInterval:    time.Hour,
@@ -132,7 +132,7 @@ func TestServerRejectsNewSessionWhenMaxSessionsReached(t *testing.T) {
 	defer serverConn.Close()
 
 	server := New(Config{
-		Protocol:      protocol.KProV1(),
+		Codec:         codec.KProV1(),
 		MaxSessions:   1,
 		SendQueueSize: 1,
 	})
@@ -155,7 +155,7 @@ func TestServerRejectsNewSessionAfterShutdown(t *testing.T) {
 	serverConn := listenUDPTestConn(t)
 
 	server := New(Config{
-		Protocol:      protocol.KProV1(),
+		Codec:         codec.KProV1(),
 		SendQueueSize: 1,
 	})
 	server.conn = serverConn
@@ -174,7 +174,7 @@ func TestPacketSessionSendAfterCloseReturnsErrClosed(t *testing.T) {
 	defer serverConn.Close()
 
 	server := New(Config{
-		Protocol:      protocol.KProV1(),
+		Codec:         codec.KProV1(),
 		SendQueueSize: 1,
 	})
 	server.conn = serverConn

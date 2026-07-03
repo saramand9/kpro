@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/panjf2000/gnet/v2"
+	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/protocol"
 	"github.com/saramand9/bignet/kpro/transport/udp"
 )
 
@@ -53,7 +53,7 @@ func benchmarkUDPCompareClient(b *testing.B, addr string, payloadSize int) {
 	_ = conn.SetWriteBuffer(4 * 1024 * 1024)
 
 	payload := bytes.Repeat([]byte("x"), payloadSize)
-	msg := core.Message{ID: core.MsgEcho, Data: payload}
+	msg := core.Message{ID: benchmarkMsgEcho, Data: payload}
 	buf := make([]byte, 64*1024)
 
 	b.SetBytes(int64(payloadSize))
@@ -69,7 +69,7 @@ func benchmarkUDPCompareClient(b *testing.B, addr string, payloadSize int) {
 }
 
 func udpCompareEchoOnce(conn *net.UDPConn, msg core.Message, wantLen int, buf []byte) error {
-	packet, err := protocol.KProV1().EncodePacket(msg)
+	packet, err := codec.KProV1().EncodePacket(msg)
 	if err != nil {
 		return fmt.Errorf("encode packet: %w", err)
 	}
@@ -85,7 +85,7 @@ func udpCompareEchoOnce(conn *net.UDPConn, msg core.Message, wantLen int, buf []
 	if err != nil {
 		return fmt.Errorf("read packet: %w", err)
 	}
-	got, err := protocol.KProV1().DecodePacket(buf[:n])
+	got, err := codec.KProV1().DecodePacket(buf[:n])
 	if err != nil {
 		return fmt.Errorf("decode packet: %w", err)
 	}
@@ -102,7 +102,7 @@ func startKProUDPCompareServer(b *testing.B) (string, func()) {
 	router := benchmarkUDPEchoRouter()
 	transport := udp.New(udp.Config{
 		Addr:          addr,
-		Protocol:      protocol.KProV1(),
+		Codec:         codec.KProV1(),
 		MaxPacketSize: 64 * 1024,
 	})
 
@@ -190,7 +190,7 @@ func (s *gnetUDPCompareEchoServer) OnTraffic(conn gnet.Conn) gnet.Action {
 	if err != nil {
 		return gnet.Close
 	}
-	msg, err := protocol.KProV1().DecodePacket(packet)
+	msg, err := codec.KProV1().DecodePacket(packet)
 	if err != nil {
 		return gnet.None
 	}
@@ -198,7 +198,7 @@ func (s *gnetUDPCompareEchoServer) OnTraffic(conn gnet.Conn) gnet.Action {
 		msg.ID = core.MsgPong
 		msg.Data = nil
 	}
-	reply, err := protocol.KProV1().EncodePacket(msg)
+	reply, err := codec.KProV1().EncodePacket(msg)
 	if err != nil {
 		return gnet.None
 	}
@@ -216,7 +216,7 @@ func benchmarkUDPEchoRouter() *core.Router {
 		MaxInflightPerSession: 4096,
 		SessionIdleTimeout:    time.Minute,
 	})
-	router.HandleSync(core.MsgEcho, func(ctx core.Context) error {
+	router.HandleSync(benchmarkMsgEcho, func(ctx core.Context) error {
 		msg := ctx.Message()
 		return ctx.Reply(msg.ID, msg.Data)
 	})
@@ -249,7 +249,7 @@ func waitForUDPEchoServer(tb testing.TB, addr string) {
 			time.Sleep(20 * time.Millisecond)
 			continue
 		}
-		packet, err := protocol.KProV1().EncodePacket(core.Message{ID: core.MsgHeartbeat, Seq: 1})
+		packet, err := codec.KProV1().EncodePacket(core.Message{ID: core.MsgHeartbeat, Seq: 1})
 		if err == nil {
 			_, err = conn.Write(packet)
 		}
@@ -259,7 +259,7 @@ func waitForUDPEchoServer(tb testing.TB, addr string) {
 			var n int
 			n, err = conn.Read(buf[:])
 			if err == nil {
-				msg, decodeErr := protocol.KProV1().DecodePacket(buf[:n])
+				msg, decodeErr := codec.KProV1().DecodePacket(buf[:n])
 				if decodeErr == nil && msg.ID == core.MsgPong && msg.Seq == 1 {
 					_ = conn.Close()
 					return

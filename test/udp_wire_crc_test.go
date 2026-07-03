@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/protocol"
 	"github.com/saramand9/bignet/kpro/transport/udp"
 )
 
@@ -317,7 +317,7 @@ func TestUDPWireProtocolFaultStrict1000(t *testing.T) {
 			name: "bad_version",
 			build: func(i int) []byte {
 				frame := strictFaultFrame(t, i)
-				frame[2] = protocol.FrameVersion + 1
+				frame[2] = codec.FrameVersion + 1
 				return frame
 			},
 		},
@@ -326,14 +326,14 @@ func TestUDPWireProtocolFaultStrict1000(t *testing.T) {
 			build: func(i int) []byte {
 				frame := strictFaultFrame(t, i)
 				binary.BigEndian.PutUint32(frame[16:20], strictUDPMaxPacketSize+1)
-				return frame[:protocol.FrameHeaderSize]
+				return frame[:codec.FrameHeaderSize]
 			},
 		},
 		{
 			name: "short_header",
 			build: func(i int) []byte {
 				frame := strictFaultFrame(t, i)
-				return frame[:1+i%(protocol.FrameHeaderSize-1)]
+				return frame[:1+i%(codec.FrameHeaderSize-1)]
 			},
 		},
 		{
@@ -379,17 +379,17 @@ func TestUDPWireProtocolFaultStrict1000(t *testing.T) {
 	}
 }
 
-type recordingPacketProtocol struct {
+type recordingPacketCodec struct {
 	serverReceived *strictWireLog
 	serverSent     *strictWireLog
 }
 
-func (p *recordingPacketProtocol) Name() string {
-	return protocol.KProV1().Name()
+func (p *recordingPacketCodec) Name() string {
+	return codec.KProV1().Name()
 }
 
-func (p *recordingPacketProtocol) DecodePacket(data []byte) (core.Message, error) {
-	msg, err := protocol.KProV1().DecodePacket(data)
+func (p *recordingPacketCodec) DecodePacket(data []byte) (core.Message, error) {
+	msg, err := codec.KProV1().DecodePacket(data)
 	if err != nil {
 		return core.Message{}, err
 	}
@@ -399,8 +399,8 @@ func (p *recordingPacketProtocol) DecodePacket(data []byte) (core.Message, error
 	return msg, nil
 }
 
-func (p *recordingPacketProtocol) EncodePacket(msg core.Message) ([]byte, error) {
-	frame, err := protocol.KProV1().EncodePacket(msg)
+func (p *recordingPacketCodec) EncodePacket(msg core.Message) ([]byte, error) {
+	frame, err := codec.KProV1().EncodePacket(msg)
 	if err != nil {
 		return nil, err
 	}
@@ -520,7 +520,7 @@ func startStrictUDPServer(
 		serverSent:     trace.log("server_sent.ndjson"),
 		clientReceived: trace.log("client_received.ndjson"),
 	}
-	wireProtocol := &recordingPacketProtocol{
+	wireCodec := &recordingPacketCodec{
 		serverReceived: logs.serverReceived,
 		serverSent:     logs.serverSent,
 	}
@@ -531,7 +531,7 @@ func startStrictUDPServer(
 	register(router, control)
 	transport := udp.New(udp.Config{
 		Addr:          addr,
-		Protocol:      wireProtocol,
+		Codec:         wireCodec,
 		MaxPacketSize: strictUDPMaxPacketSize,
 		SendQueueSize: strictWireMessageCount + 16,
 	})
@@ -580,7 +580,7 @@ func dialStrictUDPClient(t *testing.T, addr string) *net.UDPConn {
 
 func writeStrictUDPMessage(t *testing.T, conn *net.UDPConn, log *strictWireLog, msg core.Message) {
 	t.Helper()
-	packet, err := protocol.KProV1().EncodePacket(msg)
+	packet, err := codec.KProV1().EncodePacket(msg)
 	if err != nil {
 		t.Fatalf("encode strict UDP datagram: %v", err)
 	}
@@ -604,7 +604,7 @@ func readStrictUDPMessage(t *testing.T, conn *net.UDPConn, log *strictWireLog) c
 	if err != nil {
 		t.Fatalf("read strict UDP datagram: %v", err)
 	}
-	msg, err := protocol.KProV1().DecodePacket(buf[:n])
+	msg, err := codec.KProV1().DecodePacket(buf[:n])
 	if err != nil {
 		t.Fatalf("decode strict UDP datagram: %v", err)
 	}

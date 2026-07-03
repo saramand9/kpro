@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/protocol"
 )
 
 const (
@@ -24,12 +24,12 @@ const (
 	DefaultCleanupInterval    = 30 * time.Second
 )
 
-// Config controls UDP listener, packet protocol, sessions, queues, and cleanup.
+// Config controls UDP listener, packet codec, sessions, queues, and cleanup.
 type Config struct {
 	// Addr is the UDP listen address.
 	Addr string
-	// Protocol decodes and encodes packet payloads. Nil uses protocol.KProV1().
-	Protocol protocol.PacketProtocol
+	// Codec decodes and encodes packet payloads. Nil uses codec.KProV1().
+	Codec codec.PacketCodec
 	// MaxPacketSize limits incoming datagram read size.
 	MaxPacketSize int
 	// MaxSessions caps active virtual peer sessions.
@@ -103,7 +103,7 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 				return err
 			}
 		}
-		msg, err := s.config.Protocol.DecodePacket(buf[:n])
+		msg, err := s.config.Codec.DecodePacket(buf[:n])
 		if err != nil {
 			continue
 		}
@@ -261,7 +261,7 @@ func (s *packetSession) Send(msg core.Message) error {
 	if s.server.udpConn() == nil {
 		return core.ErrClosed
 	}
-	packet, err := s.server.config.Protocol.EncodePacket(msg)
+	packet, err := s.server.config.Codec.EncodePacket(msg)
 	if err != nil {
 		return err
 	}
@@ -341,8 +341,8 @@ func normalizeConfig(config Config) Config {
 	if config.Addr == "" {
 		config.Addr = DefaultAddr
 	}
-	if config.Protocol == nil {
-		config.Protocol = protocol.KProV1()
+	if config.Codec == nil {
+		config.Codec = codec.KProV1()
 	}
 	if config.MaxPacketSize <= 0 {
 		config.MaxPacketSize = DefaultMaxPacketSize

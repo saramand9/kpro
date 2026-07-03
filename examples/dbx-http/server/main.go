@@ -15,7 +15,9 @@ import (
 )
 
 func main() {
-	addr := flag.String("addr", ":8080", "listen address")
+	addr := flag.String("addr", ":8080", "http listen address")
+	udpAddr := flag.String("udp", ":8089", "udp listen address, disabled when empty")
+	grpcAddr := flag.String("grpc", ":9090", "grpc listen address, disabled when empty")
 	dsn := flag.String("dsn", "file:kpro-dbx-example.db", "sqlite data source name")
 	flag.Parse()
 
@@ -35,10 +37,10 @@ func main() {
 
 	app := server.New(server.Config{Name: "dbx-http-example"})
 	app.Manage(database)
-	if err := routeapp.RegisterRoutes(ctx, app, database, routeapp.Config{HTTPAddr: *addr}); err != nil {
+	if err := routeapp.RegisterRoutes(ctx, app, database, routeapp.Config{HTTPAddr: *addr, UDPAddr: *udpAddr, GRPCAddr: *grpcAddr}); err != nil {
 		log.Fatal(err)
 	}
 
-	log.Printf("dbx http example server listening on http://127.0.0.1%s", *addr)
+	log.Printf("dbx example server listening http=%s udp=%s grpc=%s", *addr, *udpAddr, *grpcAddr)
 	log.Fatal(app.ListenAndServe())
 }

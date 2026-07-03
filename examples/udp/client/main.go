@@ -6,12 +6,13 @@ package main
 import (
 	"flag"
 	"fmt"
+	"github.com/saramand9/bignet/kpro/examples/internal/msgid"
 	"log"
 	"net"
 	"time"
 
+	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/protocol"
 )
 
 func main() {
@@ -29,7 +30,7 @@ func main() {
 	}
 	defer conn.Close()
 
-	packet, err := protocol.KProV1().EncodePacket(core.Message{ID: core.MsgEcho, Seq: 1, Data: []byte(*text)})
+	packet, err := codec.KProV1().EncodePacket(core.Message{ID: msgid.Echo, Seq: 1, Data: []byte(*text)})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -42,7 +43,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	msg, err := protocol.KProV1().DecodePacket(buf[:n])
+	msg, err := codec.KProV1().DecodePacket(buf[:n])
 	if err != nil {
 		log.Fatal(err)
 	}

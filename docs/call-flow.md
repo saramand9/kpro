@@ -1,12 +1,12 @@
 # KPro call flow
 
-This document shows the runtime call paths for the current KPro universal server implementation.
+This document shows the runtime call paths for the current KPro app server implementation.
 
 ## Startup
 
 ```mermaid
 flowchart TD
-    Main[cmd/kpro-universal-server/main.go] --> New[server.New]
+    Main[cmd/app/main.go] --> New[server.New]
     New --> App[server.Server]
 
     Main --> TCP[app.TCP]
@@ -64,7 +64,7 @@ flowchart TD
     Client[Client TCP] --> Accept[tcp.Server.ListenAndServe]
     Accept --> Session[tcp.session]
     Session --> ReadLoop[session.readLoop]
-    ReadLoop --> ProtocolRead[StreamProtocol.Read]
+    ReadLoop --> ProtocolRead[StreamCodec.Read]
     ProtocolRead --> Message[core.Message]
     Message --> Context[core.NewContext]
     Context --> Dispatch[core.Router.Dispatch]
@@ -73,7 +73,7 @@ flowchart TD
     Middleware --> Handler[Business Handler]
     Handler --> Reply[ctx.Reply]
     Reply --> Send[session.Send]
-    Send --> Encode[StreamProtocol.Encode]
+    Send --> Encode[StreamCodec.Encode]
     Encode --> Queue[sendQueue]
     Queue --> WriteLoop[session.writeLoop]
     WriteLoop --> Client
@@ -83,7 +83,7 @@ Key files:
 
 ```text
 transport/tcp/server.go
-protocol/kpro.go
+codec/kpro.go
 core/context.go
 core/router.go
 ```
@@ -93,7 +93,7 @@ core/router.go
 ```mermaid
 flowchart TD
     Client[Client UDP] --> ReadFromUDP[udp.Server.ListenAndServe]
-    ReadFromUDP --> DecodePacket[PacketProtocol.DecodePacket]
+    ReadFromUDP --> DecodePacket[PacketCodec.DecodePacket]
     DecodePacket --> Message[core.Message]
     Message --> PacketSession[getOrCreate udp.packetSession by remote IP:port]
     PacketSession --> Context[core.NewContext]
@@ -103,7 +103,7 @@ flowchart TD
     Middleware --> Handler[Business Handler]
     Handler --> Reply[ctx.Reply]
     Reply --> Send[packetSession.Send]
-    Send --> EncodePacket[PacketProtocol.EncodePacket]
+    Send --> EncodePacket[PacketCodec.EncodePacket]
     EncodePacket --> Queue[per-remote sendQueue]
     Queue --> WriteLoop[packetSession.writeLoop]
     WriteLoop --> WriteToUDP[UDP WriteToUDP]
@@ -121,7 +121,7 @@ flowchart TD
     Hijack --> WSSession[websocket.session]
     WSSession --> ReadLoop[session.readLoop]
     ReadLoop --> ReadFrame[readFrame]
-    ReadFrame --> DecodePacket[PacketProtocol.DecodePacket]
+    ReadFrame --> DecodePacket[PacketCodec.DecodePacket]
     DecodePacket --> Message[core.Message]
     Message --> Context[core.NewContext]
     Context --> Dispatch[core.Router.Dispatch]
@@ -130,7 +130,7 @@ flowchart TD
     Middleware --> Handler[Business Handler]
     Handler --> Reply[ctx.Reply]
     Reply --> Send[session.Send]
-    Send --> EncodePacket[PacketProtocol.EncodePacket]
+    Send --> EncodePacket[PacketCodec.EncodePacket]
     EncodePacket --> WriteFrame[writeFrame]
     WriteFrame --> Client
 ```
@@ -219,3 +219,6 @@ flowchart TD
     SSEShutdown --> Done
     GRPCShutdown --> Done
 ```
+
+
+
