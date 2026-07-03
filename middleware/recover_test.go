@@ -8,7 +8,7 @@ import (
 )
 
 func TestRecoverConvertsPanicToError(t *testing.T) {
-	ctx := core.NewInvocation(core.InvocationOptions{Operation: core.MessageOperation(core.MsgEcho)})
+	ctx := core.NewInvocation(core.InvocationOptions{Operation: core.MessageOperation(testMsgEcho)})
 	var loggedRecovered interface{}
 	var loggedStack string
 	previousLogger := logPanicStack

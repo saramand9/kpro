@@ -6,6 +6,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"github.com/saramand9/bignet/kpro/examples/internal/msgid"
 	"log"
 	"net"
 	"time"
@@ -25,7 +26,7 @@ func main() {
 	}
 	defer conn.Close()
 
-	if err := wire.WriteMessage(conn, core.Message{ID: core.MsgEcho, Seq: 1, Data: []byte(*text)}); err != nil {
+	if err := wire.WriteMessage(conn, core.Message{ID: msgid.Echo, Seq: 1, Data: []byte(*text)}); err != nil {
 		log.Fatal(err)
 	}
 	msg, err := wire.ReadMessage(conn)

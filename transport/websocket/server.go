@@ -19,8 +19,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/protocol"
 	"github.com/saramand9/bignet/kpro/transport/internal/streamutil"
 )
 
@@ -47,14 +47,14 @@ var (
 	ErrFragmentedControlFrame = errors.New("websocket control frame must not be fragmented")
 )
 
-// Config controls WebSocket listener, path, protocol, queue, and timeout settings.
+// Config controls WebSocket listener, path, codec, queue, and timeout settings.
 type Config struct {
 	// Addr is the HTTP listen address used for WebSocket upgrades.
 	Addr string
 	// Path is the WebSocket upgrade route path.
 	Path string
-	// Protocol decodes and encodes binary WebSocket payloads. Nil uses protocol.KProV1().
-	Protocol protocol.PacketProtocol
+	// Codec decodes and encodes binary WebSocket payloads. Nil uses codec.KProV1().
+	Codec codec.PacketCodec
 	// MaxMessage limits reassembled WebSocket message size.
 	MaxMessage int
 	// SendQueueSize is the per-session outbound frame queue length.
@@ -199,7 +199,7 @@ func (s *session) Done() <-chan struct{} {
 }
 
 func (s *session) Send(msg core.Message) error {
-	packet, err := s.server.config.Protocol.EncodePacket(msg)
+	packet, err := s.server.config.Codec.EncodePacket(msg)
 	if err != nil {
 		return err
 	}
@@ -293,7 +293,7 @@ func (s *session) readLoop(handler core.Handler) {
 }
 
 func (s *session) handleMessage(handler core.Handler, payload []byte) error {
-	msg, err := s.server.config.Protocol.DecodePacket(payload)
+	msg, err := s.server.config.Codec.DecodePacket(payload)
 	if err != nil {
 		return err
 	}
@@ -437,8 +437,8 @@ func normalizeConfig(config Config) Config {
 	if config.Path == "" {
 		config.Path = DefaultPath
 	}
-	if config.Protocol == nil {
-		config.Protocol = protocol.KProV1()
+	if config.Codec == nil {
+		config.Codec = codec.KProV1()
 	}
 	if config.MaxMessage <= 0 {
 		config.MaxMessage = DefaultMaxMessage

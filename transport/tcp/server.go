@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/protocol"
 	"github.com/saramand9/bignet/kpro/transport/internal/streamutil"
 )
 
@@ -25,12 +25,12 @@ const (
 	DefaultWriteTimeout   = 5 * time.Second
 )
 
-// Config controls TCP listener, protocol, queue, and timeout settings.
+// Config controls TCP listener, codec, queue, and timeout settings.
 type Config struct {
 	// Addr is the TCP listen address.
 	Addr string
-	// Protocol decodes and encodes stream frames. Nil uses protocol.KProV1().
-	Protocol protocol.StreamProtocol
+	// Codec decodes and encodes stream frames. Nil uses codec.KProV1().
+	Codec codec.StreamCodec
 	// MaxFrameSize limits decoded frame payload size.
 	MaxFrameSize uint32
 	// MaxConnections caps active TCP sessions.
@@ -149,7 +149,7 @@ func (s *session) Done() <-chan struct{} {
 }
 
 func (s *session) Send(msg core.Message) error {
-	frame, err := s.server.config.Protocol.Encode(msg)
+	frame, err := s.server.config.Codec.Encode(msg)
 	if err != nil {
 		return err
 	}
@@ -187,7 +187,7 @@ func (s *session) readLoop(handler core.Handler) {
 				return
 			}
 		}
-		result, err := s.server.config.Protocol.Read(s.raw, s.server.config.MaxFrameSize)
+		result, err := s.server.config.Codec.Read(s.raw, s.server.config.MaxFrameSize)
 		if err != nil {
 			if err == io.EOF {
 				return
@@ -226,8 +226,8 @@ func normalizeConfig(config Config) Config {
 	if config.Addr == "" {
 		config.Addr = DefaultAddr
 	}
-	if config.Protocol == nil {
-		config.Protocol = protocol.KProV1()
+	if config.Codec == nil {
+		config.Codec = codec.KProV1()
 	}
 	if config.MaxFrameSize == 0 {
 		config.MaxFrameSize = DefaultMaxFrameSize

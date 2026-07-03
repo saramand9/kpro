@@ -422,3 +422,4 @@ Notes:
 - KPro `httpx` is backed by raw `fasthttp` in this run.
 - KPro now matches Fiber allocation counts in the common 64B/1024B sequential and 64-worker cases, and is one allocation lower at 1024B/16c.
 - On this Windows localhost run, KPro is ahead at 16 workers and near parity at sequential/64 workers, with visible run-to-run variance.
+

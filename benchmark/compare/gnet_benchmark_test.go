@@ -12,8 +12,8 @@ import (
 
 	"github.com/panjf2000/gnet/v2"
 	"github.com/panjf2000/gnet/v2/pkg/logging"
+	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/protocol"
 )
 
 func BenchmarkGNetTCP_Echo(b *testing.B) {
@@ -35,7 +35,7 @@ func benchmarkGNetTCPEcho(b *testing.B, payloadSize int) {
 	for i := range payload {
 		payload[i] = 'x'
 	}
-	msg := core.Message{ID: core.MsgEcho, Data: payload}
+	msg := core.Message{ID: benchmarkMsgEcho, Data: payload}
 
 	b.SetBytes(int64(payloadSize))
 	b.ReportAllocs()
@@ -103,24 +103,24 @@ func (s *gnetKProEchoServer) OnBoot(engine gnet.Engine) gnet.Action {
 
 func (s *gnetKProEchoServer) OnTraffic(conn gnet.Conn) gnet.Action {
 	for {
-		if conn.InboundBuffered() < protocol.FrameHeaderSize {
+		if conn.InboundBuffered() < codec.FrameHeaderSize {
 			return gnet.None
 		}
-		header, err := conn.Peek(protocol.FrameHeaderSize)
+		header, err := conn.Peek(codec.FrameHeaderSize)
 		if err != nil {
 			if err == io.ErrShortBuffer {
 				return gnet.None
 			}
 			return gnet.Close
 		}
-		if binary.BigEndian.Uint16(header[0:2]) != protocol.FrameMagic || header[2] != protocol.FrameVersion {
+		if binary.BigEndian.Uint16(header[0:2]) != codec.FrameMagic || header[2] != codec.FrameVersion {
 			return gnet.Close
 		}
 		bodyLen := binary.BigEndian.Uint32(header[16:20])
 		if bodyLen > 64*1024 {
 			return gnet.Close
 		}
-		frameLen := protocol.FrameHeaderSize + int(bodyLen)
+		frameLen := codec.FrameHeaderSize + int(bodyLen)
 		if conn.InboundBuffered() < frameLen {
 			return gnet.None
 		}
@@ -131,7 +131,7 @@ func (s *gnetKProEchoServer) OnTraffic(conn gnet.Conn) gnet.Action {
 			}
 			return gnet.Close
 		}
-		msg, err := protocol.KProV1().DecodePacket(frame)
+		msg, err := codec.KProV1().DecodePacket(frame)
 		if err != nil {
 			return gnet.Close
 		}
@@ -139,7 +139,7 @@ func (s *gnetKProEchoServer) OnTraffic(conn gnet.Conn) gnet.Action {
 			msg.ID = core.MsgPong
 			msg.Data = nil
 		}
-		reply, err := protocol.KProV1().EncodePacket(msg)
+		reply, err := codec.KProV1().EncodePacket(msg)
 		if err != nil {
 			return gnet.Close
 		}

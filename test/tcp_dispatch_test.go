@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/protocol"
 	"github.com/saramand9/bignet/kpro/server"
 	"github.com/saramand9/bignet/kpro/transport/tcp"
 )
@@ -45,7 +45,7 @@ func TestTCPAsyncHandlerCanReturnBeforeBlockedSyncHandler(t *testing.T) {
 		})
 	}
 
-	app.TCP(addr, tcp.Config{Protocol: protocol.KProV1()}).
+	app.TCP(addr, tcp.Config{Codec: codec.KProV1()}).
 		HandleSync(msgBlock, func(ctx core.Context) error {
 			close(syncStarted)
 			<-releaseSync
@@ -124,7 +124,7 @@ func dialTCP(t *testing.T, addr string) net.Conn {
 
 func writeMessage(t *testing.T, conn net.Conn, msg core.Message) {
 	t.Helper()
-	frame, err := protocol.KProV1().Encode(msg)
+	frame, err := codec.KProV1().Encode(msg)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
@@ -135,7 +135,7 @@ func writeMessage(t *testing.T, conn net.Conn, msg core.Message) {
 
 func readMessage(t *testing.T, conn net.Conn) core.Message {
 	t.Helper()
-	result, err := protocol.KProV1().Read(conn, 64*1024)
+	result, err := codec.KProV1().Read(conn, 64*1024)
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}

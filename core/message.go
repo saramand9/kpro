@@ -8,8 +8,6 @@ const (
 	MsgHeartbeat uint32 = 1
 	// MsgPong is the built-in heartbeat response.
 	MsgPong uint32 = 2
-	// MsgEcho is the built-in echo message used by examples and tests.
-	MsgEcho uint32 = 100
 	// MsgError carries framework or handler errors back to a peer.
 	MsgError uint32 = 0xffffffff
 )

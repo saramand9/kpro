@@ -69,21 +69,33 @@ func (s *Store[T]) GORM() gorm.Interface[T] {
 
 // Create inserts value into the store table.
 func (s *Store[T]) Create(ctx context.Context, value *T) (sql.Result, error) {
+	if result, ok, err := s.createWithGORM(ctx, value); ok {
+		return result, err
+	}
 	return s.Writer().Insert(ctx, s.table, value)
 }
 
 // Update updates value in the store table by primary key.
 func (s *Store[T]) Update(ctx context.Context, value *T) (sql.Result, error) {
+	if result, ok, err := s.updateWithGORM(ctx, value); ok {
+		return result, err
+	}
 	return s.Writer().Update(ctx, s.table, value)
 }
 
 // Upsert inserts value or updates an existing row on conflict.
 func (s *Store[T]) Upsert(ctx context.Context, value *T, conflict ConflictConfig) (sql.Result, error) {
+	if result, ok, err := s.upsertWithGORM(ctx, value, conflict); ok {
+		return result, err
+	}
 	return s.Writer().Upsert(ctx, s.table, value, conflict)
 }
 
 // BatchCreate inserts values into the store table.
 func (s *Store[T]) BatchCreate(ctx context.Context, values []T) (sql.Result, error) {
+	if result, ok, err := s.batchCreateWithGORM(ctx, values); ok {
+		return result, err
+	}
 	return s.Writer().BatchInsert(ctx, s.table, values)
 }
 
@@ -94,20 +106,28 @@ type AsyncStore[T any] struct {
 
 // Create queues an insert into the store table.
 func (s *AsyncStore[T]) Create(ctx context.Context, value *T) (*Future, error) {
-	return s.store.database.Async().Insert(ctx, s.store.table, value)
+	return s.store.database.Async().Submit(ctx, func(jobCtx context.Context) (sql.Result, error) {
+		return s.store.Create(jobCtx, value)
+	})
 }
 
 // Update queues an update into the store table.
 func (s *AsyncStore[T]) Update(ctx context.Context, value *T) (*Future, error) {
-	return s.store.database.Async().Update(ctx, s.store.table, value)
+	return s.store.database.Async().Submit(ctx, func(jobCtx context.Context) (sql.Result, error) {
+		return s.store.Update(jobCtx, value)
+	})
 }
 
 // Upsert queues an upsert into the store table.
 func (s *AsyncStore[T]) Upsert(ctx context.Context, value *T, conflict ConflictConfig) (*Future, error) {
-	return s.store.database.Async().Upsert(ctx, s.store.table, value, conflict)
+	return s.store.database.Async().Submit(ctx, func(jobCtx context.Context) (sql.Result, error) {
+		return s.store.Upsert(jobCtx, value, conflict)
+	})
 }
 
 // BatchCreate queues a batch insert into the store table.
 func (s *AsyncStore[T]) BatchCreate(ctx context.Context, values []T) (*Future, error) {
-	return s.store.database.Async().BatchInsert(ctx, s.store.table, values)
+	return s.store.database.Async().Submit(ctx, func(jobCtx context.Context) (sql.Result, error) {
+		return s.store.BatchCreate(jobCtx, values)
+	})
 }

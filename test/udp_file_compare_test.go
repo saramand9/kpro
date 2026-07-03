@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/protocol"
 	"github.com/saramand9/bignet/kpro/transport/udp"
 )
 
@@ -269,7 +269,7 @@ func startUDPTraceServer(t *testing.T, routerConfig core.RouterConfig, received 
 
 	transport := udp.New(udp.Config{
 		Addr:          addr,
-		Protocol:      protocol.KProV1(),
+		Codec:         codec.KProV1(),
 		MaxPacketSize: 2048,
 	})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -335,7 +335,7 @@ func sendUDPTraced(t *testing.T, log *tcpTraceLog, client *udpTraceClient, msg c
 	if err := log.appendMessage(msg); err != nil {
 		t.Fatalf("append UDP sent trace: %v", err)
 	}
-	packet, err := protocol.KProV1().EncodePacket(msg)
+	packet, err := codec.KProV1().EncodePacket(msg)
 	if err != nil {
 		t.Fatalf("encode UDP packet: %v", err)
 	}
@@ -352,7 +352,7 @@ func readUDPTraced(t *testing.T, log *tcpTraceLog, client *udpTraceClient) core.
 	if err != nil {
 		t.Fatalf("read UDP packet: %v", err)
 	}
-	msg, err := protocol.KProV1().DecodePacket(buf[:n])
+	msg, err := codec.KProV1().DecodePacket(buf[:n])
 	if err != nil {
 		t.Fatalf("decode UDP packet: %v", err)
 	}

@@ -285,7 +285,7 @@ func waitForRateLimitCleanup(t *testing.T, condition func() bool) {
 }
 
 func newRateLimitTestInvocation(session *rateLimitTestSession) core.Invocation {
-	return core.NewMessageInvocation(context.Background(), core.NewContext(session, core.Message{ID: core.MsgEcho}))
+	return core.NewMessageInvocation(context.Background(), core.NewContext(session, core.Message{ID: testMsgEcho}))
 }
 
 type rateLimitTestSession struct {

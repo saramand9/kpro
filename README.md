@@ -1,6 +1,6 @@
 # KPro
 
-KPro is a Go network framework experiment for building a "universal server" that can host multiple protocol transports behind one application-level programming model.
+KPro is a Go network framework experiment for building a multi-transport app server behind one application-level programming model.
 
 The design goal is:
 
@@ -29,8 +29,6 @@ SSE         implemented
 gRPC        implemented through transport/grpcx and server.GRPC
 ```
 
-There is also a legacy TCP validation baseline in `kpro/legacy`. The universal server in `server`, `core`, `protocol` and `transport` is the framework direction.
-
 ## Architecture
 
 High-level structure:
@@ -47,7 +45,7 @@ flowchart TD
     App --> SSE[transport/sse]
     App --> GRPC[transport/grpcx]
 
-    TCP --> Protocol[protocol.KProV1]
+    TCP --> Protocol[codec.KProV1]
     KCP --> Protocol
     QUIC --> Protocol
     UDP --> Protocol
@@ -67,9 +65,7 @@ flowchart TD
 
 ```text
 cmd/
-  kpro-client/             legacy TCP benchmark client
-  kpro-server/             legacy TCP echo server
-  kpro-universal-server/   multi-transport example server
+  app/                     current application server
 
 core/
   Message                  business packet
@@ -79,9 +75,9 @@ core/
   Invocation               unified middleware context
   Middleware               shared invocation middleware
 
-protocol/
-  StreamProtocol           stream decoder/encoder, used by TCP
-  PacketProtocol           packet decoder/encoder, used by UDP/WebSocket
+codec/
+  StreamCodec           stream decoder/encoder, used by TCP
+  PacketCodec           packet decoder/encoder, used by UDP/WebSocket
   KProV1                   default binary protocol
 
 transport/
@@ -120,11 +116,11 @@ sequenceDiagram
     participant Handler
 
     Client->>Transport: bytes / datagram / WebSocket message
-    Transport->>Protocol: raw payload
+    Transport->>Codec: raw payload
     Protocol->>Router: core.Message
     Router->>Handler: core.Context
     Handler->>Router: ctx.Reply()
-    Router->>Protocol: response Message
+    Router->>Codec: response Message
     Protocol->>Transport: encoded response
     Transport->>Client: response
 ```
@@ -172,7 +168,7 @@ SSE
 
 ## Default Protocol
 
-`protocol.KProV1()` is the default binary protocol.
+`codec.KProV1()` is the default binary codec.
 
 ```text
 20-byte big-endian header + body
@@ -191,11 +187,12 @@ Built-in message IDs:
 ```text
 1          heartbeat
 2          pong
-100        echo
 0xffffffff error
 ```
 
-## Universal Server Example
+Application message IDs are user-defined. The examples below use `100` as a local echo message ID.
+
+## App Server Example
 
 ```go
 package main
@@ -206,7 +203,7 @@ import (
 
 	"github.com/saramand9/bignet/kpro/core"
 	"github.com/saramand9/bignet/kpro/middleware"
-	"github.com/saramand9/bignet/kpro/protocol"
+	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/server"
 	http3x "github.com/saramand9/bignet/kpro/transport/http3"
 	"github.com/saramand9/bignet/kpro/transport/httpx"
@@ -218,38 +215,40 @@ import (
 	"github.com/saramand9/bignet/kpro/transport/websocket"
 )
 
+const msgEcho uint32 = 100
+
 func main() {
 	app := server.New(server.Config{Name: "gateway"})
 	metrics := middleware.NewMetrics()
 
 	app.TCP(":8088", tcp.Config{
-		Protocol: protocol.KProV1(),
+		Codec: codec.KProV1(),
 	}).Use(middleware.Recover(), metrics.Middleware()).
-		Handle(core.MsgEcho, echo)
+		Handle(msgEcho, echo)
 
 	app.KCP(":8090", kcp.Config{
-		Protocol: protocol.KProV1(),
+		Codec: codec.KProV1(),
 	}).Use(middleware.Recover(), metrics.Middleware()).
-		Handle(core.MsgEcho, echo)
+		Handle(msgEcho, echo)
 
 	app.QUIC(":8444", quictransport.Config{
-		Protocol: protocol.KProV1(),
+		Codec: codec.KProV1(),
 		CertFile: "server.crt",
 		KeyFile:  "server.key",
 	}).Use(middleware.Recover(), metrics.Middleware()).
-		Handle(core.MsgEcho, echo)
+		Handle(msgEcho, echo)
 
 	app.UDP(":8089", udp.Config{
-		Protocol:      protocol.KProV1(),
+		Codec:      codec.KProV1(),
 		MaxPacketSize: 2048,
 	}).Use(middleware.Recover(), metrics.Middleware()).
-		Handle(core.MsgEcho, echo)
+		Handle(msgEcho, echo)
 
 	app.WebSocket(":8091", "/ws", websocket.Config{
-		Protocol:   protocol.KProV1(),
+		Codec:   codec.KProV1(),
 		MaxMessage: 64 * 1024,
 	}).Use(middleware.Recover(), metrics.Middleware()).
-		Handle(core.MsgEcho, echo)
+		Handle(msgEcho, echo)
 
 	app.HTTP(":8080").
 		Get("/health", func(ctx *httpx.Context) error {
@@ -265,7 +264,6 @@ func main() {
 			}
 			return ctx.JSON(200, map[string]interface{}{"echo": string(body)})
 		})
-
 
 	app.HTTP3(":8443", http3x.Config{
 		CertFile: "server.crt",
@@ -303,33 +301,27 @@ func echo(ctx core.Context) error {
 
 ```powershell
 cd D:\dev\saramand9\bignet\kpro
-go run .\cmd\kpro-universal-server -tcp :8088 -kcp :8090 -udp :8089 -ws :8091 -http :8080 -sse :8081
+go run .\cmd\app -tcp :8088 -kcp :8090 -udp :8089 -ws :8091 -http :8080 -sse :8081
 ```
 
-HTTP/3 is disabled by default in the universal server because it requires TLS
+HTTP/3 is disabled by default in the app server because it requires TLS
 certificates and listens on UDP:
 
 ```powershell
-go run .\cmd\kpro-universal-server -http3 :8443 -http3-cert server.crt -http3-key server.key
+go run .\cmd\app -http3 :8443 -http3-cert server.crt -http3-key server.key
 ```
 
 QUIC message transport is also disabled by default because it requires TLS
 certificates and listens on UDP:
 
 ```powershell
-go run .\cmd\kpro-universal-server -quic :8444 -quic-cert server.crt -quic-key server.key
+go run .\cmd\app -quic :8444 -quic-cert server.crt -quic-key server.key
 ```
 
 Limit active QUIC stream sessions with:
 
 ```powershell
-go run .\cmd\kpro-universal-server -quic :8444 -quic-cert server.crt -quic-key server.key -quic-max-streams 10000
-```
-
-TCP validation:
-
-```powershell
-go run .\cmd\kpro-client -addr 127.0.0.1:8088 -conns 1000 -rate 1 -duration 60s -ramp 10s
+go run .\cmd\app -quic :8444 -quic-cert server.crt -quic-key server.key -quic-max-streams 10000
 ```
 
 HTTP validation:
@@ -357,31 +349,10 @@ examples/grpc/server         examples/grpc/client
 
 See [examples/README.md](examples/README.md) for startup commands.
 
-## Legacy TCP Server
-
-The `kpro/legacy` package contains the earlier TCP validation baseline:
-
-```text
-accept loop
-  -> per-connection reader goroutine
-  -> bounded global worker queue
-  -> worker pool
-  -> bounded per-connection send queue
-  -> per-connection writer goroutine
-```
-
-Run it with:
-
-```powershell
-go run .\cmd\kpro-server -host 0.0.0.0 -port 8088 -max-conns 10000 -workers 16
-```
-
-This path is useful for TCP load validation only. New framework code should use `server.New` and transports under `transport/`.
-
 ## Design Notes
 
-- TCP, KCP and QUIC are stream-oriented, so they use `protocol.StreamProtocol`.
-- UDP and WebSocket have message boundaries, so they use `protocol.PacketProtocol`.
+- TCP, KCP and QUIC are stream-oriented, so they use `codec.StreamCodec`.
+- UDP and WebSocket have message boundaries, so they use `codec.PacketCodec`.
 - HTTP/HTTPS keep native method + path routing for REST-style APIs and do not convert requests into `core.Message`.
 - HTTP/3 uses the same path-routing handler model over QUIC/UDP and requires TLS certificates.
 - QUIC uses bidirectional QUIC streams as `core.Session` instances and runs KPro messages directly over them. `quic.Config.MaxStreams` limits active stream sessions; the older `MaxConnections` field is kept as a compatibility alias.
@@ -390,6 +361,8 @@ This path is useful for TCP load validation only. New framework code should use 
 - SSE is one-way server push and has its own `sse.Context`; the stream setup can reuse unified `core.Middleware`.
 - gRPC uses native gRPC service and method routing. Unary and stream RPCs reuse unified `core.Middleware` through `server.GRPC` / `grpcx.Server.Use`; they are not converted into `core.Message`.
 - The framework avoids exposing a Netty-style pipeline API. The public model is `Protocol + Middleware + Router + Handler`.
+- App server usage is documented in [docs/app-server.md](docs/app-server.md).
+- DBX database helpers are documented in [docs/dbx.md](docs/dbx.md).
 - More detailed call-flow diagrams are in [docs/call-flow.md](docs/call-flow.md).
 - TCP internal flow guide is in [docs/tcp-internal-flow.md](docs/tcp-internal-flow.md).
 - Network correctness requirements for message-based transports are in [docs/network-test-requirements.md](docs/network-test-requirements.md).
@@ -410,3 +383,11 @@ cd .\benchmark\compare
 go test ./...
 go vet ./...
 ```
+
+
+
+
+
+
+
+

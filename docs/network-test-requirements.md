@@ -16,7 +16,7 @@ These rules apply to message-based transports:
 - TCP
 - UDP
 - WebSocket
-- Any future transport that carries `core.Message` through `protocol.KProV1`
+- Any future transport that carries `core.Message` through `codec.KProV1`
 
 HTTP and SSE are path or stream oriented transports. They should still test
 ordering and error behavior, but they do not have to use the KProV1 frame CRC
@@ -288,3 +288,4 @@ A transport passes the network correctness bar when:
 
 Performance benchmarks are useful, but they do not replace these correctness
 requirements.
+

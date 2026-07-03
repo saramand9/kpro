@@ -17,8 +17,8 @@ import (
 
 	"github.com/panjf2000/gnet/v2"
 	"github.com/panjf2000/gnet/v2/pkg/logging"
+	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/protocol"
 	"github.com/saramand9/bignet/kpro/transport/tcp"
 )
 
@@ -107,7 +107,7 @@ func benchmarkTCPCompareClient(b *testing.B, addr string, payloadSize, conns int
 		conn := conn
 		go func() {
 			defer wg.Done()
-			msg := core.Message{ID: core.MsgEcho, Data: payload}
+			msg := core.Message{ID: benchmarkMsgEcho, Data: payload}
 			for {
 				if failed.Load() {
 					return
@@ -133,7 +133,7 @@ func benchmarkTCPCompareClient(b *testing.B, addr string, payloadSize, conns int
 }
 
 func tcpCompareEchoOnce(conn net.Conn, msg core.Message, wantLen int) error {
-	frame, err := protocol.KProV1().Encode(msg)
+	frame, err := codec.KProV1().Encode(msg)
 	if err != nil {
 		return fmt.Errorf("encode message: %w", err)
 	}
@@ -141,7 +141,7 @@ func tcpCompareEchoOnce(conn net.Conn, msg core.Message, wantLen int) error {
 		return fmt.Errorf("write message: %w", err)
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-	result, err := protocol.KProV1().Read(conn, 64*1024)
+	result, err := codec.KProV1().Read(conn, 64*1024)
 	if err != nil {
 		return fmt.Errorf("read message: %w", err)
 	}
@@ -168,14 +168,14 @@ func startKProTCPCompareServer(b *testing.B, mode core.DispatchMode) (string, fu
 		return ctx.Reply(msg.ID, msg.Data)
 	}
 	if mode == core.DispatchAsync {
-		router.HandleAsync(core.MsgEcho, handler)
+		router.HandleAsync(benchmarkMsgEcho, handler)
 	} else {
-		router.HandleSync(core.MsgEcho, handler)
+		router.HandleSync(benchmarkMsgEcho, handler)
 	}
 
 	transport := tcp.New(tcp.Config{
 		Addr:          addr,
-		Protocol:      protocol.KProV1(),
+		Codec:         codec.KProV1(),
 		SendQueueSize: 1024,
 		ReadTimeout:   10 * time.Second,
 		WriteTimeout:  10 * time.Second,
@@ -310,24 +310,24 @@ func (s *gnetCompareEchoServer) stopWorkers() {
 }
 
 func gnetReadKProFrame(conn gnet.Conn) ([]byte, gnet.Action) {
-	if conn.InboundBuffered() < protocol.FrameHeaderSize {
+	if conn.InboundBuffered() < codec.FrameHeaderSize {
 		return nil, gnet.None
 	}
-	header, err := conn.Peek(protocol.FrameHeaderSize)
+	header, err := conn.Peek(codec.FrameHeaderSize)
 	if err != nil {
 		if err == io.ErrShortBuffer {
 			return nil, gnet.None
 		}
 		return nil, gnet.Close
 	}
-	if binary.BigEndian.Uint16(header[0:2]) != protocol.FrameMagic || header[2] != protocol.FrameVersion {
+	if binary.BigEndian.Uint16(header[0:2]) != codec.FrameMagic || header[2] != codec.FrameVersion {
 		return nil, gnet.Close
 	}
 	bodyLen := binary.BigEndian.Uint32(header[16:20])
 	if bodyLen > 64*1024 {
 		return nil, gnet.Close
 	}
-	frameLen := protocol.FrameHeaderSize + int(bodyLen)
+	frameLen := codec.FrameHeaderSize + int(bodyLen)
 	if conn.InboundBuffered() < frameLen {
 		return nil, gnet.None
 	}
@@ -342,7 +342,7 @@ func gnetReadKProFrame(conn gnet.Conn) ([]byte, gnet.Action) {
 }
 
 func gnetWriteKProEcho(conn gnet.Conn, frame []byte, async bool) bool {
-	msg, err := protocol.KProV1().DecodePacket(frame)
+	msg, err := codec.KProV1().DecodePacket(frame)
 	if err != nil {
 		return false
 	}
@@ -350,7 +350,7 @@ func gnetWriteKProEcho(conn gnet.Conn, frame []byte, async bool) bool {
 		msg.ID = core.MsgPong
 		msg.Data = nil
 	}
-	reply, err := protocol.KProV1().EncodePacket(msg)
+	reply, err := codec.KProV1().EncodePacket(msg)
 	if err != nil {
 		return false
 	}

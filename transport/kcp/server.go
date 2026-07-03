@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/protocol"
 	"github.com/saramand9/bignet/kpro/transport/internal/streamutil"
 	kcpgo "github.com/xtaci/kcp-go"
 )
@@ -32,7 +32,7 @@ const (
 
 type Config struct {
 	Addr           string
-	Protocol       protocol.StreamProtocol
+	Codec          codec.StreamCodec
 	MaxFrameSize   uint32
 	MaxConnections int
 	SendQueueSize  int
@@ -151,7 +151,7 @@ func (s *session) Done() <-chan struct{} {
 }
 
 func (s *session) Send(msg core.Message) error {
-	frame, err := s.server.config.Protocol.Encode(msg)
+	frame, err := s.server.config.Codec.Encode(msg)
 	if err != nil {
 		return err
 	}
@@ -189,7 +189,7 @@ func (s *session) readLoop(handler core.Handler) {
 				return
 			}
 		}
-		result, err := s.server.config.Protocol.Read(s.raw, s.server.config.MaxFrameSize)
+		result, err := s.server.config.Codec.Read(s.raw, s.server.config.MaxFrameSize)
 		if err != nil {
 			if err == io.EOF {
 				return
@@ -229,8 +229,8 @@ func normalizeConfig(config Config) Config {
 	if config.Addr == "" {
 		config.Addr = DefaultAddr
 	}
-	if config.Protocol == nil {
-		config.Protocol = protocol.KProV1()
+	if config.Codec == nil {
+		config.Codec = codec.KProV1()
 	}
 	if config.MaxFrameSize == 0 {
 		config.MaxFrameSize = DefaultMaxFrameSize

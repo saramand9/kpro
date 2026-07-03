@@ -7,17 +7,17 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/protocol"
 )
 
 func TestKProV1RoundTrip(t *testing.T) {
-	want := core.Message{ID: core.MsgEcho, Seq: 42, Data: []byte("hello")}
-	frame, err := protocol.KProV1().Encode(want)
+	want := core.Message{ID: testMsgEcho, Seq: 42, Data: []byte("hello")}
+	frame, err := codec.KProV1().Encode(want)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	got, err := protocol.KProV1().Read(bytes.NewReader(frame), 1024)
+	got, err := codec.KProV1().Read(bytes.NewReader(frame), 1024)
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}

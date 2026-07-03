@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
 	"github.com/saramand9/bignet/kpro/middleware"
-	"github.com/saramand9/bignet/kpro/protocol"
 	"github.com/saramand9/bignet/kpro/transport"
 	"github.com/saramand9/bignet/kpro/transport/tcp"
 	"github.com/saramand9/bignet/kpro/transport/udp"
@@ -23,24 +23,24 @@ import (
 func TestTCPConnRateLimit(t *testing.T) {
 	addr := "127.0.0.1:" + freeTCPPort(t)
 	stop := startRateLimitedCoreTransport(t, tcp.New(tcp.Config{
-		Addr:     addr,
-		Protocol: protocol.KProV1(),
+		Addr:  addr,
+		Codec: codec.KProV1(),
 	}))
 	defer stop()
 
 	conn1 := dialTCP(t, addr)
 	defer conn1.Close()
 
-	writeMessage(t, conn1, core.Message{ID: core.MsgEcho, Seq: 1, Data: []byte("tcp-1")})
+	writeMessage(t, conn1, core.Message{ID: testMsgEcho, Seq: 1, Data: []byte("tcp-1")})
 	assertEchoMessage(t, readMessage(t, conn1), 1, "tcp-1")
 
-	writeMessage(t, conn1, core.Message{ID: core.MsgEcho, Seq: 2, Data: []byte("tcp-2")})
+	writeMessage(t, conn1, core.Message{ID: testMsgEcho, Seq: 2, Data: []byte("tcp-2")})
 	assertRateLimitedMessage(t, readMessage(t, conn1), 2)
 
 	conn2 := dialTCP(t, addr)
 	defer conn2.Close()
 
-	writeMessage(t, conn2, core.Message{ID: core.MsgEcho, Seq: 1, Data: []byte("tcp-other")})
+	writeMessage(t, conn2, core.Message{ID: testMsgEcho, Seq: 1, Data: []byte("tcp-other")})
 	assertEchoMessage(t, readMessage(t, conn2), 1, "tcp-other")
 }
 
@@ -48,7 +48,7 @@ func TestUDPConnRateLimit(t *testing.T) {
 	addr := "127.0.0.1:" + freeUDPPort(t)
 	stop := startRateLimitedCoreTransport(t, udp.New(udp.Config{
 		Addr:          addr,
-		Protocol:      protocol.KProV1(),
+		Codec:         codec.KProV1(),
 		MaxPacketSize: 2048,
 	}))
 	defer stop()
@@ -56,41 +56,41 @@ func TestUDPConnRateLimit(t *testing.T) {
 	conn1 := dialRateLimitUDPClient(t, addr)
 	defer conn1.Close()
 
-	writeUDPMessage(t, conn1, core.Message{ID: core.MsgEcho, Seq: 1, Data: []byte("udp-1")})
+	writeUDPMessage(t, conn1, core.Message{ID: testMsgEcho, Seq: 1, Data: []byte("udp-1")})
 	assertEchoMessage(t, readUDPMessage(t, conn1), 1, "udp-1")
 
-	writeUDPMessage(t, conn1, core.Message{ID: core.MsgEcho, Seq: 2, Data: []byte("udp-2")})
+	writeUDPMessage(t, conn1, core.Message{ID: testMsgEcho, Seq: 2, Data: []byte("udp-2")})
 	assertRateLimitedMessage(t, readUDPMessage(t, conn1), 2)
 
 	conn2 := dialRateLimitUDPClient(t, addr)
 	defer conn2.Close()
 
-	writeUDPMessage(t, conn2, core.Message{ID: core.MsgEcho, Seq: 1, Data: []byte("udp-other")})
+	writeUDPMessage(t, conn2, core.Message{ID: testMsgEcho, Seq: 1, Data: []byte("udp-other")})
 	assertEchoMessage(t, readUDPMessage(t, conn2), 1, "udp-other")
 }
 
 func TestWebSocketConnRateLimit(t *testing.T) {
 	addr := "127.0.0.1:" + freeTCPPort(t)
 	stop := startRateLimitedCoreTransport(t, wstransport.New(wstransport.Config{
-		Addr:     addr,
-		Path:     "/ws",
-		Protocol: protocol.KProV1(),
+		Addr:  addr,
+		Path:  "/ws",
+		Codec: codec.KProV1(),
 	}))
 	defer stop()
 
 	conn1, reader1 := dialRateLimitWebSocket(t, "ws://"+addr+"/ws")
 	defer conn1.Close()
 
-	writeWebSocketMessage(t, conn1, core.Message{ID: core.MsgEcho, Seq: 1, Data: []byte("ws-1")})
+	writeWebSocketMessage(t, conn1, core.Message{ID: testMsgEcho, Seq: 1, Data: []byte("ws-1")})
 	assertEchoMessage(t, readWebSocketMessage(t, reader1), 1, "ws-1")
 
-	writeWebSocketMessage(t, conn1, core.Message{ID: core.MsgEcho, Seq: 2, Data: []byte("ws-2")})
+	writeWebSocketMessage(t, conn1, core.Message{ID: testMsgEcho, Seq: 2, Data: []byte("ws-2")})
 	assertRateLimitedMessage(t, readWebSocketMessage(t, reader1), 2)
 
 	conn2, reader2 := dialRateLimitWebSocket(t, "ws://"+addr+"/ws")
 	defer conn2.Close()
 
-	writeWebSocketMessage(t, conn2, core.Message{ID: core.MsgEcho, Seq: 1, Data: []byte("ws-other")})
+	writeWebSocketMessage(t, conn2, core.Message{ID: testMsgEcho, Seq: 1, Data: []byte("ws-other")})
 	assertEchoMessage(t, readWebSocketMessage(t, reader2), 1, "ws-other")
 }
 
@@ -106,7 +106,7 @@ func startRateLimitedCoreTransport(t *testing.T, srv transport.Server) func() {
 		Rate:  rate.Limit(0.001),
 		Burst: 1,
 	}))
-	router.Handle(core.MsgEcho, func(ctx core.Context) error {
+	router.Handle(testMsgEcho, func(ctx core.Context) error {
 		msg := ctx.Message()
 		return ctx.Reply(msg.ID, msg.Data)
 	})
@@ -154,7 +154,7 @@ func dialRateLimitUDPClient(t *testing.T, addr string) *net.UDPConn {
 func writeUDPMessage(t *testing.T, conn *net.UDPConn, msg core.Message) {
 	t.Helper()
 
-	packet, err := protocol.KProV1().EncodePacket(msg)
+	packet, err := codec.KProV1().EncodePacket(msg)
 	if err != nil {
 		t.Fatalf("encode UDP packet: %v", err)
 	}
@@ -172,7 +172,7 @@ func readUDPMessage(t *testing.T, conn *net.UDPConn) core.Message {
 	if err != nil {
 		t.Fatalf("read UDP packet: %v", err)
 	}
-	msg, err := protocol.KProV1().DecodePacket(buf[:n])
+	msg, err := codec.KProV1().DecodePacket(buf[:n])
 	if err != nil {
 		t.Fatalf("decode UDP packet: %v", err)
 	}
@@ -199,7 +199,7 @@ func dialRateLimitWebSocket(t *testing.T, rawURL string) (net.Conn, *bufio.Reade
 func writeWebSocketMessage(t *testing.T, conn net.Conn, msg core.Message) {
 	t.Helper()
 
-	packet, err := protocol.KProV1().EncodePacket(msg)
+	packet, err := codec.KProV1().EncodePacket(msg)
 	if err != nil {
 		t.Fatalf("encode websocket packet: %v", err)
 	}
@@ -215,7 +215,7 @@ func readWebSocketMessage(t *testing.T, reader *bufio.Reader) core.Message {
 	if err != nil {
 		t.Fatalf("read websocket packet: %v", err)
 	}
-	msg, err := protocol.KProV1().DecodePacket(packet)
+	msg, err := codec.KProV1().DecodePacket(packet)
 	if err != nil {
 		t.Fatalf("decode websocket packet: %v", err)
 	}
@@ -225,7 +225,7 @@ func readWebSocketMessage(t *testing.T, reader *bufio.Reader) core.Message {
 func assertEchoMessage(t *testing.T, msg core.Message, seq uint64, body string) {
 	t.Helper()
 
-	if msg.ID != core.MsgEcho || msg.Seq != seq || string(msg.Data) != body {
+	if msg.ID != testMsgEcho || msg.Seq != seq || string(msg.Data) != body {
 		t.Fatalf("got message id=%d seq=%d data=%q, want echo seq=%d data=%q",
 			msg.ID, msg.Seq, string(msg.Data), seq, body)
 	}

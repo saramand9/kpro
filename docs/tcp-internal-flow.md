@@ -1,6 +1,6 @@
 # TCP 内部流程
 
-本文以 TCP 作为入口，说明当前 KPro universal server 的核心流程。TCP 是理解整个工程的最佳切入点，因为它完整经过了这条消息链路：
+本文以 TCP 作为入口，说明当前 KPro app server 的核心流程。TCP 是理解整个工程的最佳切入点，因为它完整经过了这条消息链路：
 
 ```text
 连接 -> 流式协议解码 -> core.Message -> core.Context
@@ -12,9 +12,9 @@ UDP 和 WebSocket 的网络输入形式不同，但它们复用同一套 `core.M
 
 ## 流程图
 
-![KPro TCP internal flow](kpro-tcp-flow.png)
+![KPro TCP internal flow](assets/kpro-tcp-flow.png)
 
-SVG 源文件在 [kpro-tcp-flow.svg](kpro-tcp-flow.svg)。
+SVG 源文件在 [kpro-tcp-flow.svg](assets/kpro-tcp-flow.svg)。
 
 ## 关键文件
 
@@ -22,7 +22,7 @@ SVG 源文件在 [kpro-tcp-flow.svg](kpro-tcp-flow.svg)。
 | --- | --- | --- |
 | 组装层 | `server/server.go` | 挂载 TCP transport，创建 endpoint router，启动 runner |
 | TCP transport | `transport/tcp/server.go` | 监听、accept、创建 session、读循环、写循环 |
-| 协议层 | `protocol/kpro.go` | KProV1 frame 的解码和编码 |
+| 协议层 | `codec/kpro.go` | KProV1 frame 的解码和编码 |
 | 上下文 | `core/context.go` | 把 `Session + Message` 包装成 handler 可用的 context |
 | 路由调度 | `core/router.go` | 按 `Message.ID` 找 handler，快照 middleware，同步/异步调度，并在执行点构造 `core.Invocation` |
 | 会话抽象 | `core/session.go` | transport 无关的发送、关闭、连接标识接口 |
@@ -102,21 +102,21 @@ session.writeLoop()
 ```text
 session.readLoop
   -> 设置 read deadline
-  -> Protocol.Read(rawConn, MaxFrameSize)
+  -> Codec.Read(rawConn, MaxFrameSize)
   -> 得到 core.Message
   -> heartbeat 特判
   -> core.AcquireContext(session, msg)
   -> handler(ctx)
 ```
 
-默认协议是 `protocol.KProV1Protocol.Read`。它从 TCP 字节流中读取一个完整 frame：
+默认协议是 `codec.KProV1Codec.Read`。它从 TCP 字节流中读取一个完整 frame：
 
 ```text
 读取 20 字节 header
   -> 校验 magic/version
   -> 解析 flags、msg id、seq、body length
 读取 body bytes
-  -> 返回 protocol.ReadResult{Message, Bytes}
+  -> 返回 codec.ReadResult{Message, Bytes}
 ```
 
 KProV1 header 格式：
@@ -131,7 +131,7 @@ uint32 body length
 bytes  body
 ```
 
-TCP 是流协议，不保留应用层消息边界。一次应用消息可能被拆成多次网络读取，也可能多条消息被合并到一次网络读取中。因此 TCP 这里使用 `protocol.StreamProtocol`，由 `Protocol.Read` 负责恢复一个完整 KProV1 frame。
+TCP 是流协议，不保留应用层消息边界。一次应用消息可能被拆成多次网络读取，也可能多条消息被合并到一次网络读取中。因此 TCP 这里使用 `codec.StreamCodec`，由 `Codec.Read` 负责恢复一个完整 KProV1 frame。
 
 ## Message 转 Context
 
@@ -230,7 +230,7 @@ ctx.Error(text)
 ```text
 ctx.Reply
   -> session.Send(core.Message{ID, Seq: request.Seq, Data})
-  -> Protocol.Encode(response Message)
+  -> Codec.Encode(response Message)
   -> sendQueue <- encoded frame
 ```
 
@@ -291,12 +291,12 @@ raw TCP bytes
 
 还没有 `core.Message`。
 
-### 3. Protocol.Read 生成 core.Message
+### 3. Codec.Read 生成 core.Message
 
-`protocol.KProV1Protocol.Read` 读取 header 和 body 后返回：
+`codec.KProV1Codec.Read` 读取 header 和 body 后返回：
 
 ```go
-protocol.ReadResult{
+codec.ReadResult{
 	Message: core.Message{
 		ID:    100,
 		Seq:   42,
@@ -422,7 +422,7 @@ handler result -> response core.Message
 
 ```text
 response core.Message
-  -> Protocol.Encode
+  -> Codec.Encode
   -> []byte KProV1 frame
   -> sendQueue
 ```
@@ -495,7 +495,7 @@ Data = 具体框架错误文本
 错误响应仍然走正常写回链路：
 
 ```text
-ctx.Error -> session.Send -> Protocol.Encode -> sendQueue -> writeLoop
+ctx.Error -> session.Send -> Codec.Encode -> sendQueue -> writeLoop
 ```
 
 ## 通过 TCP 看整个框架
@@ -518,3 +518,5 @@ UDP 和 WebSocket 复用同一套核心模型：
 - 两者最终都会进入 `core.Message -> core.Context -> router.Dispatch`。
 
 因此 TCP 是最完整的内部流程样本，但不是一套独立的业务编程模型。
+
+

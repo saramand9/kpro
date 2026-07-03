@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/protocol"
 )
 
 var benchmarkPayloadSizes = []int{64, 1024}
@@ -159,7 +159,7 @@ func dialTCPBenchmark(b *testing.B, addr string) net.Conn {
 
 func writeBenchmarkMessage(b *testing.B, conn net.Conn, msg core.Message) {
 	b.Helper()
-	frame, err := protocol.KProV1().Encode(msg)
+	frame, err := codec.KProV1().Encode(msg)
 	if err != nil {
 		b.Fatalf("encode message: %v", err)
 	}
@@ -171,7 +171,7 @@ func writeBenchmarkMessage(b *testing.B, conn net.Conn, msg core.Message) {
 func readBenchmarkMessage(b *testing.B, conn net.Conn) core.Message {
 	b.Helper()
 	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-	result, err := protocol.KProV1().Read(conn, 64*1024)
+	result, err := codec.KProV1().Read(conn, 64*1024)
 	if err != nil {
 		b.Fatalf("read message: %v", err)
 	}

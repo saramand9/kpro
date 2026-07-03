@@ -32,8 +32,8 @@ import (
 	"time"
 
 	quicgo "github.com/quic-go/quic-go"
+	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/protocol"
 	"github.com/saramand9/bignet/kpro/transport/httpx"
 	kcptransport "github.com/saramand9/bignet/kpro/transport/kcp"
 	quictransport "github.com/saramand9/bignet/kpro/transport/quic"
@@ -129,7 +129,7 @@ func benchmarkTCPEcho(b *testing.B, payloadSize int) {
 	defer conn.Close()
 
 	payload := bytes.Repeat([]byte("x"), payloadSize)
-	msg := core.Message{ID: core.MsgEcho, Data: payload}
+	msg := core.Message{ID: benchmarkMsgEcho, Data: payload}
 
 	b.SetBytes(int64(payloadSize))
 	b.ReportAllocs()
@@ -160,7 +160,7 @@ func benchmarkKCPEcho(b *testing.B, payloadSize int) {
 	_ = conn.SetMtu(1400)
 
 	payload := bytes.Repeat([]byte("x"), payloadSize)
-	msg := core.Message{ID: core.MsgEcho, Data: payload}
+	msg := core.Message{ID: benchmarkMsgEcho, Data: payload}
 
 	b.SetBytes(int64(payloadSize))
 	b.ReportAllocs()
@@ -192,7 +192,7 @@ func benchmarkQUICEcho(b *testing.B, payloadSize int) {
 	defer stream.Close()
 
 	payload := bytes.Repeat([]byte("x"), payloadSize)
-	msg := core.Message{ID: core.MsgEcho, Data: payload}
+	msg := core.Message{ID: benchmarkMsgEcho, Data: payload}
 
 	b.SetBytes(int64(payloadSize))
 	b.ReportAllocs()
@@ -223,7 +223,7 @@ func benchmarkUDPEcho(b *testing.B, payloadSize int) {
 	defer conn.Close()
 
 	payload := bytes.Repeat([]byte("x"), payloadSize)
-	msg := core.Message{ID: core.MsgEcho, Data: payload}
+	msg := core.Message{ID: benchmarkMsgEcho, Data: payload}
 	buf := make([]byte, 64*1024)
 
 	b.SetBytes(int64(payloadSize))
@@ -231,7 +231,7 @@ func benchmarkUDPEcho(b *testing.B, payloadSize int) {
 	started := startBenchmarkTimer(b)
 	for i := 0; i < b.N; i++ {
 		msg.Seq = uint64(i + 1)
-		packet, err := protocol.KProV1().EncodePacket(msg)
+		packet, err := codec.KProV1().EncodePacket(msg)
 		if err != nil {
 			b.Fatalf("encode UDP packet: %v", err)
 		}
@@ -243,7 +243,7 @@ func benchmarkUDPEcho(b *testing.B, payloadSize int) {
 		if err != nil {
 			b.Fatalf("read UDP packet: %v", err)
 		}
-		got, err := protocol.KProV1().DecodePacket(buf[:n])
+		got, err := codec.KProV1().DecodePacket(buf[:n])
 		if err != nil {
 			b.Fatalf("decode UDP packet: %v", err)
 		}
@@ -262,14 +262,14 @@ func benchmarkWebSocketEcho(b *testing.B, payloadSize int) {
 	defer conn.Close()
 
 	payload := bytes.Repeat([]byte("x"), payloadSize)
-	msg := core.Message{ID: core.MsgEcho, Data: payload}
+	msg := core.Message{ID: benchmarkMsgEcho, Data: payload}
 
 	b.SetBytes(int64(payloadSize))
 	b.ReportAllocs()
 	started := startBenchmarkTimer(b)
 	for i := 0; i < b.N; i++ {
 		msg.Seq = uint64(i + 1)
-		packet, err := protocol.KProV1().EncodePacket(msg)
+		packet, err := codec.KProV1().EncodePacket(msg)
 		if err != nil {
 			b.Fatalf("encode WebSocket packet: %v", err)
 		}
@@ -280,7 +280,7 @@ func benchmarkWebSocketEcho(b *testing.B, payloadSize int) {
 		if err != nil {
 			b.Fatalf("read WebSocket frame: %v", err)
 		}
-		got, err := protocol.KProV1().DecodePacket(replyPacket)
+		got, err := codec.KProV1().DecodePacket(replyPacket)
 		if err != nil {
 			b.Fatalf("decode WebSocket packet: %v", err)
 		}
@@ -458,7 +458,7 @@ func startTCPBenchmarkServer(b *testing.B) (string, func()) {
 	router := benchmarkEchoRouter()
 	transport := tcp.New(tcp.Config{
 		Addr:          addr,
-		Protocol:      protocol.KProV1(),
+		Codec:         codec.KProV1(),
 		SendQueueSize: 1024,
 		ReadTimeout:   10 * time.Second,
 		WriteTimeout:  10 * time.Second,
@@ -477,7 +477,7 @@ func startUDPBenchmarkServer(b *testing.B) (string, func()) {
 	router := benchmarkEchoRouter()
 	transport := udp.New(udp.Config{
 		Addr:          addr,
-		Protocol:      protocol.KProV1(),
+		Codec:         codec.KProV1(),
 		MaxPacketSize: 64 * 1024,
 	})
 	return startBenchmarkMessageTransport(b, addr, router, func(ctx context.Context, h core.Handler) error {
@@ -494,7 +494,7 @@ func startKCPBenchmarkServer(b *testing.B) (string, func()) {
 	router := benchmarkEchoRouter()
 	transport := kcptransport.New(kcptransport.Config{
 		Addr:          addr,
-		Protocol:      protocol.KProV1(),
+		Codec:         codec.KProV1(),
 		SendQueueSize: 1024,
 		ReadTimeout:   10 * time.Second,
 		WriteTimeout:  10 * time.Second,
@@ -517,7 +517,7 @@ func startQUICBenchmarkServer(b *testing.B) (string, func()) {
 	router := benchmarkEchoRouter()
 	transport := quictransport.New(quictransport.Config{
 		Addr:          addr,
-		Protocol:      protocol.KProV1(),
+		Codec:         codec.KProV1(),
 		SendQueueSize: 1024,
 		ReadTimeout:   10 * time.Second,
 		WriteTimeout:  10 * time.Second,
@@ -556,7 +556,7 @@ func startWebSocketBenchmarkServer(b *testing.B) (string, func()) {
 	transport := wstransport.New(wstransport.Config{
 		Addr:          addr,
 		Path:          "/ws",
-		Protocol:      protocol.KProV1(),
+		Codec:         codec.KProV1(),
 		MaxMessage:    64 * 1024,
 		SendQueueSize: 1024,
 	})
@@ -575,7 +575,7 @@ func benchmarkEchoRouter() *core.Router {
 		MaxInflightPerSession: 4096,
 		SessionIdleTimeout:    time.Minute,
 	})
-	router.HandleSync(core.MsgEcho, func(ctx core.Context) error {
+	router.HandleSync(benchmarkMsgEcho, func(ctx core.Context) error {
 		msg := ctx.Message()
 		return ctx.Reply(msg.ID, msg.Data)
 	})
@@ -752,7 +752,7 @@ func dialTCPBenchmark(b *testing.B, addr string) net.Conn {
 
 func writeBenchmarkMessage(b *testing.B, conn io.Writer, msg core.Message) {
 	b.Helper()
-	frame, err := protocol.KProV1().Encode(msg)
+	frame, err := codec.KProV1().Encode(msg)
 	if err != nil {
 		b.Fatalf("encode message: %v", err)
 	}
@@ -769,7 +769,7 @@ type benchmarkDeadlineReader interface {
 func readBenchmarkMessage(b *testing.B, conn benchmarkDeadlineReader) core.Message {
 	b.Helper()
 	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-	result, err := protocol.KProV1().Read(conn, 64*1024)
+	result, err := codec.KProV1().Read(conn, 64*1024)
 	if err != nil {
 		b.Fatalf("read message: %v", err)
 	}
