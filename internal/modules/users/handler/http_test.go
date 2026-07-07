@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	gormstore "github.com/saramand9/bignet/kpro/database/relational/gorm"
+	gormstore "github.com/saramand9/bignet/kpro/database/gorm"
 	"github.com/saramand9/bignet/kpro/internal/modules/users"
 	userservice "github.com/saramand9/bignet/kpro/internal/modules/users/service"
 	userstore "github.com/saramand9/bignet/kpro/internal/modules/users/store"

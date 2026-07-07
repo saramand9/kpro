@@ -7,22 +7,22 @@ This guide describes the production contract for storage adapters.
 The production SQL path is:
 
 ```text
-module service -> module store port -> module GORM repository -> database/relational/gorm -> gorm.DB -> MySQL
+module service -> module store port -> module GORM repository -> database/gorm -> gorm.DB -> MySQL
 ```
 
-`database/relational/gorm` is only a lifecycle wrapper around native `gorm.DB`. Use GORM directly in module repositories and use GORM's `AutoMigrate` or your deployment migration tool for schema management.
+`database/gorm` is only a lifecycle wrapper around native `gorm.DB`. Use GORM directly in module repositories and use GORM's `AutoMigrate` or your deployment migration tool for schema management.
 
-`database/contracts/readmodels` contains contracts for cache, search, vector, graph,
+`database/common/readmodels` contains shared interfaces for cache, search, vector, graph,
 analytics, and metrics stores. The implemented non-SQL adapters are:
 
 | Package | Resource kind | Main use |
 | --- | --- | --- |
-| `database/cache/redis` | `redis` | JSON cache, lock, stream, sorted set |
-| `database/search/elasticsearch` | `search` | Typed index operations, raw search, bulk requests |
-| `database/vector/qdrant` | `vector` | Collection lifecycle, vector upsert/delete, raw search |
-| `database/document/mongodb` | `document` | MongoDB client/database/typed collection helpers |
-| `database/analytics/clickhouse` | `analytics` | ClickHouse pool lifecycle, SQL/Tx, analytical table writer |
-| `database/metrics/influxdb` | `metrics` | InfluxDB health, point/line writes, Flux query, measurement writer |
+| `database/redis` | `redis` | JSON cache, lock, stream, sorted set |
+| `database/es` | `search` | Typed index operations, raw search, bulk requests |
+| `database/qdrant` | `vector` | Collection lifecycle, vector upsert/delete, raw search |
+| `database/mongo` | `document` | MongoDB client/database/typed collection helpers |
+| `database/clickhouse` | `analytics` | ClickHouse pool lifecycle, SQL/Tx, analytical table writer |
+| `database/influx` | `metrics` | InfluxDB health, point/line writes, Flux query, measurement writer |
 
 Keep MySQL/GORM as the source of truth for transactional data. Use the non-SQL adapters
 as read models, analytical sinks, document stores, or cache/projector targets behind module-owned ports.

@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"github.com/saramand9/bignet/kpro/database/contracts/lifecycle"
+	"github.com/saramand9/bignet/kpro/database/common/lifecycle"
 )
 
 // Client owns a Redis client and exposes capability helpers.

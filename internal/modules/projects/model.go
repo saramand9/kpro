@@ -7,7 +7,7 @@ import (
 	"context"
 	"time"
 
-	gormstore "github.com/saramand9/bignet/kpro/database/relational/gorm"
+	gormstore "github.com/saramand9/bignet/kpro/database/gorm"
 )
 
 // TableName is the projects source-of-truth table.

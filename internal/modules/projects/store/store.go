@@ -8,7 +8,7 @@ import (
 	"database/sql"
 	"errors"
 
-	gormstore "github.com/saramand9/bignet/kpro/database/relational/gorm"
+	gormstore "github.com/saramand9/bignet/kpro/database/gorm"
 	"github.com/saramand9/bignet/kpro/internal/modules/projects"
 	"gorm.io/gorm"
 )

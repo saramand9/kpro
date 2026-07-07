@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"github.com/influxdata/influxdb-client-go/v2/api/write"
-	"github.com/saramand9/bignet/kpro/database/contracts/readmodels"
+	"github.com/saramand9/bignet/kpro/database/common/readmodels"
 )
 
 type writePoint = write.Point

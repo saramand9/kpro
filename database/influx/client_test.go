@@ -12,7 +12,7 @@ import (
 	"time"
 
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
-	"github.com/saramand9/bignet/kpro/database/contracts/lifecycle"
+	"github.com/saramand9/bignet/kpro/database/common/lifecycle"
 )
 
 type influxServerLog struct {
