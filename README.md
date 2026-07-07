@@ -362,7 +362,7 @@ See [examples/README.md](examples/README.md) for startup commands.
 - gRPC uses native gRPC service and method routing. Unary and stream RPCs reuse unified `core.Middleware` through `server.GRPC` / `grpcx.Server.Use`; they are not converted into `core.Message`.
 - The framework avoids exposing a Netty-style pipeline API. The public model is `Protocol + Middleware + Router + Handler`.
 - App server usage is documented in [docs/app-server.md](docs/app-server.md).
-- DBX database helpers are documented in [docs/dbx.md](docs/dbx.md).
+- GORM database and eventing architecture are documented in [docs/database-architecture.md](docs/database-architecture.md).
 - More detailed call-flow diagrams are in [docs/call-flow.md](docs/call-flow.md).
 - TCP internal flow guide is in [docs/tcp-internal-flow.md](docs/tcp-internal-flow.md).
 - Network correctness requirements for message-based transports are in [docs/network-test-requirements.md](docs/network-test-requirements.md).
