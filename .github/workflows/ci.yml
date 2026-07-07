@@ -44,3 +44,50 @@ jobs:
       - name: Vet benchmark compare module
         working-directory: benchmark/compare
         run: go vet ./...
+
+  database-integration:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_DATABASE: kpro
+          MYSQL_USER: kpro
+          MYSQL_PASSWORD: kpro
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -ukpro -pkpro"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: kpro
+          POSTGRES_USER: kpro
+          POSTGRES_PASSWORD: kpro
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U kpro -d kpro"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test SQL database integrations
+        env:
+          KPRO_REQUIRE_EXTERNAL_DB: "1"
+          KPRO_TEST_MYSQL_DSN: kpro:kpro@tcp(127.0.0.1:3306)/kpro?parseTime=true
+          KPRO_TEST_POSTGRES_DSN: postgres://kpro:kpro@127.0.0.1:5432/kpro?sslmode=disable
+        run: go test -tags dbintegration ./database/...

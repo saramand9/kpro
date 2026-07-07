@@ -12,9 +12,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/saramand9/bignet/kpro/dbx"
+	"github.com/saramand9/bignet/kpro/database/dbx"
 	"github.com/saramand9/bignet/kpro/internal/modules/users"
 	userservice "github.com/saramand9/bignet/kpro/internal/modules/users/service"
+	userstore "github.com/saramand9/bignet/kpro/internal/modules/users/store"
 	"github.com/saramand9/bignet/kpro/transport/httpx"
 	_ "modernc.org/sqlite"
 )
@@ -24,7 +25,7 @@ func TestHTTPCreateUsesDTOAndReturnsStoredUser(t *testing.T) {
 	defer closeHTTPTestDatabase(t, database)
 
 	endpoint := httpx.New(httpx.Config{})
-	RegisterHTTP(endpoint, userservice.New(database))
+	RegisterHTTP(endpoint, userservice.NewWithStore(userstore.NewDBX(database)))
 
 	invalid := executeHTTPTestRequest(endpoint, http.MethodPost, "/users", `{"age":37}`)
 	if invalid.Code != http.StatusBadRequest {

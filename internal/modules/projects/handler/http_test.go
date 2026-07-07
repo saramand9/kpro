@@ -12,9 +12,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/saramand9/bignet/kpro/dbx"
+	"github.com/saramand9/bignet/kpro/database/dbx"
 	"github.com/saramand9/bignet/kpro/internal/modules/projects"
 	projectservice "github.com/saramand9/bignet/kpro/internal/modules/projects/service"
+	projectstore "github.com/saramand9/bignet/kpro/internal/modules/projects/store"
 	"github.com/saramand9/bignet/kpro/transport/httpx"
 	_ "modernc.org/sqlite"
 )
@@ -24,7 +25,7 @@ func TestHTTPCreateUpdateAndFindProject(t *testing.T) {
 	defer closeHTTPTestDatabase(t, database)
 
 	endpoint := httpx.New(httpx.Config{})
-	RegisterHTTP(endpoint, projectservice.New(database))
+	RegisterHTTP(endpoint, projectservice.NewWithStore(projectstore.NewDBX(database)))
 
 	invalid := executeHTTPTestRequest(endpoint, http.MethodPost, "/projects", `{"status":"active"}`)
 	if invalid.Code != http.StatusBadRequest {
