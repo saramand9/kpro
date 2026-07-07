@@ -18,7 +18,6 @@ import (
 	"github.com/saramand9/bignet/kpro/platform/logx"
 	"github.com/saramand9/bignet/kpro/server"
 	http3x "github.com/saramand9/bignet/kpro/transport/http3"
-	"github.com/saramand9/bignet/kpro/transport/httpx"
 	"github.com/saramand9/bignet/kpro/transport/kcp"
 	quictransport "github.com/saramand9/bignet/kpro/transport/quic"
 	"github.com/saramand9/bignet/kpro/transport/sse"
@@ -41,6 +40,7 @@ func main() {
 	http3Cert := flag.String("http3-cert", "", "http3 certificate file")
 	http3Key := flag.String("http3-key", "", "http3 private key file")
 	sseAddr := flag.String("sse", ":8081", "sse listen address")
+	gormDSN := flag.String("gorm-dsn", "file:kpro-app.db", "sqlite DSN for GORM-backed app modules, disabled when empty")
 	defaultLog := logx.DefaultConfig("kpro-app")
 	logLevel := flag.String("log-level", defaultLog.Level, "log level: debug, info, warn, error, dpanic, panic, fatal")
 	logFile := flag.String("log-file", defaultLog.FileName, "log file path")
@@ -61,63 +61,55 @@ func main() {
 	}
 	defer cleanup()
 
+	ctx := context.Background()
+	database, userService, err := initAppPersistence(ctx, *gormDSN)
+	if err != nil {
+		logger.Fatal("init gorm persistence", zap.Error(err))
+	}
+
 	app := server.New(server.Config{Name: "kpro-app"})
+	if database != nil {
+		app.Manage(database)
+	}
 	metrics := middleware.NewMetrics()
 
-	app.TCP(*tcpAddr, tcp.Config{
+	tcpEndpoint := app.TCP(*tcpAddr, tcp.Config{
 		Codec:        codec.KProV1(),
 		MaxFrameSize: 64 * 1024,
-	}).
-		Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024)).
-		Handle(appMsgEcho, echo)
+	}).Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024))
+	registerMessageRoutes(tcpEndpoint, userService)
 
-	app.KCP(*kcpAddr, kcp.Config{
+	kcpEndpoint := app.KCP(*kcpAddr, kcp.Config{
 		Codec:        codec.KProV1(),
 		MaxFrameSize: 64 * 1024,
-	}).
-		Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024)).
-		Handle(appMsgEcho, echo)
+	}).Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024))
+	registerMessageRoutes(kcpEndpoint, userService)
 
 	if *quicAddr != "" {
 		if *quicCert == "" || *quicKey == "" {
 			logger.Fatal("quic requires -quic-cert and -quic-key")
 		}
-		app.QUIC(*quicAddr, quictransport.Config{
+		quicEndpoint := app.QUIC(*quicAddr, quictransport.Config{
 			Codec:        codec.KProV1(),
 			MaxFrameSize: 64 * 1024,
 			MaxStreams:   *quicMaxStreams,
 			CertFile:     *quicCert,
 			KeyFile:      *quicKey,
-		}).
-			Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024)).
-			Handle(appMsgEcho, echo)
+		}).Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024))
+		registerMessageRoutes(quicEndpoint, userService)
 	}
 
-	app.UDP(*udpAddr, udp.Config{
+	udpEndpoint := app.UDP(*udpAddr, udp.Config{
 		Codec:         codec.KProV1(),
 		MaxPacketSize: 2048,
-	}).
-		Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(1500)).
-		Handle(appMsgEcho, echo)
+	}).Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(1500))
+	registerMessageRoutes(udpEndpoint, userService)
 
-	app.WebSocket(*wsAddr, "/ws").
-		Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024)).
-		Handle(appMsgEcho, echo)
+	wsEndpoint := app.WebSocket(*wsAddr, "/ws").Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024))
+	registerMessageRoutes(wsEndpoint, userService)
 
-	app.HTTP(*httpAddr).
-		Get("/health", func(ctx *httpx.Context) error {
-			return ctx.Text(200, "ok\n")
-		}).
-		Get("/metrics", func(ctx *httpx.Context) error {
-			return ctx.JSON(200, metrics.Snapshot())
-		}).
-		Post("/echo", func(ctx *httpx.Context) error {
-			body, err := ctx.Body()
-			if err != nil {
-				return err
-			}
-			return ctx.JSON(200, map[string]interface{}{"echo": string(body)})
-		})
+	httpEndpoint := app.HTTP(*httpAddr)
+	registerHTTPRoutes(httpEndpoint, metrics, userService)
 
 	if *http3Addr != "" {
 		if *http3Cert == "" || *http3Key == "" {
@@ -177,6 +169,7 @@ func main() {
 		zap.String("http", *httpAddr),
 		zap.String("http3", *http3Addr),
 		zap.String("sse", *sseAddr),
+		zap.Bool("gorm_enabled", userService != nil),
 		zap.String("log_file", *logFile),
 	)
 	if err := app.ListenAndServe(); err != nil {
