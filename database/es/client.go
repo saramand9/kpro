@@ -11,7 +11,7 @@ import (
 
 	"github.com/elastic/go-elasticsearch/v8"
 	"github.com/elastic/go-elasticsearch/v8/esapi"
-	"github.com/saramand9/bignet/kpro/database/contracts/lifecycle"
+	"github.com/saramand9/bignet/kpro/database/common/lifecycle"
 )
 
 type closeIdleTransport interface {

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/database/contracts/lifecycle"
+	"github.com/saramand9/bignet/kpro/database/common/lifecycle"
 	"gorm.io/gorm"
 )
 

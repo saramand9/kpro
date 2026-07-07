@@ -32,7 +32,7 @@
 
   <rect class="bg" width="1680" height="1240"/>
   <text x="48" y="54" class="title">KPro Redis 流程</text>
-  <text x="48" y="82" class="subtitle">Redis 通常作为读模型、锁、Stream 或排序存储。事务数据仍然有明确 source-of-truth，projector 通过 database/cache/redis helper 更新 Redis。</text>
+  <text x="48" y="82" class="subtitle">Redis 通常作为读模型、锁、Stream 或排序存储。事务数据仍然有明确 source-of-truth，projector 通过 database/redis helper 更新 Redis。</text>
 
   <rect x="44" y="112" width="760" height="270" class="group"/>
   <text x="66" y="142" class="section">1. 启动：创建并验证 Redis 资源</text>
@@ -53,7 +53,7 @@
   <text x="556" y="244" class="tiny">输出：*redisstore.Client</text>
 
   <rect x="250" y="286" width="270" height="70" class="box external"/>
-  <text x="272" y="314" class="label">database/contracts/lifecycle.Resource</text>
+  <text x="272" y="314" class="label">database/common/lifecycle.Resource</text>
   <text x="272" y="336" class="small">Name, KindRedis, Health, Close</text>
 
   <path class="line" d="M266 213 H306"/>

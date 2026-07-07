@@ -6,7 +6,7 @@ package app
 import (
 	"context"
 
-	gormstore "github.com/saramand9/bignet/kpro/database/relational/gorm"
+	gormstore "github.com/saramand9/bignet/kpro/database/gorm"
 	"github.com/saramand9/bignet/kpro/server"
 )
 

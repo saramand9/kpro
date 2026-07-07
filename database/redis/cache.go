@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"github.com/saramand9/bignet/kpro/database/contracts/readmodels"
+	"github.com/saramand9/bignet/kpro/database/common/readmodels"
 )
 
 // CacheView provides typed JSON cache operations backed by Redis.

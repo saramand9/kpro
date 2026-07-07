@@ -37,7 +37,7 @@
   <text x="96" y="446" class="label">Module GORM Repository</text>
   <text x="96" y="472" class="small">Create / Save / Delete / First / Find</text>
   <rect class="box gorm" x="72" y="535" width="350" height="82"/>
-  <text x="96" y="566" class="label">database/relational/gorm</text>
+  <text x="96" y="566" class="label">database/gorm</text>
   <text x="96" y="592" class="small">Open, Wrap, Ping, Health, Close</text>
   <rect class="box gorm" x="72" y="655" width="350" height="72"/>
   <text x="96" y="685" class="label">Native *gorm.DB</text>
@@ -78,17 +78,17 @@
   <rect class="band" x="1030" y="120" width="430" height="790" rx="10"/>
   <text x="1056" y="158" class="label">Concrete Database Adapters</text>
   <rect class="box adapter" x="1062" y="205" width="350" height="58"/>
-  <text x="1086" y="241" class="label">database/cache/redis</text>
+  <text x="1086" y="241" class="label">database/redis</text>
   <rect class="box adapter" x="1062" y="300" width="350" height="58"/>
-  <text x="1086" y="336" class="label">database/search/elasticsearch</text>
+  <text x="1086" y="336" class="label">database/es</text>
   <rect class="box adapter" x="1062" y="395" width="350" height="58"/>
-  <text x="1086" y="431" class="label">database/vector/qdrant</text>
+  <text x="1086" y="431" class="label">database/qdrant</text>
   <rect class="box adapter" x="1062" y="490" width="350" height="58"/>
-  <text x="1086" y="526" class="label">database/document/mongodb</text>
+  <text x="1086" y="526" class="label">database/mongo</text>
   <rect class="box adapter" x="1062" y="585" width="350" height="58"/>
-  <text x="1086" y="621" class="label">database/analytics/clickhouse</text>
+  <text x="1086" y="621" class="label">database/clickhouse</text>
   <rect class="box adapter" x="1062" y="680" width="350" height="58"/>
-  <text x="1086" y="716" class="label">database/metrics/influxdb</text>
+  <text x="1086" y="716" class="label">database/influx</text>
 
   <path class="arrow" d="M917 654 H990 C1015 654 1015 234 1062 234"/>
   <path class="arrow" d="M917 654 H990 C1015 654 1015 329 1062 329"/>

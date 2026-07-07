@@ -6,7 +6,7 @@ package app
 import (
 	"fmt"
 
-	gormstore "github.com/saramand9/bignet/kpro/database/relational/gorm"
+	gormstore "github.com/saramand9/bignet/kpro/database/gorm"
 	projectservice "github.com/saramand9/bignet/kpro/internal/modules/projects/service"
 	projectstore "github.com/saramand9/bignet/kpro/internal/modules/projects/store"
 	userservice "github.com/saramand9/bignet/kpro/internal/modules/users/service"
