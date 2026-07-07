@@ -1,5 +1,5 @@
 // File: internal/modules/users/service/service.go
-// Purpose: Provides user business operations over dbx stores.
+// Purpose: Provides user business operations over persistence ports.
 
 package service
 
@@ -9,27 +9,19 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/saramand9/bignet/kpro/dbx"
 	"github.com/saramand9/bignet/kpro/internal/modules/users"
 )
-
-const tableName = "users"
 
 // ErrInvalidInput reports invalid user service input.
 var ErrInvalidInput = errors.New("invalid user input")
 
 // Service owns user business operations and hides storage details from handlers.
 type Service struct {
-	store *dbx.Store[users.User]
-}
-
-// New creates a user service backed by database.
-func New(database *dbx.Database) *Service {
-	return NewWithStore(dbx.NewStore[users.User](database, tableName))
+	store UserStore
 }
 
 // NewWithStore creates a user service over an existing store.
-func NewWithStore(store *dbx.Store[users.User]) *Service {
+func NewWithStore(store UserStore) *Service {
 	return &Service{store: store}
 }
 
@@ -53,14 +45,7 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (users.User, er
 		Name: input.Name,
 		Age:  input.Age,
 	}
-	result, err := s.store.Create(ctx, &user)
-	if err != nil {
-		return users.User{}, err
-	}
-	if id, err := result.LastInsertId(); err == nil && id > 0 {
-		return s.Find(ctx, id)
-	}
-	return user, nil
+	return s.store.Create(ctx, user)
 }
 
 // Update applies a partial update and returns the persisted row.
@@ -73,16 +58,12 @@ func (s *Service) Update(ctx context.Context, id int64, input UpdateInput) (user
 	if err != nil {
 		return users.User{}, err
 	}
-	if _, err := s.store.Update(ctx, &updated); err != nil {
-		return users.User{}, err
-	}
-	return s.Find(ctx, id)
+	return s.store.Update(ctx, updated)
 }
 
 // Delete removes a user by id.
 func (s *Service) Delete(ctx context.Context, id int64) error {
-	_, err := s.store.Delete(ctx, id)
-	return err
+	return s.store.Delete(ctx, id)
 }
 
 func (i CreateInput) validate() error {

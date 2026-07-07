@@ -1,5 +1,5 @@
 // File: internal/modules/projects/service/service.go
-// Purpose: Provides project business operations over dbx stores.
+// Purpose: Provides project business operations over persistence ports.
 
 package service
 
@@ -9,12 +9,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/saramand9/bignet/kpro/dbx"
 	"github.com/saramand9/bignet/kpro/internal/modules/projects"
 )
 
 const (
-	tableName     = "projects"
 	defaultStatus = "active"
 )
 
@@ -23,16 +21,11 @@ var ErrInvalidInput = errors.New("invalid project input")
 
 // Service owns project business operations and hides storage details from handlers.
 type Service struct {
-	store *dbx.Store[projects.Project]
-}
-
-// New creates a project service backed by database.
-func New(database *dbx.Database) *Service {
-	return NewWithStore(dbx.NewStore[projects.Project](database, tableName))
+	store ProjectStore
 }
 
 // NewWithStore creates a project service over an existing store.
-func NewWithStore(store *dbx.Store[projects.Project]) *Service {
+func NewWithStore(store ProjectStore) *Service {
 	return &Service{store: store}
 }
 
@@ -57,14 +50,7 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (projects.Proje
 		Description: input.Description,
 		Status:      input.Status,
 	}
-	result, err := s.store.Create(ctx, &project)
-	if err != nil {
-		return projects.Project{}, err
-	}
-	if id, err := result.LastInsertId(); err == nil && id > 0 {
-		return s.Find(ctx, id)
-	}
-	return project, nil
+	return s.store.Create(ctx, project)
 }
 
 // Update applies a partial update and returns the persisted row.
@@ -77,16 +63,12 @@ func (s *Service) Update(ctx context.Context, id int64, input UpdateInput) (proj
 	if err != nil {
 		return projects.Project{}, err
 	}
-	if _, err := s.store.Update(ctx, &updated); err != nil {
-		return projects.Project{}, err
-	}
-	return s.Find(ctx, id)
+	return s.store.Update(ctx, updated)
 }
 
 // Delete removes a project by id.
 func (s *Service) Delete(ctx context.Context, id int64) error {
-	_, err := s.store.Delete(ctx, id)
-	return err
+	return s.store.Delete(ctx, id)
 }
 
 func (i *CreateInput) normalize() {

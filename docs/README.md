@@ -9,7 +9,9 @@ This directory contains architecture notes, flow guides, testing requirements, a
 | [tcp-internal-flow.md](tcp-internal-flow.md) | Detailed TCP path from bytes to handler and response writes. |
 | [invocation-middleware-design.md](invocation-middleware-design.md) | Unified `core.Invocation` middleware design. |
 | [network-test-requirements.md](network-test-requirements.md) | Required correctness rules for message-based transport tests. |
-| [dbx.md](dbx.md) | DBX database module, Store CRUD, GORM adapter, async writes, and routing examples. |
+| [dbx.md](dbx.md) | DBX database module, Store CRUD, async writes, SQL dialects, and routing examples. |
+| [database-architecture.md](database-architecture.md) | Fact-centric database architecture for SQL source-of-truth, outbox, projections, and adapters. |
+| [database-adapters.md](database-adapters.md) | Implemented SQL, Redis, Elasticsearch, Qdrant, MongoDB, ClickHouse, and InfluxDB adapters. |
+| [database-production.md](database-production.md) | Production database migration, outbox, and SQL integration test guidance. |
 
 Diagram assets live under [assets/](assets/).
-

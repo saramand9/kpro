@@ -8,10 +8,10 @@ import (
 	"flag"
 	"log"
 
-	"github.com/saramand9/bignet/kpro/dbx"
+	"github.com/saramand9/bignet/kpro/database/dbx"
 	routeapp "github.com/saramand9/bignet/kpro/examples/dbx-http/server/internal/app"
 	"github.com/saramand9/bignet/kpro/server"
-	"gorm.io/driver/sqlite"
+	_ "modernc.org/sqlite"
 )
 
 func main() {
@@ -23,9 +23,10 @@ func main() {
 
 	ctx := context.Background()
 	database, err := dbx.Open(ctx, dbx.Config{
-		GORMDialector: sqlite.Open(*dsn),
-		Dialect:       dbx.SQLite,
-		MaxOpenConns:  1,
+		DriverName:   "sqlite",
+		DSN:          *dsn,
+		Dialect:      dbx.SQLite,
+		MaxOpenConns: 1,
 		Async: dbx.AsyncConfig{
 			Workers:   2,
 			QueueSize: 128,
