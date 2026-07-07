@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/saramand9/bignet/kpro/database/contracts/lifecycle"
+	"github.com/saramand9/bignet/kpro/database/common/lifecycle"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
 )

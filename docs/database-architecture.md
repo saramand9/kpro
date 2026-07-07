@@ -17,8 +17,8 @@ Redis, Elasticsearch, Qdrant, MongoDB, ClickHouse, and InfluxDB stay as concrete
 
 | Package | Meaning |
 | --- | --- |
-| `database/contracts/lifecycle` | Common resource lifecycle, health, and observation contracts. |
-| `database/contracts/readmodels` | Query-side capabilities such as cache, search, vector, analytics, and metrics. |
+| `database/common/lifecycle` | Shared resource lifecycle, health, and observation types. |
+| `database/common/readmodels` | Query-side capabilities such as cache, search, vector, analytics, and metrics. |
 | `eventing/events` | Immutable business events, transport envelopes, codecs, and registry. |
 | `eventing/delivery` | Reliable event delivery contract only; concrete storage is chosen by the application. |
 | `eventing/projector` | Projector interface, registry, and runner. |
@@ -26,13 +26,13 @@ Redis, Elasticsearch, Qdrant, MongoDB, ClickHouse, and InfluxDB stay as concrete
 The storage adapters keep their database names:
 
 ```text
-database/relational/gorm        GORM database resource around native gorm.DB
-database/cache/redis            Redis cache, lock, stream, and sorted-set adapter
-database/search/elasticsearch   Elasticsearch index, search, and bulk adapter
-database/vector/qdrant          Qdrant vector collection adapter
-database/document/mongodb       MongoDB document adapter
-database/analytics/clickhouse   ClickHouse analytical SQL adapter
-database/metrics/influxdb       InfluxDB metrics and Flux query adapter
+database/gorm        GORM database resource around native gorm.DB
+database/redis            Redis cache, lock, stream, and sorted-set adapter
+database/es   Elasticsearch index, search, and bulk adapter
+database/qdrant          Qdrant vector collection adapter
+database/mongo       MongoDB document adapter
+database/clickhouse   ClickHouse analytical SQL adapter
+database/influx       InfluxDB metrics and Flux query adapter
 ```
 
 ## GORM Write Flow
@@ -44,12 +44,12 @@ HTTP/gRPC/TCP handler
 -> module service
 -> module store port
 -> internal/modules/<name>/store
--> database/relational/gorm.Database.GORM()
+-> database/gorm.Database.GORM()
 -> native gorm.DB Create / Save / Delete / First / Find / AutoMigrate
 -> MySQL
 ```
 
-`database/relational/gorm` only opens, wraps, checks, and closes native GORM handles. Module repositories use GORM's own API for CRUD, transactions, and migrations.
+`database/gorm` only opens, wraps, checks, and closes native GORM handles. Module repositories use GORM's own API for CRUD, transactions, and migrations.
 
 ## Business Projector Boundary
 
@@ -82,7 +82,7 @@ handler
 -> service
 -> module store port
 -> module GORM repository
--> database/relational/gorm.Database
+-> database/gorm.Database
 -> gorm.DB
 -> MySQL
 ```
@@ -100,7 +100,7 @@ users.Store calls gorm.DB directly
 
 ```text
 service or projector
--> database/cache/redis.Cache[T] / Lock / Stream / ZSet
+-> database/redis.Cache[T] / Lock / Stream / ZSet
 -> go-redis client
 -> Redis
 ```
@@ -109,7 +109,7 @@ service or projector
 
 ```text
 service or projector
--> database/search/elasticsearch.Index[T] / SearchRaw / BulkService
+-> database/es.Index[T] / SearchRaw / BulkService
 -> go-elasticsearch client
 -> Elasticsearch
 ```
@@ -118,7 +118,7 @@ service or projector
 
 ```text
 service or projector
--> database/vector/qdrant.Collection[T]
+-> database/qdrant.Collection[T]
 -> Qdrant HTTP API
 -> Qdrant collection
 ```
@@ -127,7 +127,7 @@ service or projector
 
 ```text
 service or projector
--> database/document/mongodb.Collection[T]
+-> database/mongo.Collection[T]
 -> mongo-driver
 -> MongoDB collection
 ```
@@ -136,7 +136,7 @@ service or projector
 
 ```text
 analytics projector or report service
--> database/analytics/clickhouse.AnalyticsTable[T] or SQL/Tx
+-> database/clickhouse.AnalyticsTable[T] or SQL/Tx
 -> clickhouse-go / database/sql
 -> ClickHouse
 ```
@@ -145,7 +145,7 @@ analytics projector or report service
 
 ```text
 metrics service or projector
--> database/metrics/influxdb.Writer / Measurement[T] / Query
+-> database/influx.Writer / Measurement[T] / Query
 -> influxdb-client-go
 -> InfluxDB bucket
 ```
@@ -153,7 +153,7 @@ metrics service or projector
 ## Runtime Lifecycle
 
 Every database adapter that owns an external connection implements
-`database/contracts/lifecycle.Resource` where practical:
+`database/common/lifecycle.Resource` where practical:
 
 ```text
 Name()

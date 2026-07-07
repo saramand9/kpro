@@ -6,20 +6,20 @@ which events update which external stores.
 
 | Package | Kind | Primary helpers |
 | --- | --- | --- |
-| `database/relational/gorm` | `sql` | GORM resource lifecycle and native `gorm.DB` access |
-| `database/cache/redis` | `redis` | `Cache[T]`, `Lock`, `Stream`, `ZSet` |
-| `database/search/elasticsearch` | `search` | `Index[T]`, `SearchRaw`, `BulkService` |
-| `database/vector/qdrant` | `vector` | `Collection[T]`, create/drop, upsert/delete, `SearchRaw` |
-| `database/document/mongodb` | `document` | Mongo client/database, typed `Collection[T]` CRUD helpers |
-| `database/analytics/clickhouse` | `analytics` | pool lifecycle, SQL/Tx, `AnalyticsTable[T]` |
-| `database/metrics/influxdb` | `metrics` | `Writer`, `Measurement[T]`, Flux `Query` |
+| `database/gorm` | `sql` | GORM resource lifecycle and native `gorm.DB` access |
+| `database/redis` | `redis` | `Cache[T]`, `Lock`, `Stream`, `ZSet` |
+| `database/es` | `search` | `Index[T]`, `SearchRaw`, `BulkService` |
+| `database/qdrant` | `vector` | `Collection[T]`, create/drop, upsert/delete, `SearchRaw` |
+| `database/mongo` | `document` | Mongo client/database, typed `Collection[T]` CRUD helpers |
+| `database/clickhouse` | `analytics` | pool lifecycle, SQL/Tx, `AnalyticsTable[T]` |
+| `database/influx` | `metrics` | `Writer`, `Measurement[T]`, Flux `Query` |
 
 ## Supporting Packages
 
 | Package | Purpose |
 | --- | --- |
-| `database/contracts/lifecycle` | Common resource lifecycle, health, and observation contracts. |
-| `database/contracts/readmodels` | Cache/search/vector/graph/analytics/metrics read-model interfaces. |
+| `database/common/lifecycle` | Shared resource lifecycle, health, and observation types. |
+| `database/common/readmodels` | Shared cache/search/vector/graph/analytics/metrics read-model interfaces. |
 | `eventing/events` | Event envelope, schema, codec, and registry. |
 | `eventing/delivery` | Reliable event delivery contract. |
 | `eventing/projector` | Projector interface, registry, and runner. |

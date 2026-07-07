@@ -47,7 +47,7 @@
 
   <rect x="458" y="184" width="330" height="136" class="box startup"/>
   <text x="482" y="210" class="label">database.go</text>
-  <text x="482" y="230" class="file">database/relational/gorm/database.go</text>
+  <text x="482" y="230" class="file">database/gorm/database.go</text>
   <text x="482" y="256" class="small"><tspan class="input">输入：</tspan> Dialector 或已有 *gorm.DB</text>
   <text x="482" y="278" class="small"><tspan class="work">处理：</tspan> gorm.Open, pool, Ping</text>
   <text x="482" y="300" class="small"><tspan class="output">输出：</tspan> 可被健康检查的 Database</text>
@@ -174,5 +174,5 @@
 
   <rect x="78" y="1160" width="1570" height="72" class="note"/>
   <text x="104" y="1190" class="label">关键边界</text>
-  <text x="104" y="1218" class="small">database/relational/gorm 只在启动和装配时提供 *gorm.DB 生命周期能力；请求中的入库行为发生在 internal/modules/users/store/store.go，直接调用原生 GORM。</text>
+  <text x="104" y="1218" class="small">database/gorm 只在启动和装配时提供 *gorm.DB 生命周期能力；请求中的入库行为发生在 internal/modules/users/store/store.go，直接调用原生 GORM。</text>
 </svg>

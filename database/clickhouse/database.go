@@ -5,7 +5,7 @@ import (
 	"database/sql"
 
 	_ "github.com/ClickHouse/clickhouse-go/v2"
-	"github.com/saramand9/bignet/kpro/database/contracts/lifecycle"
+	"github.com/saramand9/bignet/kpro/database/common/lifecycle"
 )
 
 // Database owns a ClickHouse database/sql pool.

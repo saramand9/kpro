@@ -1,6 +1,6 @@
 # Redis 流程
 
-这份文档用 Redis 作为一个具体例子，说明数据在 KPro 数据库架构里怎么流转。`database/cache/redis` 目录下的 Redis 适配器已经存在；业务模块仍然需要自己提供 projector、repository 或 service 代码，决定什么时候使用 Redis。
+这份文档用 Redis 作为一个具体例子，说明数据在 KPro 数据库架构里怎么流转。`database/redis` 目录下的 Redis 适配器已经存在；业务模块仍然需要自己提供 projector、repository 或 service 代码，决定什么时候使用 Redis。
 
 ![Redis database flow](assets/database-redis-flow.svg)
 
@@ -37,11 +37,11 @@ source-of-truth 写入成功
 | 步骤 | 文件 | 调用 | 输入 | 输出 | 负责什么 |
 | --- | --- | --- | --- | --- | --- |
 | 1 | 模块启动代码，例如 `internal/.../app` | 构造 `redisstore.Config` | `Name`, `Addr`, `DB`, `KeyPrefix`, 可选 `*redis.Client` | config 值 | 决定当前应用连接哪个 Redis。 |
-| 2 | `database/cache/redis/config.go` | `normalizeConfig(config)` | 原始 config | 标准化 config 或 error | 设置默认 `Name`，裁剪 `KeyPrefix`，要求 `Addr` 或 `Client`，设置默认 ping 超时。 |
-| 3 | `database/cache/redis/client.go` | `Open(ctx, config)` | 标准化后的 config | `*redisstore.Client` | 创建或包装 go-redis client。 |
-| 4 | `database/cache/redis/client.go` | `redis.NewClient(redisOptions(config))` | Redis 地址、认证、DB | `*redis.Client` | 调用方没有注入 client 时，创建底层协议 client。 |
-| 5 | `database/cache/redis/client.go` | `client.Ping(ctx)` | ping context | error 或 nil | 启动完成前确认 Redis 可达。 |
-| 6 | `database/contracts/lifecycle/resource.go` | `lifecycle.Resource` 方法 | `Client` | `Name`, `KindRedis`, `Health`, `Close` | 让 Redis 和其他数据库资源一样参与健康检查和关闭流程。 |
+| 2 | `database/redis/config.go` | `normalizeConfig(config)` | 原始 config | 标准化 config 或 error | 设置默认 `Name`，裁剪 `KeyPrefix`，要求 `Addr` 或 `Client`，设置默认 ping 超时。 |
+| 3 | `database/redis/client.go` | `Open(ctx, config)` | 标准化后的 config | `*redisstore.Client` | 创建或包装 go-redis client。 |
+| 4 | `database/redis/client.go` | `redis.NewClient(redisOptions(config))` | Redis 地址、认证、DB | `*redis.Client` | 调用方没有注入 client 时，创建底层协议 client。 |
+| 5 | `database/redis/client.go` | `client.Ping(ctx)` | ping context | error 或 nil | 启动完成前确认 Redis 可达。 |
+| 6 | `database/common/lifecycle/resource.go` | `lifecycle.Resource` 方法 | `Client` | `Name`, `KindRedis`, `Health`, `Close` | 让 Redis 和其他数据库资源一样参与健康检查和关闭流程。 |
 
 启动数据例子：
 
@@ -80,8 +80,8 @@ userCache key prefix = "kpro:" + "users:"
 | 7 | `eventing/projector/runner.go` | `Runner.RunOnce(ctx)` | delivery store 和 projector 列表 | ack/fail 结果 | 拉取可投递 event，并调用每个 projector。 |
 | 8 | `eventing/delivery/store.go` | `Store.Fetch(ctx, consumer, limit)` | projector 名称、批大小 | `[]delivery.Record` | 创建/确认 delivery 行，把 pending event claim 成 `inflight`，返回 envelope。 |
 | 9 | 模块侧 projector，例如 `UserCacheProjector` | `Handle(ctx, envelope)` | `delivery.Record.Envelope` | Redis cache 命令 | 解码 payload，把 event 映射成 Redis 读模型。 |
-| 10 | `database/cache/redis/cache.go` | `CacheView.Set(ctx, key, value, ttl)` | 逻辑 key、typed value、ttl | error 或 nil | 把 value marshal 成 JSON，然后调用 Redis `SET`。 |
-| 11 | `database/cache/redis/client.go` | `Client.key(key, prefix)` | key `u_1001`，prefix `users:` | `kpro:users:u_1001` | 应用全局 prefix 和 cache-specific prefix。 |
+| 10 | `database/redis/cache.go` | `CacheView.Set(ctx, key, value, ttl)` | 逻辑 key、typed value、ttl | error 或 nil | 把 value marshal 成 JSON，然后调用 Redis `SET`。 |
+| 11 | `database/redis/client.go` | `Client.key(key, prefix)` | key `u_1001`，prefix `users:` | `kpro:users:u_1001` | 应用全局 prefix 和 cache-specific prefix。 |
 | 12 | go-redis | `SET key json ttl` | 最终 Redis key 和 JSON bytes | Redis reply | 发送 Redis 协议命令。 |
 | 13 | `eventing/projector/runner.go` | `store.Ack(...)` 或 `store.Fail(...)` | projector 名称、event id | delivery 状态更新 | 成功则标记 delivered；失败则重试或进入 dead-letter。 |
 
@@ -203,11 +203,11 @@ status = failed, attempts += 1, available_at = now + RetryDelay
 | --- | --- | --- | --- | --- | --- |
 | 1 | module handler | `GetUser(id)` 请求入口 | user id `u_1001` | query DTO | 解码路由或查询参数。 |
 | 2 | module service | cache-first query | `u_1001` | cached view 或 miss | 决定这个查询是否可以优先信任 Redis。 |
-| 3 | `database/contracts/readmodels/views.go` | `Cache[T]` interface | `Get(ctx, key)` contract | typed value、hit flag、error | 需要抽象时，让 service 不直接依赖 Redis 实现。 |
-| 4 | `database/cache/redis/cache.go` | `CacheView.Get(ctx, key)` | 逻辑 key `u_1001` | `UserCache`、`true/false`、error | 解析 key，调用 Redis `GET`，反序列化 JSON。 |
-| 5 | `database/cache/redis/client.go` | `Client.key(key, prefix)` | 逻辑 key 和 prefix | 最终 Redis key | 应用 `kpro:users:` prefix。 |
+| 3 | `database/common/readmodels/views.go` | `Cache[T]` interface | `Get(ctx, key)` contract | typed value、hit flag、error | 需要抽象时，让 service 不直接依赖 Redis 实现。 |
+| 4 | `database/redis/cache.go` | `CacheView.Get(ctx, key)` | 逻辑 key `u_1001` | `UserCache`、`true/false`、error | 解析 key，调用 Redis `GET`，反序列化 JSON。 |
+| 5 | `database/redis/client.go` | `Client.key(key, prefix)` | 逻辑 key 和 prefix | 最终 Redis key | 应用 `kpro:users:` prefix。 |
 | 6 | go-redis / Redis | `GET kpro:users:u_1001` | 最终 key | bytes、redis.Nil 或 error | 从 Redis 读取。 |
-| 7 | `database/cache/redis/cache.go` | `json.Unmarshal` | bytes | typed `UserCache` | 把 Redis JSON bytes 转成 Go value。 |
+| 7 | `database/redis/cache.go` | `json.Unmarshal` | bytes | typed `UserCache` | 把 Redis JSON bytes 转成 Go value。 |
 | 8 | module service | return or fallback | hit/miss 结果 | response DTO 或 source query | 命中则返回；未命中可查 GORM SQL 并回填缓存。 |
 
 读取结果分三类：
@@ -232,17 +232,17 @@ CacheView.Get -> zero UserCache, false, err
 
 | 能力 | 文件 | 主要调用 | 数据形态 | 典型用途 |
 | --- | --- | --- | --- | --- |
-| Cache | `database/cache/redis/cache.go` | `Get`, `Set`, `Delete`, `SetNX`, `Exists` | typed value 序列化成 JSON | 读模型缓存。 |
-| Lock | `database/cache/redis/lock.go` | `Acquire`, `Release`, `Refresh` | key、随机 token、TTL | 短生命周期分布式锁。 |
-| Stream | `database/cache/redis/stream.go` | `Add`, `Read`, `CreateGroup`, `ReadGroup`, `Ack` | stream message `map[string]any` | Redis Streams 队列或事件中继。 |
-| ZSet | `database/cache/redis/zset.go` | `Add`, `Increment`, `Score`, `Range`, `RevRange`, `Remove` | member string 加 score | 排行榜、优先级视图、排名查询。 |
-| Lifecycle | `database/cache/redis/client.go` | `Ping`, `Health`, `Close` | resource health state | 启动检查和关闭流程。 |
+| Cache | `database/redis/cache.go` | `Get`, `Set`, `Delete`, `SetNX`, `Exists` | typed value 序列化成 JSON | 读模型缓存。 |
+| Lock | `database/redis/lock.go` | `Acquire`, `Release`, `Refresh` | key、随机 token、TTL | 短生命周期分布式锁。 |
+| Stream | `database/redis/stream.go` | `Add`, `Read`, `CreateGroup`, `ReadGroup`, `Ack` | stream message `map[string]any` | Redis Streams 队列或事件中继。 |
+| ZSet | `database/redis/zset.go` | `Add`, `Increment`, `Score`, `Range`, `RevRange`, `Remove` | member string 加 score | 排行榜、优先级视图、排名查询。 |
+| Lifecycle | `database/redis/client.go` | `Ping`, `Health`, `Close` | resource health state | 启动检查和关闭流程。 |
 
 ## 最小模块侧 Projector 示例
 
-目的：说明业务模块如何把通用 `events.Envelope` 转成自己需要的 Redis 数据结构。`database/cache/redis` 只提供 Redis 能力，真正理解 `user.created` 代表什么、应该写哪个 key、TTL 多久的是业务模块 projector。
+目的：说明业务模块如何把通用 `events.Envelope` 转成自己需要的 Redis 数据结构。`database/redis` 只提供 Redis 能力，真正理解 `user.created` 代表什么、应该写哪个 key、TTL 多久的是业务模块 projector。
 
-这段代码是模块侧代码，应该放在拥有这个读模型的业务模块附近，而不是放进 `database/cache/redis`。
+这段代码是模块侧代码，应该放在拥有这个读模型的业务模块附近，而不是放进 `database/redis`。
 
 ```go
 type UserCacheProjector struct {
