@@ -1,27 +1,26 @@
 # DBX Database Module
 
-KPro exposes database helpers through the `dbx` package. The module supports two
-integration paths:
+KPro exposes lightweight SQL helpers through the `dbx` package. The module uses
+`database/sql` plus dbx-generated SQL for common writes and simple reads.
 
-- `database/sql` plus dbx-generated SQL for common writes and simple reads.
-- GORM as an adapter path, configured with `GORMDialector` or `GORMDB`.
+For new multi-database design work, treat `dbx` as the SQL implementation
+under `database/sql`. The higher-level fact/outbox/projection direction is
+described in [database-architecture.md](database-architecture.md).
 
 SQLite, MySQL, and Postgres are SQL dialects used by dbx for placeholders,
-identifier quoting, and generated upsert syntax. GORM is an integration path, not
-a database type. A GORM-backed SQLite connection, for example, still uses the
-SQLite dialect.
+identifier quoting, and generated upsert syntax.
 
 The recommended application shape is:
 
 ```text
-protocol route -> handler/controller DTO -> service -> dbx.Store[T] -> DB / GORM
+protocol route -> handler/controller DTO -> service -> dbx.Store[T] -> SQL DB
 ```
 
 Handlers adapt TCP, HTTP, UDP messages, gRPC, or another protocol into validated
 request DTOs and then map those DTOs to service inputs. Services own business
-rules and call `dbx.Store[T]` or explicit SQL/GORM APIs for persistence.
-`dbx.Database` owns connection-pool setup, transactions, async write workers, and
-optional GORM access.
+rules and call module-specific store interfaces backed by `dbx.Store[T]` or
+explicit SQL APIs for persistence. `dbx.Database` owns connection-pool setup,
+transactions, and async write workers.
 
 ## Opening a Database
 
@@ -36,19 +35,7 @@ database, err := dbx.Open(ctx, dbx.Config{
 })
 ```
 
-GORM adapter path:
-
-```go
-database, err := dbx.Open(ctx, dbx.Config{
-	GORMDialector: sqlite.Open("file:app.db"),
-	Dialect:       dbx.SQLite,
-	MaxOpenConns:  10,
-})
-```
-
-`GORMDB` can also be used to reuse an already opened `*gorm.DB`. Use either
-`GORMDialector` or `GORMDB`, not both. If `Dialect` is omitted, dbx infers it
-from the `DriverName` or GORM dialector name when possible.
+If `Dialect` is omitted, dbx infers it from `DriverName` when possible.
 
 Register the database with the server lifecycle:
 
@@ -60,6 +47,27 @@ app.Manage(database)
 `Server.Shutdown` calls `Database.Shutdown`, which drains async writes and closes
 the underlying `database/sql` pool.
 
+## Migrations
+
+Use `database/sql.NewMigrator` for source-of-truth schema setup. Each migration
+has a stable ID and is recorded in `schema_migrations` with a checksum and
+status:
+
+```go
+migrator := sqlstore.NewMigrator(database, "")
+err := migrator.Apply(ctx, sqlstore.Migration{
+	ID: "users_001_create",
+	Statements: []string{`CREATE TABLE users (...)`},
+})
+```
+
+Runnable examples expose module schema as migrations, then call module `Init`
+during startup.
+
+Never change the statements for an already-applied migration ID. The migrator
+will reject the change as a checksum mismatch. Failed migrations are recorded and
+must be inspected before retrying.
+
 ## Store[T]
 
 For common create/read/update/delete resources, define a storage model and create
@@ -67,9 +75,9 @@ a typed store:
 
 ```go
 type User struct {
-	ID   int64  `json:"id" db:"id,pk,auto" gorm:"column:id;primaryKey;autoIncrement"`
-	Name string `json:"name" db:"name" gorm:"column:name"`
-	Age  int    `json:"age" db:"age" gorm:"column:age"`
+	ID   int64  `json:"id" db:"id,pk,auto"`
+	Name string `json:"name" db:"name"`
+	Age  int    `json:"age" db:"age"`
 }
 
 users := dbx.NewStore[User](database, "users")
@@ -88,12 +96,13 @@ list, err := users.List(ctx)
 _, err = users.Delete(ctx, 1)
 ```
 
-When the database was opened with GORM, store operations use GORM internally for
-the typed model and configured table. Otherwise they use `database/sql` and
-dbx-generated SQL based on `db` struct tags.
+Store operations use `database/sql` and dbx-generated SQL based on `db` struct
+tags. GORM is not hidden inside `dbx.Store[T]`; use the peer `database/gorm`
+adapter when a module should be backed by GORM.
 
 Business handlers should decode request-specific DTOs and call a service. The
-service owns validation and uses `dbx.Store[T]` for storage:
+service owns validation and depends on a business-shaped persistence port. A
+module store adapter hides `dbx.Store[T]` and any `sql.Result` details:
 
 ```go
 type CreateUserRequest struct {
@@ -102,7 +111,7 @@ type CreateUserRequest struct {
 }
 
 type UserService struct {
-	users *dbx.Store[User]
+	users UserStore
 }
 
 func (s *UserService) Create(ctx context.Context, name string, age int) (User, error) {
@@ -111,11 +120,10 @@ func (s *UserService) Create(ctx context.Context, name string, age int) (User, e
 		return User{}, errors.New("name is required")
 	}
 	user := User{Name: name, Age: age}
-	_, err := s.users.Create(ctx, &user)
-	return user, err
+	return s.users.Create(ctx, user)
 }
 
-userService := &UserService{users: users}
+userService := &UserService{users: userstore.NewDBX(database)}
 endpoint := app.HTTP(":8080")
 endpoint.Post("/users", func(ctx *httpx.Context) error {
 	var req CreateUserRequest
@@ -130,13 +138,14 @@ endpoint.Post("/users", func(ctx *httpx.Context) error {
 })
 ```
 
-Keep generic store access inside the service layer, where business validation,
-authorization, transactions, and cross-model behavior can be expressed clearly.
+Keep generic framework stores inside module store adapters or the application
+composition layer. Services should speak in business values and errors, not
+database framework return types.
 
 ## AsyncStore
 
 For non-critical writes, use the bounded async store view. Async store operations
-call the same `Store[T]` path, so they also use GORM when GORM is configured:
+call the same `Store[T]` path:
 
 ```go
 future, err := users.Async().Create(ctx, &user)
@@ -172,48 +181,44 @@ err := database.Tx(ctx, func(tx *dbx.Tx) error {
 
 The transaction wrapper currently exposes `SQLTx()`, `Writer()`, and
 `ExecContext()`. Use those APIs for transaction-scoped generated writes or raw
-SQL.
+SQL. `dbx.Store[T]` also honors `dbx.WithTx(ctx, tx)`, and
+`database/sql.UnitOfWork` installs that context automatically for repositories
+called inside the unit of work.
 
-## Native GORM Access
+## GORM As Peer Storage
 
-When `GORMDialector` or `GORMDB` is configured, applications can still use native
-GORM for ORM behavior outside the common store path:
+GORM is a framework-level storage implementation, not a dbx execution branch.
+Use `database/gorm` when a module should be backed by GORM:
 
 ```go
-gormDB := database.GORM()
-err := gormDB.AutoMigrate(&User{})
-err = dbx.NewStore[User](database, "users").GORM().Create(ctx, &user)
+gormResource, err := gormstore.Open(ctx, gormstore.Config{
+	Name:      "main",
+	Dialector: sqlite.Open("file:app.db"),
+})
+stores := NewGORMStores(gormResource)
+RegisterHTTPModules(endpoint, stores)
 ```
 
-KPro keeps GORM behind `dbx.Store[T]` for common CRUD. More complex ORM behavior
-can use `database.GORM()` or `store.GORM()` directly.
+The business service still depends on its own store interface, so startup code
+can choose either `dbx.NewStore[User](database, "users")` or
+`gormstore.NewStore[User](gormResource, "users")` explicitly.
 
 ## Application Routing
 
 Keep protocol registration in the application routing layer. The dbx example does
-this in `examples/dbx-http/server/internal/app/routes.go` by constructing
-services and registering each protocol handler explicitly:
+this in `examples/dbx-http/server/internal/app/routes.go` by creating composed
+stores once, then registering protocol modules from those ports:
 
 ```go
-userService := userservice.New(database)
-projectService := projectservice.New(database)
+if err := InitDBXSchemas(ctx, database); err != nil {
+	return err
+}
 
 httpEndpoint := app.HTTP(config.HTTPAddr)
-userhandler.RegisterHTTP(httpEndpoint, userService)
-projecthandler.RegisterHTTP(httpEndpoint, projectService)
-
-if config.UDPAddr != "" {
-	udpEndpoint := app.UDP(config.UDPAddr, udp.Config{
-		Codec:      codec.KProV1(),
-		MaxPacketSize: 2048,
-	}).Use(middleware.Recover(), middleware.MaxPayload(1500))
-	loginhandler.RegisterUDP(udpEndpoint, loginservice.New(loginservice.Config{}))
+if err := RegisterHTTPModules(httpEndpoint, NewDBXStores(database)); err != nil {
+	return err
 }
-
-if config.GRPCAddr != "" {
-	grpcEndpoint := app.GRPC(config.GRPCAddr).Use(middleware.Recover())
-	reporthandler.RegisterGRPC(grpcEndpoint, reportservice.New(reportservice.Config{}))
-}
+MountOptionalProtocolModules(app, config)
 ```
 
 The runnable example at `examples/dbx-http/server` uses application modules under
@@ -221,7 +226,7 @@ The runnable example at `examples/dbx-http/server` uses application modules unde
 and `internal/modules/reports`, and shows:
 
 ```text
-HTTP handler/controller -> users/projects service -> dbx.Store[T] -> DB/GORM
+HTTP handler/controller -> users/projects service -> dbx.Store[T] -> SQL DB
 UDP message handler     -> login service
 gRPC unary handler      -> reports service
 ```
@@ -270,6 +275,12 @@ UDP message        -> login UDP handler    -> login service
 
 Generated SQL is intended for common operations. For complex reads,
 provider-specific SQL, or transaction-scoped custom statements, use
-`database.DB()`, `database.Writer().ExecContext`, `tx.ExecContext`, or native
-GORM when configured.
+`database.DB()`, `database.Writer().ExecContext`, or `tx.ExecContext`.
 
+## Production Testing
+
+The default test suite uses SQLite and in-memory fakes. The `dbintegration` tag
+adds SQL backend tests for Store, Migrator, transaction, and Outbox behavior.
+Set `KPRO_TEST_MYSQL_DSN` and `KPRO_TEST_POSTGRES_DSN` to include MySQL and
+Postgres. See [database-production.md](database-production.md) for the full
+operational contract.

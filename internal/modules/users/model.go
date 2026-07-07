@@ -7,11 +7,15 @@ import (
 	"context"
 	_ "embed"
 
-	"github.com/saramand9/bignet/kpro/dbx"
+	"github.com/saramand9/bignet/kpro/database/dbx"
+	sqlstore "github.com/saramand9/bignet/kpro/database/sql"
 )
 
 //go:embed schema.sql
 var schemaSQL string
+
+// TableName is the users source-of-truth table.
+const TableName = "users"
 
 // User is the domain entity and database row view for the users module.
 //
@@ -20,14 +24,21 @@ var schemaSQL string
 //   - name and age are writable business fields.
 //   - created_at is returned by reads and omitted from writes.
 type User struct {
-	ID        int64  `json:"id" db:"id,pk,auto" gorm:"column:id;primaryKey;autoIncrement"`
-	Name      string `json:"name" db:"name" gorm:"column:name"`
-	Age       int    `json:"age" db:"age" gorm:"column:age"`
-	CreatedAt string `json:"created_at" db:"created_at,omitempty" gorm:"column:created_at;->"`
+	ID        int64  `json:"id" db:"id,pk,auto"`
+	Name      string `json:"name" db:"name"`
+	Age       int    `json:"age" db:"age"`
+	CreatedAt string `json:"created_at" db:"created_at,omitempty"`
 }
 
 // Init creates the users module database schema.
 func Init(ctx context.Context, database *dbx.Database) error {
-	_, err := database.Writer().ExecContext(ctx, schemaSQL)
-	return err
+	return sqlstore.NewMigrator(database, "").Apply(ctx, Migration())
+}
+
+// Migration returns the users module schema migration.
+func Migration() sqlstore.Migration {
+	return sqlstore.Migration{
+		ID:         "users_001_create",
+		Statements: []string{schemaSQL},
+	}
 }

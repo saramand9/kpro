@@ -1,0 +1,152 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1320" height="860" viewBox="0 0 1320 860" role="img" aria-labelledby="title desc">
+  <title id="title">KPro database architecture and write flow</title>
+  <desc id="desc">Directory structure and request flow for dbx, GORM, outbox, projections, and future database adapters.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#334155"/>
+    </marker>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { font: 700 26px Arial, sans-serif; fill: #0f172a; }
+      .subtitle { font: 400 14px Arial, sans-serif; fill: #475569; }
+      .section { font: 700 17px Arial, sans-serif; fill: #0f172a; }
+      .label { font: 700 14px Arial, sans-serif; fill: #111827; }
+      .small { font: 400 12px Arial, sans-serif; fill: #475569; }
+      .tiny { font: 400 11px Arial, sans-serif; fill: #64748b; }
+      .box { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.5; rx: 8; }
+      .module { fill: #ecfeff; stroke: #06b6d4; }
+      .compose { fill: #fef3c7; stroke: #f59e0b; }
+      .framework { fill: #f0fdf4; stroke: #22c55e; }
+      .contract { fill: #eef2ff; stroke: #6366f1; }
+      .future { fill: #fdf2f8; stroke: #ec4899; }
+      .line { stroke: #334155; stroke-width: 1.6; fill: none; marker-end: url(#arrow); }
+      .dash { stroke: #64748b; stroke-width: 1.3; stroke-dasharray: 6 5; fill: none; marker-end: url(#arrow); }
+      .band { fill: #e2e8f0; opacity: .45; }
+    </style>
+  </defs>
+
+  <rect class="bg" width="1320" height="860"/>
+
+  <text x="48" y="48" class="title">KPro database architecture</text>
+  <text x="48" y="72" class="subtitle">Database code is now grouped under database/. Business modules depend on ports; composition chooses dbx or GORM.</text>
+
+  <rect x="40" y="104" width="540" height="704" class="box"/>
+  <text x="68" y="138" class="section">Directory map</text>
+
+  <rect x="68" y="164" width="220" height="114" class="box module"/>
+  <text x="88" y="190" class="label">internal/modules</text>
+  <text x="88" y="214" class="small">users, projects</text>
+  <text x="88" y="236" class="small">handler -> service -> port</text>
+  <text x="88" y="258" class="tiny">No direct framework dependency in service</text>
+
+  <rect x="328" y="164" width="220" height="114" class="box compose"/>
+  <text x="348" y="190" class="label">example app wiring</text>
+  <text x="348" y="214" class="small">stores.go</text>
+  <text x="348" y="236" class="small">modules.go</text>
+  <text x="348" y="258" class="small">routes.go</text>
+
+  <rect x="68" y="314" width="220" height="90" class="box framework"/>
+  <text x="88" y="340" class="label">database/dbx</text>
+  <text x="88" y="364" class="small">database/sql toolkit</text>
+  <text x="88" y="386" class="small">Store, Writer, Tx, Async</text>
+
+  <rect x="328" y="314" width="220" height="90" class="box framework"/>
+  <text x="348" y="340" class="label">database/gorm</text>
+  <text x="348" y="364" class="small">GORM peer adapter</text>
+  <text x="348" y="386" class="small">Database, Store, Health</text>
+
+  <rect x="68" y="436" width="220" height="114" class="box contract"/>
+  <text x="88" y="462" class="label">database/sql</text>
+  <text x="88" y="486" class="small">dbx-backed Resource</text>
+  <text x="88" y="508" class="small">UnitOfWork</text>
+  <text x="88" y="530" class="small">OutboxStore</text>
+
+  <rect x="328" y="436" width="220" height="114" class="box contract"/>
+  <text x="348" y="462" class="label">database/kernel</text>
+  <text x="348" y="486" class="small">Resource, Health</text>
+  <text x="348" y="508" class="small">Kind, Status</text>
+  <text x="348" y="530" class="small">ResourceSet</text>
+
+  <rect x="68" y="582" width="220" height="134" class="box contract"/>
+  <text x="88" y="608" class="label">facts + outbox</text>
+  <text x="88" y="632" class="small">database/facts</text>
+  <text x="88" y="654" class="small">database/outbox</text>
+  <text x="88" y="676" class="small">Envelope, Codec</text>
+  <text x="88" y="698" class="small">Reliable delivery contract</text>
+
+  <rect x="328" y="582" width="220" height="134" class="box future"/>
+  <text x="348" y="608" class="label">projections + views</text>
+  <text x="348" y="632" class="small">database/projections</text>
+  <text x="348" y="654" class="small">database/views</text>
+  <text x="348" y="676" class="small">Redis, ES, Qdrant</text>
+  <text x="348" y="698" class="small">Neo4j, CK, InfluxDB</text>
+
+  <path class="line" d="M288 221 H328"/>
+  <path class="line" d="M178 278 V314"/>
+  <path class="line" d="M438 278 V314"/>
+  <path class="line" d="M178 404 V436"/>
+  <path class="line" d="M438 404 V436"/>
+  <path class="line" d="M178 550 V582"/>
+  <path class="line" d="M438 550 V582"/>
+
+  <rect x="620" y="104" width="660" height="704" class="box"/>
+  <text x="648" y="138" class="section">Request write flow</text>
+
+  <rect x="660" y="170" width="190" height="76" class="box module"/>
+  <text x="686" y="199" class="label">HTTP request</text>
+  <text x="686" y="223" class="small">POST /users</text>
+
+  <rect x="910" y="170" width="230" height="76" class="box module"/>
+  <text x="934" y="199" class="label">handler</text>
+  <text x="934" y="223" class="small">JSON -> DTO -> input</text>
+
+  <rect x="660" y="286" width="190" height="86" class="box module"/>
+  <text x="686" y="316" class="label">service</text>
+  <text x="686" y="340" class="small">validate command</text>
+  <text x="686" y="360" class="small">build model</text>
+
+  <rect x="910" y="286" width="230" height="86" class="box contract"/>
+  <text x="934" y="316" class="label">UserStore port</text>
+  <text x="934" y="340" class="small">Create, Find, List</text>
+  <text x="934" y="360" class="small">Update, Delete</text>
+
+  <rect x="660" y="420" width="220" height="102" class="box compose"/>
+  <text x="686" y="450" class="label">composition root</text>
+  <text x="686" y="474" class="small">NewDBXStores(...)</text>
+  <text x="686" y="496" class="small">or NewGORMStores(...)</text>
+
+  <rect x="940" y="420" width="130" height="74" class="box framework"/>
+  <text x="966" y="450" class="label">dbx path</text>
+  <text x="966" y="474" class="small">dbx.Store</text>
+
+  <rect x="1110" y="420" width="130" height="74" class="box framework"/>
+  <text x="1134" y="450" class="label">GORM path</text>
+  <text x="1134" y="474" class="small">gorm.Store</text>
+
+  <rect x="740" y="568" width="180" height="84" class="box framework"/>
+  <text x="766" y="598" class="label">SQL database</text>
+  <text x="766" y="622" class="small">SQLite / MySQL</text>
+  <text x="766" y="642" class="small">Postgres</text>
+
+  <rect x="1000" y="568" width="200" height="84" class="box contract"/>
+  <text x="1026" y="598" class="label">Outbox facts</text>
+  <text x="1026" y="622" class="small">same transaction</text>
+  <text x="1026" y="642" class="small">future full flow</text>
+
+  <rect x="860" y="700" width="230" height="74" class="box future"/>
+  <text x="886" y="730" class="label">projection runner</text>
+  <text x="886" y="754" class="small">cache / search / vector / graph</text>
+
+  <path class="line" d="M850 208 H910"/>
+  <path class="line" d="M1025 246 V286"/>
+  <path class="line" d="M910 329 H850"/>
+  <path class="line" d="M755 372 V420"/>
+  <path class="line" d="M880 471 H940"/>
+  <path class="line" d="M880 471 C950 540, 980 540, 1110 457"/>
+  <path class="line" d="M1005 494 C950 555, 905 568, 875 568"/>
+  <path class="line" d="M1175 494 C1128 555, 1010 568, 895 568"/>
+  <path class="dash" d="M920 610 H1000"/>
+  <path class="dash" d="M1100 652 C1095 688, 1065 700, 1010 700"/>
+
+  <text x="648" y="820" class="tiny">Solid arrows show the current request path. Dashed arrows show the fact/outbox/projection path being prepared for multi-database read models.</text>
+</svg>
