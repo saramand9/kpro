@@ -1,120 +1,166 @@
-# Fact-Centric Database Architecture
+# Database And Eventing Architecture
 
-The database layer treats business facts as the center of the system. Databases
-are carriers for facts, projections, and query views.
+KPro separates storage adapters from event flow mechanics:
+
+```text
+database  = concrete storage clients and lifecycle resources
+eventing  = events, delivery contracts, and projector scheduling
+modules   = business repositories, business events, and concrete projectors
+```
+
+Transactional MySQL data should use GORM directly in module repositories. Secondary stores such as
+Redis, Elasticsearch, Qdrant, MongoDB, ClickHouse, and InfluxDB stay as concrete adapters.
 
 ![Database architecture flow](assets/database-architecture-flow.svg)
 
-```text
-modules produce facts
-database moves facts reliably
-database persists facts and views
-```
+## Name Map
 
-## Layers
+| Package | Meaning |
+| --- | --- |
+| `database/contracts/lifecycle` | Common resource lifecycle, health, and observation contracts. |
+| `database/contracts/readmodels` | Query-side capabilities such as cache, search, vector, analytics, and metrics. |
+| `eventing/events` | Immutable business events, transport envelopes, codecs, and registry. |
+| `eventing/delivery` | Reliable event delivery contract only; concrete storage is chosen by the application. |
+| `eventing/projector` | Projector interface, registry, and runner. |
 
-```text
-modules/
-  domain      aggregates, policies, facts
-  app         use cases
-  ports       business repositories and view interfaces
-  adapters    HTTP, SQL repositories, projections
-
-database/
-  dbx         lightweight database/sql toolkit
-  sql         dbx-backed SQL resource, unit of work, and SQL outbox
-  gorm        GORM as a peer storage framework, not hidden inside dbx
-  redis       Redis cache, lock, stream, and sorted-set adapter
-  elastic     Elasticsearch index, search, and bulk adapter
-  qdrant      Qdrant vector collection adapter
-  mongo       MongoDB document adapter
-  clickhouse  ClickHouse analytical SQL adapter
-  influx      InfluxDB metrics and Flux query adapter
-  kernel      lifecycle, health, errors, observation
-  truth       unit of work and source-of-truth contracts
-  facts       fact envelope, schema, codec, registry
-  outbox      reliable fact delivery contracts
-  projections projection runtime and registry
-  views       cache/search/vector/graph/analytics/metrics interfaces
-```
-
-The existing `dbx` package remains the low-level SQL implementation. GORM lives
-beside it under `database/gorm` as a separate framework adapter. New code should
-place business persistence behind module-specific repository interfaces, then
-use `database/dbx`, `database/gorm`, `database/sql`, Redis, Elasticsearch,
-Qdrant, MongoDB, ClickHouse, or InfluxDB behind those interfaces.
-
-## Create Flow
+The storage adapters keep their database names:
 
 ```text
-HTTP request
--> module HTTP adapter decodes DTO
--> app use case validates command
--> domain aggregate creates a fact
--> truth.UnitOfWork
-   -> SQL repository saves source-of-truth state
-   -> outbox appends fact in the same transaction
--> response returns
--> projection runner delivers fact to cache/search/vector/graph/analytics views
+database/relational/gorm        GORM database resource around native gorm.DB
+database/cache/redis            Redis cache, lock, stream, and sorted-set adapter
+database/search/elasticsearch   Elasticsearch index, search, and bulk adapter
+database/vector/qdrant          Qdrant vector collection adapter
+database/document/mongodb       MongoDB document adapter
+database/analytics/clickhouse   ClickHouse analytical SQL adapter
+database/metrics/influxdb       InfluxDB metrics and Flux query adapter
 ```
 
-This keeps strong consistency in the SQL source of truth and moves Redis,
-Elasticsearch, Qdrant, Neo4j, ClickHouse, and InfluxDB updates into replayable
-projections.
+## GORM Write Flow
 
-## Current Implementation Status
-
-The current codebase has the first executable slice:
+The default relational write path is intentionally direct:
 
 ```text
-database/kernel       Resource and health contracts
-database/facts        Fact envelope, JSON codec, registry
-database/outbox       Outbox Store contract
-database/projections  Projection registry and RunOnce runner
-database/views        Cache/Search/Vector/Graph/Analytics/Metrics contracts
-database/sql         dbx Database wrapper, UnitOfWork, SQL Migrator, SQL OutboxStore
-database/gorm        GORM Database wrapper and generic Store
-database/redis       Redis Resource plus Cache/Lock/Stream/ZSet helpers
-database/elastic     Elasticsearch Resource plus Index/Search/Bulk helpers
-database/qdrant      Qdrant Resource plus Collection helpers
-database/mongo       MongoDB Resource plus typed Collection helpers
-database/clickhouse  ClickHouse Resource plus AnalyticsTable writer
-database/influx      InfluxDB Resource plus Writer/Measurement/Query helpers
+HTTP/gRPC/TCP handler
+-> module service
+-> module store port
+-> internal/modules/<name>/store
+-> database/relational/gorm.Database.GORM()
+-> native gorm.DB Create / Save / Delete / First / Find / AutoMigrate
+-> MySQL
 ```
 
-`database/sql.Migrator` records schema migrations in `schema_migrations` with a
-checksum and status so changed, running, or failed migrations are visible.
-`database/sql.OutboxStore` stores immutable facts in `outbox_facts` and tracks
-delivery independently per projection consumer in `outbox_deliveries`. This
-means one projection can ack a fact while another projection still has its own
-pending delivery.
+`database/relational/gorm` only opens, wraps, checks, and closes native GORM handles. Module repositories use GORM's own API for CRUD, transactions, and migrations.
 
-The outbox lifecycle is:
+## Business Projector Boundary
+
+`eventing/projector` only owns the generic scheduling mechanics:
 
 ```text
-Append facts
--> Fetch by projection name
--> claim pending or retryable deliveries as inflight
--> Projection.Handle
--> Ack on success
--> Fail on error
--> retry until MaxAttempts
--> dead-letter when attempts are exhausted
+Projector interface
+Registry
+Runner
 ```
 
-`inflight` deliveries use `ClaimTimeout` as a lease. If a projection runner
-crashes, another runner can reclaim the delivery after the lease expires.
-
-The existing `dbx.Store[T]` remains available as a low-level SQL helper. Module
-services depend on business-shaped store interfaces, as the `users` and
-`projects` modules now do. Framework-specific return values such as
-`sql.Result` stay inside module store adapters under `internal/modules/*/store`.
-
-GORM is no longer a hidden branch inside `dbx.Store[T]`. Startup code chooses the
-implementation explicitly:
+Concrete projectors belong to business modules because they know business event semantics and target data shape:
 
 ```text
-NewDBXStores(database)       -> users/projects store ports backed by dbx
-NewGORMStores(gormResource)  -> users/projects store ports backed by GORM
-RegisterHTTPModules(endpoint, stores)
+internal/modules/orders/events.go
+internal/modules/orders/projectors/search.go     -> writes Elasticsearch
+internal/modules/orders/projectors/cache.go      -> writes Redis
+internal/modules/orders/projectors/analytics.go  -> writes ClickHouse
 ```
+
+The database adapters only execute storage operations. They do not decide whether
+`order.created` should update Redis, Elasticsearch, ClickHouse, or nothing.
+
+## Adapter Flow Examples
+
+### GORM SQL Path
+
+```text
+handler
+-> service
+-> module store port
+-> module GORM repository
+-> database/relational/gorm.Database
+-> gorm.DB
+-> MySQL
+```
+
+Typical use:
+
+```text
+gormResource := gormstore.Open(...)
+stores := NewGORMStores(gormResource)
+users service calls users.Store
+users.Store calls gorm.DB directly
+```
+
+### Redis Path
+
+```text
+service or projector
+-> database/cache/redis.Cache[T] / Lock / Stream / ZSet
+-> go-redis client
+-> Redis
+```
+
+### Elasticsearch Path
+
+```text
+service or projector
+-> database/search/elasticsearch.Index[T] / SearchRaw / BulkService
+-> go-elasticsearch client
+-> Elasticsearch
+```
+
+### Qdrant Path
+
+```text
+service or projector
+-> database/vector/qdrant.Collection[T]
+-> Qdrant HTTP API
+-> Qdrant collection
+```
+
+### MongoDB Path
+
+```text
+service or projector
+-> database/document/mongodb.Collection[T]
+-> mongo-driver
+-> MongoDB collection
+```
+
+### ClickHouse Path
+
+```text
+analytics projector or report service
+-> database/analytics/clickhouse.AnalyticsTable[T] or SQL/Tx
+-> clickhouse-go / database/sql
+-> ClickHouse
+```
+
+### InfluxDB Path
+
+```text
+metrics service or projector
+-> database/metrics/influxdb.Writer / Measurement[T] / Query
+-> influxdb-client-go
+-> InfluxDB bucket
+```
+
+## Runtime Lifecycle
+
+Every database adapter that owns an external connection implements
+`database/contracts/lifecycle.Resource` where practical:
+
+```text
+Name()
+Kind()
+Ping(ctx)
+Health(ctx)
+Close()
+```
+
+This gives startup, health checks, and graceful shutdown one common contract without forcing all databases into one CRUD abstraction.

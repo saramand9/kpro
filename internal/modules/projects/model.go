@@ -5,36 +5,29 @@ package projects
 
 import (
 	"context"
-	_ "embed"
+	"time"
 
-	"github.com/saramand9/bignet/kpro/database/dbx"
-	sqlstore "github.com/saramand9/bignet/kpro/database/sql"
+	gormstore "github.com/saramand9/bignet/kpro/database/relational/gorm"
 )
-
-//go:embed schema.sql
-var schemaSQL string
 
 // TableName is the projects source-of-truth table.
 const TableName = "projects"
 
-// Project is the domain entity and database row view for the projects module.
+// Project is the domain entity and GORM model for the projects table.
 type Project struct {
-	ID          int64  `json:"id" db:"id,pk,auto"`
-	Name        string `json:"name" db:"name"`
-	Description string `json:"description" db:"description"`
-	Status      string `json:"status" db:"status"`
-	CreatedAt   string `json:"created_at" db:"created_at,omitempty"`
+	ID          int64     `json:"id" gorm:"column:id;primaryKey;autoIncrement"`
+	Name        string    `json:"name" gorm:"column:name;not null"`
+	Description string    `json:"description" gorm:"column:description;not null;default:''"`
+	Status      string    `json:"status" gorm:"column:status;not null;default:'active'"`
+	CreatedAt   time.Time `json:"created_at" gorm:"column:created_at;autoCreateTime"`
 }
 
-// Init creates the projects module database schema.
-func Init(ctx context.Context, database *dbx.Database) error {
-	return sqlstore.NewMigrator(database, "").Apply(ctx, Migration())
+// TableName returns the GORM table name.
+func (Project) TableName() string {
+	return TableName
 }
 
-// Migration returns the projects module schema migration.
-func Migration() sqlstore.Migration {
-	return sqlstore.Migration{
-		ID:         "projects_001_create",
-		Statements: []string{schemaSQL},
-	}
+// Init creates or updates the projects module database schema with GORM.
+func Init(ctx context.Context, database *gormstore.Database) error {
+	return database.GORM().WithContext(ctx).AutoMigrate(&Project{})
 }

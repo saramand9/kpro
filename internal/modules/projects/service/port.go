@@ -11,7 +11,7 @@ import (
 
 // ProjectStore is the projects module persistence port.
 //
-// Store adapters backed by database/dbx, database/gorm, or other databases can
+// Store adapters backed by database/relational/gorm or other databases can
 // satisfy this interface, but the service does not depend on those frameworks.
 type ProjectStore interface {
 	List(ctx context.Context) ([]projects.Project, error)
