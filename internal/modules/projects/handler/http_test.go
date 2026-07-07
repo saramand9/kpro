@@ -12,11 +12,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/saramand9/bignet/kpro/database/dbx"
+	gormstore "github.com/saramand9/bignet/kpro/database/relational/gorm"
 	"github.com/saramand9/bignet/kpro/internal/modules/projects"
 	projectservice "github.com/saramand9/bignet/kpro/internal/modules/projects/service"
 	projectstore "github.com/saramand9/bignet/kpro/internal/modules/projects/store"
 	"github.com/saramand9/bignet/kpro/transport/httpx"
+	"gorm.io/driver/sqlite"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -25,7 +27,7 @@ func TestHTTPCreateUpdateAndFindProject(t *testing.T) {
 	defer closeHTTPTestDatabase(t, database)
 
 	endpoint := httpx.New(httpx.Config{})
-	RegisterHTTP(endpoint, projectservice.NewWithStore(projectstore.NewDBX(database)))
+	RegisterHTTP(endpoint, projectservice.NewWithStore(projectstore.NewGORM(database)))
 
 	invalid := executeHTTPTestRequest(endpoint, http.MethodPost, "/projects", `{"status":"active"}`)
 	if invalid.Code != http.StatusBadRequest {
@@ -46,7 +48,7 @@ func TestHTTPCreateUpdateAndFindProject(t *testing.T) {
 	if created.Name != "Apollo" || created.Description != "Launch" || created.Status != "active" {
 		t.Fatalf("created = %#v", created)
 	}
-	if created.CreatedAt == "" {
+	if created.CreatedAt.IsZero() {
 		t.Fatalf("created_at was not returned: %#v", created)
 	}
 
@@ -61,12 +63,10 @@ func TestHTTPCreateUpdateAndFindProject(t *testing.T) {
 	}
 }
 
-func openHTTPTestDatabase(t *testing.T) *dbx.Database {
+func openHTTPTestDatabase(t *testing.T) *gormstore.Database {
 	t.Helper()
-	database, err := dbx.Open(context.Background(), dbx.Config{
-		DriverName:   "sqlite",
-		DSN:          ":memory:",
-		Dialect:      dbx.SQLite,
+	database, err := gormstore.Open(context.Background(), gormstore.Config{
+		Dialector:    sqlite.Dialector{DriverName: "sqlite", DSN: ":memory:"},
 		MaxOpenConns: 1,
 	})
 	if err != nil {
@@ -78,7 +78,7 @@ func openHTTPTestDatabase(t *testing.T) *dbx.Database {
 	return database
 }
 
-func closeHTTPTestDatabase(t *testing.T, database *dbx.Database) {
+func closeHTTPTestDatabase(t *testing.T, database *gormstore.Database) {
 	t.Helper()
 	if err := database.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)

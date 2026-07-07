@@ -1,152 +1,102 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1320" height="860" viewBox="0 0 1320 860" role="img" aria-labelledby="title desc">
-  <title id="title">KPro database architecture and write flow</title>
-  <desc id="desc">Directory structure and request flow for dbx, GORM, outbox, projections, and future database adapters.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="980" viewBox="0 0 1500 980" role="img" aria-labelledby="title desc">
+  <title id="title">KPro Database And Eventing Architecture</title>
+  <desc id="desc">Clean native GORM path for MySQL plus independent eventing contracts and concrete database adapters.</desc>
   <defs>
-    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
-      <path d="M2,2 L10,6 L2,10 Z" fill="#334155"/>
-    </marker>
     <style>
-      .bg { fill: #f8fafc; }
-      .title { font: 700 26px Arial, sans-serif; fill: #0f172a; }
-      .subtitle { font: 400 14px Arial, sans-serif; fill: #475569; }
-      .section { font: 700 17px Arial, sans-serif; fill: #0f172a; }
-      .label { font: 700 14px Arial, sans-serif; fill: #111827; }
-      .small { font: 400 12px Arial, sans-serif; fill: #475569; }
-      .tiny { font: 400 11px Arial, sans-serif; fill: #64748b; }
-      .box { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.5; rx: 8; }
-      .module { fill: #ecfeff; stroke: #06b6d4; }
-      .compose { fill: #fef3c7; stroke: #f59e0b; }
-      .framework { fill: #f0fdf4; stroke: #22c55e; }
-      .contract { fill: #eef2ff; stroke: #6366f1; }
-      .future { fill: #fdf2f8; stroke: #ec4899; }
-      .line { stroke: #334155; stroke-width: 1.6; fill: none; marker-end: url(#arrow); }
-      .dash { stroke: #64748b; stroke-width: 1.3; stroke-dasharray: 6 5; fill: none; marker-end: url(#arrow); }
-      .band { fill: #e2e8f0; opacity: .45; }
+      .bg { fill: #f7f9fc; }
+      .band { fill: #ffffff; stroke: #d8dee9; stroke-width: 2; }
+      .box { fill: #ffffff; stroke: #42526e; stroke-width: 2; rx: 8; }
+      .gorm { fill: #e8f5ff; stroke: #1f6feb; }
+      .event { fill: #fff7e6; stroke: #b7791f; }
+      .adapter { fill: #ecfdf3; stroke: #248a3d; }
+      .warn { fill: #fff1f2; stroke: #be123c; }
+      .label { font: 700 20px Arial, sans-serif; fill: #172033; }
+      .small { font: 15px Arial, sans-serif; fill: #334155; }
+      .tiny { font: 13px Arial, sans-serif; fill: #475569; }
+      .arrow { stroke: #42526e; stroke-width: 2.5; fill: none; marker-end: url(#arrow); }
+      .dash { stroke-dasharray: 8 6; }
     </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#42526e" />
+    </marker>
   </defs>
 
-  <rect class="bg" width="1320" height="860"/>
+  <rect class="bg" x="0" y="0" width="1500" height="980"/>
+  <text x="48" y="56" class="label">KPro Database And Eventing Architecture</text>
+  <text x="48" y="86" class="small">For MySQL, modules use native GORM directly. KPro only wraps connection lifecycle.</text>
 
-  <text x="48" y="48" class="title">KPro database architecture</text>
-  <text x="48" y="72" class="subtitle">Database code is now grouped under database/. Business modules depend on ports; composition chooses dbx or GORM.</text>
+  <rect class="band" x="40" y="120" width="430" height="790" rx="10"/>
+  <text x="66" y="158" class="label">MySQL / GORM Write Path</text>
+  <rect class="box" x="72" y="195" width="350" height="72"/>
+  <text x="96" y="225" class="label">Handler</text>
+  <text x="96" y="250" class="small">HTTP / gRPC / TCP / UDP</text>
+  <rect class="box" x="72" y="305" width="350" height="72"/>
+  <text x="96" y="335" class="label">Module Service</text>
+  <text x="96" y="360" class="small">business validation and orchestration</text>
+  <rect class="box gorm" x="72" y="415" width="350" height="82"/>
+  <text x="96" y="446" class="label">Module GORM Repository</text>
+  <text x="96" y="472" class="small">Create / Save / Delete / First / Find</text>
+  <rect class="box gorm" x="72" y="535" width="350" height="82"/>
+  <text x="96" y="566" class="label">database/relational/gorm</text>
+  <text x="96" y="592" class="small">Open, Wrap, Ping, Health, Close</text>
+  <rect class="box gorm" x="72" y="655" width="350" height="72"/>
+  <text x="96" y="685" class="label">Native *gorm.DB</text>
+  <text x="96" y="710" class="small">GORM API, dialector, transactions</text>
+  <rect class="box gorm" x="72" y="765" width="350" height="58"/>
+  <text x="96" y="801" class="label">MySQL</text>
 
-  <rect x="40" y="104" width="540" height="704" class="box"/>
-  <text x="68" y="138" class="section">Directory map</text>
+  <path class="arrow" d="M247 267 V305"/>
+  <path class="arrow" d="M247 377 V415"/>
+  <path class="arrow" d="M247 497 V535"/>
+  <path class="arrow" d="M247 617 V655"/>
+  <path class="arrow" d="M247 727 V765"/>
 
-  <rect x="68" y="164" width="220" height="114" class="box module"/>
-  <text x="88" y="190" class="label">internal/modules</text>
-  <text x="88" y="214" class="small">users, projects</text>
-  <text x="88" y="236" class="small">handler -> service -> port</text>
-  <text x="88" y="258" class="tiny">No direct framework dependency in service</text>
+  <rect class="band" x="535" y="120" width="430" height="790" rx="10"/>
+  <text x="561" y="158" class="label">Eventing</text>
+  <rect class="box event" x="567" y="205" width="350" height="84"/>
+  <text x="591" y="236" class="label">eventing/events</text>
+  <text x="591" y="262" class="small">Envelope, codec, registry</text>
+  <rect class="box event" x="567" y="335" width="350" height="92"/>
+  <text x="591" y="366" class="label">App Delivery Store</text>
+  <text x="591" y="392" class="small">implements eventing/delivery.Store</text>
+  <text x="591" y="414" class="tiny">storage chosen by application</text>
+  <rect class="box event" x="567" y="475" width="350" height="88"/>
+  <text x="591" y="506" class="label">eventing/projector.Runner</text>
+  <text x="591" y="532" class="small">Fetch -> Handle -> Ack / Fail</text>
+  <rect class="box event" x="567" y="610" width="350" height="88"/>
+  <text x="591" y="641" class="label">Business Projector</text>
+  <text x="591" y="667" class="small">module-owned mapping logic</text>
+  <rect class="box warn" x="567" y="750" width="350" height="76"/>
+  <text x="591" y="780" class="label">Not In GORM Adapter</text>
+  <text x="591" y="806" class="small">GORM wrapper only: lifecycle + *gorm.DB</text>
 
-  <rect x="328" y="164" width="220" height="114" class="box compose"/>
-  <text x="348" y="190" class="label">example app wiring</text>
-  <text x="348" y="214" class="small">stores.go</text>
-  <text x="348" y="236" class="small">modules.go</text>
-  <text x="348" y="258" class="small">routes.go</text>
+  <path class="arrow dash" d="M422 340 H500 C530 340 530 247 567 247"/>
+  <path class="arrow" d="M742 289 V335"/>
+  <path class="arrow" d="M742 427 V475"/>
+  <path class="arrow" d="M742 563 V610"/>
 
-  <rect x="68" y="314" width="220" height="90" class="box framework"/>
-  <text x="88" y="340" class="label">database/dbx</text>
-  <text x="88" y="364" class="small">database/sql toolkit</text>
-  <text x="88" y="386" class="small">Store, Writer, Tx, Async</text>
+  <rect class="band" x="1030" y="120" width="430" height="790" rx="10"/>
+  <text x="1056" y="158" class="label">Concrete Database Adapters</text>
+  <rect class="box adapter" x="1062" y="205" width="350" height="58"/>
+  <text x="1086" y="241" class="label">database/cache/redis</text>
+  <rect class="box adapter" x="1062" y="300" width="350" height="58"/>
+  <text x="1086" y="336" class="label">database/search/elasticsearch</text>
+  <rect class="box adapter" x="1062" y="395" width="350" height="58"/>
+  <text x="1086" y="431" class="label">database/vector/qdrant</text>
+  <rect class="box adapter" x="1062" y="490" width="350" height="58"/>
+  <text x="1086" y="526" class="label">database/document/mongodb</text>
+  <rect class="box adapter" x="1062" y="585" width="350" height="58"/>
+  <text x="1086" y="621" class="label">database/analytics/clickhouse</text>
+  <rect class="box adapter" x="1062" y="680" width="350" height="58"/>
+  <text x="1086" y="716" class="label">database/metrics/influxdb</text>
 
-  <rect x="328" y="314" width="220" height="90" class="box framework"/>
-  <text x="348" y="340" class="label">database/gorm</text>
-  <text x="348" y="364" class="small">GORM peer adapter</text>
-  <text x="348" y="386" class="small">Database, Store, Health</text>
+  <path class="arrow" d="M917 654 H990 C1015 654 1015 234 1062 234"/>
+  <path class="arrow" d="M917 654 H990 C1015 654 1015 329 1062 329"/>
+  <path class="arrow" d="M917 654 H990 C1015 654 1015 424 1062 424"/>
+  <path class="arrow" d="M917 654 H990 C1015 654 1015 519 1062 519"/>
+  <path class="arrow" d="M917 654 H990 C1015 654 1015 614 1062 614"/>
+  <path class="arrow" d="M917 654 H990 C1015 654 1015 709 1062 709"/>
 
-  <rect x="68" y="436" width="220" height="114" class="box contract"/>
-  <text x="88" y="462" class="label">database/sql</text>
-  <text x="88" y="486" class="small">dbx-backed Resource</text>
-  <text x="88" y="508" class="small">UnitOfWork</text>
-  <text x="88" y="530" class="small">OutboxStore</text>
-
-  <rect x="328" y="436" width="220" height="114" class="box contract"/>
-  <text x="348" y="462" class="label">database/kernel</text>
-  <text x="348" y="486" class="small">Resource, Health</text>
-  <text x="348" y="508" class="small">Kind, Status</text>
-  <text x="348" y="530" class="small">ResourceSet</text>
-
-  <rect x="68" y="582" width="220" height="134" class="box contract"/>
-  <text x="88" y="608" class="label">facts + outbox</text>
-  <text x="88" y="632" class="small">database/facts</text>
-  <text x="88" y="654" class="small">database/outbox</text>
-  <text x="88" y="676" class="small">Envelope, Codec</text>
-  <text x="88" y="698" class="small">Reliable delivery contract</text>
-
-  <rect x="328" y="582" width="220" height="134" class="box future"/>
-  <text x="348" y="608" class="label">projections + views</text>
-  <text x="348" y="632" class="small">database/projections</text>
-  <text x="348" y="654" class="small">database/views</text>
-  <text x="348" y="676" class="small">Redis, ES, Qdrant</text>
-  <text x="348" y="698" class="small">Neo4j, CK, InfluxDB</text>
-
-  <path class="line" d="M288 221 H328"/>
-  <path class="line" d="M178 278 V314"/>
-  <path class="line" d="M438 278 V314"/>
-  <path class="line" d="M178 404 V436"/>
-  <path class="line" d="M438 404 V436"/>
-  <path class="line" d="M178 550 V582"/>
-  <path class="line" d="M438 550 V582"/>
-
-  <rect x="620" y="104" width="660" height="704" class="box"/>
-  <text x="648" y="138" class="section">Request write flow</text>
-
-  <rect x="660" y="170" width="190" height="76" class="box module"/>
-  <text x="686" y="199" class="label">HTTP request</text>
-  <text x="686" y="223" class="small">POST /users</text>
-
-  <rect x="910" y="170" width="230" height="76" class="box module"/>
-  <text x="934" y="199" class="label">handler</text>
-  <text x="934" y="223" class="small">JSON -> DTO -> input</text>
-
-  <rect x="660" y="286" width="190" height="86" class="box module"/>
-  <text x="686" y="316" class="label">service</text>
-  <text x="686" y="340" class="small">validate command</text>
-  <text x="686" y="360" class="small">build model</text>
-
-  <rect x="910" y="286" width="230" height="86" class="box contract"/>
-  <text x="934" y="316" class="label">UserStore port</text>
-  <text x="934" y="340" class="small">Create, Find, List</text>
-  <text x="934" y="360" class="small">Update, Delete</text>
-
-  <rect x="660" y="420" width="220" height="102" class="box compose"/>
-  <text x="686" y="450" class="label">composition root</text>
-  <text x="686" y="474" class="small">NewDBXStores(...)</text>
-  <text x="686" y="496" class="small">or NewGORMStores(...)</text>
-
-  <rect x="940" y="420" width="130" height="74" class="box framework"/>
-  <text x="966" y="450" class="label">dbx path</text>
-  <text x="966" y="474" class="small">dbx.Store</text>
-
-  <rect x="1110" y="420" width="130" height="74" class="box framework"/>
-  <text x="1134" y="450" class="label">GORM path</text>
-  <text x="1134" y="474" class="small">gorm.Store</text>
-
-  <rect x="740" y="568" width="180" height="84" class="box framework"/>
-  <text x="766" y="598" class="label">SQL database</text>
-  <text x="766" y="622" class="small">SQLite / MySQL</text>
-  <text x="766" y="642" class="small">Postgres</text>
-
-  <rect x="1000" y="568" width="200" height="84" class="box contract"/>
-  <text x="1026" y="598" class="label">Outbox facts</text>
-  <text x="1026" y="622" class="small">same transaction</text>
-  <text x="1026" y="642" class="small">future full flow</text>
-
-  <rect x="860" y="700" width="230" height="74" class="box future"/>
-  <text x="886" y="730" class="label">projection runner</text>
-  <text x="886" y="754" class="small">cache / search / vector / graph</text>
-
-  <path class="line" d="M850 208 H910"/>
-  <path class="line" d="M1025 246 V286"/>
-  <path class="line" d="M910 329 H850"/>
-  <path class="line" d="M755 372 V420"/>
-  <path class="line" d="M880 471 H940"/>
-  <path class="line" d="M880 471 C950 540, 980 540, 1110 457"/>
-  <path class="line" d="M1005 494 C950 555, 905 568, 875 568"/>
-  <path class="line" d="M1175 494 C1128 555, 1010 568, 895 568"/>
-  <path class="dash" d="M920 610 H1000"/>
-  <path class="dash" d="M1100 652 C1095 688, 1065 700, 1010 700"/>
-
-  <text x="648" y="820" class="tiny">Solid arrows show the current request path. Dashed arrows show the fact/outbox/projection path being prepared for multi-database read models.</text>
+  <rect class="box" x="72" y="860" width="1340" height="50"/>
+  <text x="96" y="891" class="small">Rule: database adapters execute storage operations; modules decide business data shape, transactions, events, and projections.</text>
 </svg>
