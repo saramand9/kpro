@@ -15,7 +15,7 @@ import (
 	"github.com/saramand9/bignet/kpro/transport/httpx"
 )
 
-// CreateRequest is the public HTTP input for creating a user.
+// CreateRequest is the public input for creating a user.
 type CreateRequest struct {
 	Name string `json:"name"`
 	Age  int    `json:"age"`
