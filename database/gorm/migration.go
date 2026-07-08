@@ -5,6 +5,9 @@ package gormstore
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -14,7 +17,16 @@ import (
 	"gorm.io/gorm"
 )
 
-const schemaMigrationsTable = "schema_migrations"
+const (
+	schemaMigrationsTable = "schema_migrations"
+	migrationLockName     = "kpro_schema_migrations"
+	postgresLockKey       = int64(742607080001)
+	migrationLockTimeout  = 30
+
+	migrationStatusDirty   = "dirty"
+	migrationStatusFailed  = "failed"
+	migrationStatusApplied = "applied"
+)
 
 // Statement is one SQL statement in a versioned migration.
 type Statement struct {
@@ -43,7 +55,32 @@ type Migration struct {
 type AppliedMigration struct {
 	Version   int64
 	Name      string
-	AppliedAt time.Time
+	Checksum  string
+	Status    string
+	StartedAt time.Time
+	AppliedAt *time.Time
+	Error     string
+}
+
+type schemaMigrationRow struct {
+	Version   int64      `gorm:"column:version;primaryKey"`
+	Name      string     `gorm:"column:name;size:255"`
+	Checksum  string     `gorm:"column:checksum;size:64"`
+	Status    string     `gorm:"column:status;size:32"`
+	StartedAt time.Time  `gorm:"column:started_at"`
+	AppliedAt *time.Time `gorm:"column:applied_at"`
+	Error     string     `gorm:"column:error;type:text"`
+}
+
+func (schemaMigrationRow) TableName() string {
+	return schemaMigrationsTable
+}
+
+type resolvedMigration struct {
+	Version  int64
+	Name     string
+	SQLs     []string
+	Checksum string
 }
 
 // ApplyMigrations runs unapplied migrations in version order.
@@ -59,32 +96,17 @@ func ApplyMigrations(ctx context.Context, database *Database, migrations []Migra
 	if err != nil {
 		return err
 	}
-	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := ensureMigrationsTable(tx); err != nil {
+	db = db.WithContext(contextOrBackground(ctx))
+	resolved, err := resolveMigrations(normalized, db.Dialector.Name())
+	if err != nil {
+		return err
+	}
+	return withMigrationLock(ctx, db, func(locked *gorm.DB) error {
+		if err := ensureMigrationsTable(locked); err != nil {
 			return err
 		}
-		dialect := tx.Dialector.Name()
-		for _, migration := range normalized {
-			applied, err := migrationApplied(tx, migration.Version)
-			if err != nil {
-				return err
-			}
-			if applied {
-				continue
-			}
-			for _, statement := range migration.Statements {
-				sql, err := statement.sqlFor(dialect)
-				if err != nil {
-					return fmt.Errorf("%w: %s migration %d", err, dialect, migration.Version)
-				}
-				if strings.TrimSpace(sql) == "" {
-					continue
-				}
-				if err := tx.Exec(sql).Error; err != nil {
-					return fmt.Errorf("apply migration %d %s: %w", migration.Version, migration.Name, err)
-				}
-			}
-			if err := insertMigration(tx, migration); err != nil {
+		for _, migration := range resolved {
+			if err := applyResolvedMigration(locked, migration); err != nil {
 				return err
 			}
 		}
@@ -98,14 +120,25 @@ func AppliedMigrations(ctx context.Context, database *Database) ([]AppliedMigrat
 	if err != nil {
 		return nil, err
 	}
-	var migrations []AppliedMigration
-	if err := ensureMigrationsTable(db.WithContext(ctx)); err != nil {
+	db = db.WithContext(contextOrBackground(ctx))
+	if err := ensureMigrationsTable(db); err != nil {
 		return nil, err
 	}
-	if err := db.WithContext(ctx).
-		Raw("SELECT version, name, applied_at FROM " + schemaMigrationsTable + " ORDER BY version ASC").
-		Scan(&migrations).Error; err != nil {
+	var rows []schemaMigrationRow
+	if err := db.Order("version ASC").Find(&rows).Error; err != nil {
 		return nil, err
+	}
+	migrations := make([]AppliedMigration, 0, len(rows))
+	for _, row := range rows {
+		migrations = append(migrations, AppliedMigration{
+			Version:   row.Version,
+			Name:      row.Name,
+			Checksum:  row.Checksum,
+			Status:    row.Status,
+			StartedAt: row.StartedAt,
+			AppliedAt: row.AppliedAt,
+			Error:     row.Error,
+		})
 	}
 	return migrations, nil
 }
@@ -141,29 +174,151 @@ func normalizeMigrations(migrations []Migration) ([]Migration, error) {
 	return normalized, nil
 }
 
-func ensureMigrationsTable(db *gorm.DB) error {
-	return db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
-version BIGINT NOT NULL PRIMARY KEY,
-name VARCHAR(255) NOT NULL,
-applied_at TIMESTAMP NOT NULL
-)`).Error
-}
-
-func migrationApplied(db *gorm.DB, version int64) (bool, error) {
-	var count int64
-	if err := db.Raw("SELECT COUNT(1) FROM "+schemaMigrationsTable+" WHERE version = ?", version).Scan(&count).Error; err != nil {
-		return false, err
+func resolveMigrations(migrations []Migration, dialect string) ([]resolvedMigration, error) {
+	resolved := make([]resolvedMigration, 0, len(migrations))
+	for _, migration := range migrations {
+		sqls := make([]string, 0, len(migration.Statements))
+		for _, statement := range migration.Statements {
+			sql, err := statement.sqlFor(dialect)
+			if err != nil {
+				return nil, fmt.Errorf("%w: %s migration %d", err, dialect, migration.Version)
+			}
+			if strings.TrimSpace(sql) != "" {
+				sqls = append(sqls, sql)
+			}
+		}
+		if len(sqls) == 0 {
+			return nil, fmt.Errorf("%w: migration %d has no executable statements", ErrInvalidMigration, migration.Version)
+		}
+		resolved = append(resolved, resolvedMigration{
+			Version:  migration.Version,
+			Name:     strings.TrimSpace(migration.Name),
+			SQLs:     sqls,
+			Checksum: migrationChecksum(migration.Version, strings.TrimSpace(migration.Name), sqls),
+		})
 	}
-	return count > 0, nil
+	return resolved, nil
 }
 
-func insertMigration(db *gorm.DB, migration Migration) error {
-	return db.Exec(
-		"INSERT INTO "+schemaMigrationsTable+" (version, name, applied_at) VALUES (?, ?, ?)",
-		migration.Version,
-		migration.Name,
-		time.Now().UTC(),
-	).Error
+func withMigrationLock(ctx context.Context, db *gorm.DB, fn func(*gorm.DB) error) error {
+	switch db.Dialector.Name() {
+	case "mysql":
+		var acquired int
+		if err := db.Raw("SELECT GET_LOCK(?, ?)", migrationLockName, migrationLockTimeout).Scan(&acquired).Error; err != nil {
+			return err
+		}
+		if acquired != 1 {
+			return ErrMigrationLock
+		}
+		defer db.Exec("SELECT RELEASE_LOCK(?)", migrationLockName)
+	case "postgres":
+		if err := db.Exec("SELECT pg_advisory_lock(?)", postgresLockKey).Error; err != nil {
+			return err
+		}
+		defer db.Exec("SELECT pg_advisory_unlock(?)", postgresLockKey)
+	}
+	return fn(db.WithContext(contextOrBackground(ctx)))
+}
+
+func ensureMigrationsTable(db *gorm.DB) error {
+	return db.AutoMigrate(&schemaMigrationRow{})
+}
+
+func applyResolvedMigration(db *gorm.DB, migration resolvedMigration) error {
+	existing, err := findMigration(db, migration.Version)
+	if err != nil {
+		return err
+	}
+	if existing != nil {
+		if isLegacyAppliedMigration(*existing) {
+			return backfillLegacyMigration(db, migration)
+		}
+		return validateExistingMigration(*existing, migration)
+	}
+	started := time.Now().UTC()
+	row := schemaMigrationRow{
+		Version:   migration.Version,
+		Name:      migration.Name,
+		Checksum:  migration.Checksum,
+		Status:    migrationStatusDirty,
+		StartedAt: started,
+	}
+	if err := db.Create(&row).Error; err != nil {
+		return err
+	}
+	for _, sql := range migration.SQLs {
+		if err := db.Exec(sql).Error; err != nil {
+			wrapped := fmt.Errorf("apply migration %d %s: %w", migration.Version, migration.Name, err)
+			_ = markMigrationFailed(db, migration.Version, wrapped)
+			return wrapped
+		}
+	}
+	appliedAt := time.Now().UTC()
+	return db.Model(&schemaMigrationRow{}).
+		Where("version = ?", migration.Version).
+		Updates(map[string]any{
+			"status":     migrationStatusApplied,
+			"applied_at": appliedAt,
+			"error":      "",
+		}).Error
+}
+
+func findMigration(db *gorm.DB, version int64) (*schemaMigrationRow, error) {
+	var row schemaMigrationRow
+	err := db.First(&row, "version = ?", version).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
+func isLegacyAppliedMigration(row schemaMigrationRow) bool {
+	return row.Status == "" && row.Checksum == ""
+}
+
+func backfillLegacyMigration(db *gorm.DB, migration resolvedMigration) error {
+	appliedAt := time.Now().UTC()
+	return db.Model(&schemaMigrationRow{}).
+		Where("version = ?", migration.Version).
+		Updates(map[string]any{
+			"name":       migration.Name,
+			"checksum":   migration.Checksum,
+			"status":     migrationStatusApplied,
+			"started_at": appliedAt,
+			"applied_at": appliedAt,
+			"error":      "",
+		}).Error
+}
+func validateExistingMigration(row schemaMigrationRow, migration resolvedMigration) error {
+	if row.Status != migrationStatusApplied {
+		return fmt.Errorf("%w: migration %d status %s", ErrDirtyMigration, row.Version, row.Status)
+	}
+	if row.Checksum != "" && row.Checksum != migration.Checksum {
+		return fmt.Errorf("%w: migration %d", ErrMigrationChecksum, row.Version)
+	}
+	return nil
+}
+
+func markMigrationFailed(db *gorm.DB, version int64, migrationErr error) error {
+	return db.Model(&schemaMigrationRow{}).
+		Where("version = ?", version).
+		Updates(map[string]any{
+			"status": migrationStatusFailed,
+			"error":  migrationErr.Error(),
+		}).Error
+}
+
+func migrationChecksum(version int64, name string, sqls []string) string {
+	h := sha256.New()
+	_, _ = fmt.Fprintf(h, "%d\n%s\n", version, name)
+	for _, sql := range sqls {
+		_, _ = h.Write([]byte(strings.TrimSpace(sql)))
+		_, _ = h.Write([]byte("\n---\n"))
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func (s Statement) sqlFor(dialect string) (string, error) {
@@ -176,4 +331,11 @@ func (s Statement) sqlFor(dialect string) (string, error) {
 		return s.Default, nil
 	}
 	return "", ErrUnsupportedDialect
+}
+
+func contextOrBackground(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
 }

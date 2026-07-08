@@ -45,6 +45,26 @@ func (g *Graph) UpsertEdge(ctx context.Context, edge readmodels.Edge) error {
 	return g.write(ctx, cypher, params)
 }
 
+// BatchUpsertNodes writes multiple nodes through the same graph executor.
+func (g *Graph) BatchUpsertNodes(ctx context.Context, nodes ...readmodels.Node) error {
+	for _, node := range nodes {
+		if err := g.UpsertNode(ctx, node); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// BatchUpsertEdges writes multiple edges through the same graph executor.
+func (g *Graph) BatchUpsertEdges(ctx context.Context, edges ...readmodels.Edge) error {
+	for _, edge := range edges {
+		if err := g.UpsertEdge(ctx, edge); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // WriteRaw executes a caller-owned write query through the graph executor.
 func (g *Graph) WriteRaw(ctx context.Context, cypher string, params map[string]any) error {
 	if strings.TrimSpace(cypher) == "" {

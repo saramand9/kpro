@@ -301,7 +301,7 @@ func echo(ctx core.Context) error {
 
 ```powershell
 cd D:\dev\saramand9\bignet\kpro
-go run .\cmd\app -tcp :8088 -kcp :8090 -udp :8089 -ws :8091 -http :8080 -sse :8081
+go run .\cmd\app -tcp :8088 -kcp :8090 -udp :8089 -ws :8091 -http :8080 -sse :8081 -gorm-driver sqlite -gorm-dsn file:kpro-app.db
 ```
 
 HTTP/3 is disabled by default in the app server because it requires TLS

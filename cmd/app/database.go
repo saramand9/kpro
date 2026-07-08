@@ -7,21 +7,35 @@ import (
 	"context"
 
 	"github.com/saramand9/bignet/kpro/internal/app/persistence"
+	projectservice "github.com/saramand9/bignet/kpro/internal/modules/projects/service"
+	projectstore "github.com/saramand9/bignet/kpro/internal/modules/projects/store"
 	userservice "github.com/saramand9/bignet/kpro/internal/modules/users/service"
 	userstore "github.com/saramand9/bignet/kpro/internal/modules/users/store"
 )
 
-func initAppPersistence(ctx context.Context, dsn string) (*persistence.Resources, *userservice.Service, error) {
-	resources, err := persistence.Open(ctx, persistence.Config{GORMDSN: dsn})
+type appServices struct {
+	Users    *userservice.Service
+	Projects *projectservice.Service
+}
+
+func initAppPersistence(ctx context.Context, config persistence.Config) (*persistence.Resources, appServices, error) {
+	resources, err := persistence.Open(ctx, config)
 	if err != nil {
-		return nil, nil, err
+		return nil, appServices{}, err
 	}
 	if resources.SQL == nil {
-		return resources, nil, nil
+		return resources, appServices{}, nil
 	}
 	if err := userstore.InitGORM(ctx, resources.SQL); err != nil {
 		_ = resources.Close()
-		return nil, nil, err
+		return nil, appServices{}, err
 	}
-	return resources, userservice.NewWithStore(userstore.NewGORM(resources.SQL)), nil
+	if err := projectstore.InitGORM(ctx, resources.SQL); err != nil {
+		_ = resources.Close()
+		return nil, appServices{}, err
+	}
+	return resources, appServices{
+		Users:    userservice.NewWithStore(userstore.NewGORM(resources.SQL)),
+		Projects: projectservice.NewWithStore(projectstore.NewGORM(resources.SQL)),
+	}, nil
 }
