@@ -7,14 +7,14 @@ import (
 	"context"
 
 	gormstore "github.com/saramand9/bignet/kpro/database/gorm"
-	"github.com/saramand9/bignet/kpro/internal/modules/projects"
-	"github.com/saramand9/bignet/kpro/internal/modules/users"
+	projectstore "github.com/saramand9/bignet/kpro/internal/modules/projects/store"
+	userstore "github.com/saramand9/bignet/kpro/internal/modules/users/store"
 )
 
 // InitGormSchemas initializes source-of-truth schemas for GORM-backed examples.
 func InitGormSchemas(ctx context.Context, database *gormstore.Database) error {
-	if err := users.Init(ctx, database); err != nil {
+	if err := userstore.InitGORM(ctx, database); err != nil {
 		return err
 	}
-	return projects.Init(ctx, database)
+	return projectstore.InitGORM(ctx, database)
 }

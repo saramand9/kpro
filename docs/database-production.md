@@ -10,7 +10,7 @@ The production SQL path is:
 module service -> module store port -> module GORM repository -> database/gorm -> gorm.DB -> MySQL
 ```
 
-`database/gorm` is only a lifecycle wrapper around native `gorm.DB`. Use GORM directly in module repositories and use GORM's `AutoMigrate` or your deployment migration tool for schema management.
+`database/gorm` is primarily a lifecycle wrapper around native `gorm.DB`. Use GORM directly in module repositories for CRUD and transactions. Schema changes should go through versioned migrations, either through `database/gorm.ApplyMigrations` or an external deployment migration tool.
 
 `database/common/readmodels` contains shared interfaces for cache, search, vector, graph,
 analytics, and metrics stores. The implemented non-SQL adapters are:
@@ -30,8 +30,15 @@ Concrete projectors belong in business modules; database packages only provide s
 
 ## Schema Management
 
-For the built-in example modules, schema setup uses GORM `AutoMigrate` from the module model package.
-Production applications can either keep using GORM migrations or run explicit SQL migrations outside KPro.
+For the built-in example modules, schema setup uses explicit SQL migrations declared in module store packages and recorded in `schema_migrations`.
+
+Recommended production rules:
+
+- Use monotonically increasing migration versions.
+- Keep SQL statements explicit and reviewable.
+- Provide dialect-specific SQL when SQLite/MySQL/Postgres syntax differs.
+- Run migrations once during deployment or startup, then fail fast on errors.
+- Use external migration tooling when your deployment process already owns database schema changes.
 
 ## Event Delivery
 

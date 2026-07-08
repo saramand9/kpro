@@ -57,7 +57,7 @@
   <text x="862" y="210" class="label">schema.go + model.go</text>
   <text x="862" y="230" class="file">app/schema.go, users/model.go</text>
   <text x="862" y="256" class="small"><tspan class="input">输入：</tspan> *gormstore.Database</text>
-  <text x="862" y="278" class="small"><tspan class="work">处理：</tspan> database.GORM().AutoMigrate</text>
+  <text x="862" y="278" class="small"><tspan class="work">处理：</tspan> versioned SQL migrations</text>
   <text x="862" y="300" class="small"><tspan class="output">输出：</tspan> users 表结构就绪</text>
 
   <rect x="1218" y="184" width="330" height="136" class="box startup"/>

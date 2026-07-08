@@ -7,7 +7,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 
+	"github.com/saramand9/bignet/kpro/database/common/lifecycle"
 	gormstore "github.com/saramand9/bignet/kpro/database/gorm"
 	"github.com/saramand9/bignet/kpro/internal/modules/users"
 	"gorm.io/gorm"
@@ -28,33 +30,51 @@ func NewGORM(database *gormstore.Database) *Store {
 
 // List returns all users.
 func (s *Store) List(ctx context.Context) ([]users.User, error) {
-	var rows []users.User
-	if err := s.db.WithContext(ctx).Order("id ASC").Find(&rows).Error; err != nil {
+	db, err := s.gormDB()
+	if err != nil {
 		return nil, err
 	}
-	return rows, nil
+	var rows []userRow
+	if err := db.WithContext(ctx).Order("id ASC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return userRowsToDomain(rows), nil
 }
 
 // Find returns one user by id.
 func (s *Store) Find(ctx context.Context, id int64) (users.User, error) {
-	var user users.User
-	if err := s.db.WithContext(ctx).First(&user, id).Error; err != nil {
+	db, err := s.gormDB()
+	if err != nil {
+		return users.User{}, err
+	}
+	var row userRow
+	if err := db.WithContext(ctx).First(&row, id).Error; err != nil {
 		return users.User{}, normalizeFindError(err)
 	}
-	return user, nil
+	return userRowToDomain(row), nil
 }
 
 // Create inserts a user and returns the persisted row.
 func (s *Store) Create(ctx context.Context, user users.User) (users.User, error) {
-	if err := s.db.WithContext(ctx).Create(&user).Error; err != nil {
+	db, err := s.gormDB()
+	if err != nil {
 		return users.User{}, err
 	}
-	return s.Find(ctx, user.ID)
+	row := userRowFromDomain(user)
+	if err := db.WithContext(ctx).Create(&row).Error; err != nil {
+		return users.User{}, err
+	}
+	return s.Find(ctx, row.ID)
 }
 
 // Update stores a user and returns the persisted row.
 func (s *Store) Update(ctx context.Context, user users.User) (users.User, error) {
-	if err := s.db.WithContext(ctx).Save(&user).Error; err != nil {
+	db, err := s.gormDB()
+	if err != nil {
+		return users.User{}, err
+	}
+	row := userRowFromDomain(user)
+	if err := db.WithContext(ctx).Save(&row).Error; err != nil {
 		return users.User{}, err
 	}
 	return s.Find(ctx, user.ID)
@@ -62,7 +82,18 @@ func (s *Store) Update(ctx context.Context, user users.User) (users.User, error)
 
 // Delete removes one user by id.
 func (s *Store) Delete(ctx context.Context, id int64) error {
-	return s.db.WithContext(ctx).Delete(&users.User{}, id).Error
+	db, err := s.gormDB()
+	if err != nil {
+		return err
+	}
+	return db.WithContext(ctx).Delete(&userRow{}, id).Error
+}
+
+func (s *Store) gormDB() (*gorm.DB, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("%w: users gorm store is nil", lifecycle.ErrUnavailable)
+	}
+	return s.db, nil
 }
 
 func normalizeFindError(err error) error {

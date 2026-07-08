@@ -6,10 +6,11 @@ KPro separates storage adapters from event flow mechanics:
 database  = concrete storage clients and lifecycle resources
 eventing  = events, delivery contracts, and projector scheduling
 modules   = business repositories, business events, and concrete projectors
+internal/app/persistence = app-level resource composition
 ```
 
 Transactional MySQL data should use GORM directly in module repositories. Secondary stores such as
-Redis, Elasticsearch, Qdrant, MongoDB, ClickHouse, and InfluxDB stay as concrete adapters.
+Redis, Elasticsearch, Qdrant, Neo4j, MongoDB, ClickHouse, and InfluxDB stay as concrete adapters.
 
 ![Database architecture flow](assets/database-architecture-flow.svg)
 
@@ -17,8 +18,9 @@ Redis, Elasticsearch, Qdrant, MongoDB, ClickHouse, and InfluxDB stay as concrete
 
 | Package | Meaning |
 | --- | --- |
+| `internal/app/persistence` | Opens app database resources and owns health/shutdown composition. |
 | `database/common/lifecycle` | Shared resource lifecycle, health, and observation types. |
-| `database/common/readmodels` | Query-side capabilities such as cache, search, vector, analytics, and metrics. |
+| `database/common/readmodels` | Query-side capabilities such as cache, search, vector, graph, analytics, and metrics. |
 | `eventing/events` | Immutable business events, transport envelopes, codecs, and registry. |
 | `eventing/delivery` | Reliable event delivery contract only; concrete storage is chosen by the application. |
 | `eventing/projector` | Projector interface, registry, and runner. |
@@ -30,6 +32,7 @@ database/gorm        GORM database resource around native gorm.DB
 database/redis            Redis cache, lock, stream, and sorted-set adapter
 database/es   Elasticsearch index, search, and bulk adapter
 database/qdrant          Qdrant vector collection adapter
+database/neo4j       Neo4j graph read-model adapter
 database/mongo       MongoDB document adapter
 database/clickhouse   ClickHouse analytical SQL adapter
 database/influx       InfluxDB metrics and Flux query adapter
@@ -44,12 +47,40 @@ HTTP/gRPC/TCP handler
 -> module service
 -> module store port
 -> internal/modules/<name>/store
+-> store-local GORM row model
 -> database/gorm.Database.GORM()
--> native gorm.DB Create / Save / Delete / First / Find / AutoMigrate
+-> native gorm.DB Create / Save / Delete / First / Find
 -> MySQL
 ```
 
-`database/gorm` only opens, wraps, checks, and closes native GORM handles. Module repositories use GORM's own API for CRUD, transactions, and migrations.
+`database/gorm` opens, wraps, checks, and closes native GORM handles. It also provides a small versioned migration runner that records applied versions in `schema_migrations`. Module repositories still use GORM's own API for CRUD and transactions. Domain models stay in module root packages; GORM table rows and mapper functions stay inside the module store package.
+
+## Schema Migrations
+
+Built-in modules declare explicit versioned migrations in their store packages:
+
+```text
+internal/modules/users/store.Migrations()
+internal/modules/projects/store.Migrations()
+```
+
+`store.InitGORM(ctx, database)` applies those migrations through `database/gorm.ApplyMigrations`. The runner sorts migrations by version, skips already applied versions, and records successful runs in `schema_migrations`.
+
+## Model Boundaries
+
+The app keeps protocol, business, and persistence models separate:
+
+```text
+HTTP JSON
+-> handler request DTO
+-> service input DTO
+-> module domain model
+-> store-local GORM row model
+-> database row
+-> handler response DTO
+```
+
+For example, `internal/modules/users.User` has no `json` or `gorm` tags. The users HTTP handler owns JSON request/response shapes, and `internal/modules/users/store` owns `userRow` plus the domain/row mappers.
 
 ## Business Projector Boundary
 
@@ -93,7 +124,7 @@ Typical use:
 gormResource := gormstore.Open(...)
 stores := NewGORMStores(gormResource)
 users service calls users.Store
-users.Store calls gorm.DB directly
+users.Store maps users.User <-> userRow and calls gorm.DB directly
 ```
 
 ### Redis Path
@@ -121,6 +152,15 @@ service or projector
 -> database/qdrant.Collection[T]
 -> Qdrant HTTP API
 -> Qdrant collection
+```
+
+### Neo4j Path
+
+```text
+service or projector
+-> database/neo4j.Graph
+-> neo4j-go-driver
+-> Neo4j graph
 ```
 
 ### MongoDB Path

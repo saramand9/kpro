@@ -11,15 +11,15 @@ import (
 )
 
 func TestInitAppPersistenceCreatesUserService(t *testing.T) {
-	database, service, err := initAppPersistence(context.Background(), ":memory:")
+	resources, service, err := initAppPersistence(context.Background(), ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if database == nil || service == nil {
-		t.Fatalf("database=%v service=%v", database, service)
+	if resources == nil || resources.SQL == nil || service == nil {
+		t.Fatalf("resources=%v service=%v", resources, service)
 	}
 	defer func() {
-		if err := database.Shutdown(context.Background()); err != nil {
+		if err := resources.Shutdown(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 	}()
@@ -34,11 +34,11 @@ func TestInitAppPersistenceCreatesUserService(t *testing.T) {
 }
 
 func TestInitAppPersistenceDisabled(t *testing.T) {
-	database, service, err := initAppPersistence(context.Background(), "")
+	resources, service, err := initAppPersistence(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if database != nil || service != nil {
-		t.Fatalf("database=%v service=%v", database, service)
+	if resources == nil || resources.Managed() || service != nil {
+		t.Fatalf("resources=%v service=%v", resources, service)
 	}
 }
