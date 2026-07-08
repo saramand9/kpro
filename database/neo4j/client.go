@@ -3,6 +3,7 @@ package neo4jstore
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/saramand9/bignet/kpro/database/common/lifecycle"
@@ -92,6 +93,34 @@ func (c *Client) Execute(ctx context.Context, cypher string, params map[string]a
 	return neo4j.ExecuteQuery(contextOrBackground(ctx), c.driver, cypher, params, neo4j.EagerResultTransformer, queryOptions...)
 }
 
+// QueryRaw runs a caller-owned Cypher query and returns eager records.
+func (c *Client) QueryRaw(ctx context.Context, cypher string, params map[string]any, options ...neo4j.ExecuteQueryConfigurationOption) (*neo4j.EagerResult, error) {
+	if strings.TrimSpace(cypher) == "" {
+		return nil, fmt.Errorf("%w: missing cypher", ErrInvalidRequest)
+	}
+	return c.Execute(ctx, cypher, params, options...)
+}
+
+// WriteTransaction runs multiple graph writes in one Neo4j managed transaction.
+func (c *Client) WriteTransaction(ctx context.Context, fn func(*Graph) error) error {
+	if c == nil || c.driver == nil {
+		return fmt.Errorf("%w: nil driver", ErrInvalidConfig)
+	}
+	if fn == nil {
+		return fmt.Errorf("%w: nil transaction function", ErrInvalidRequest)
+	}
+	session, err := c.Session(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	if err != nil {
+		return err
+	}
+	defer session.Close(contextOrBackground(ctx))
+	_, err = neo4j.ExecuteWrite(contextOrBackground(ctx), session, func(tx neo4j.ManagedTransaction) (struct{}, error) {
+		graph := &Graph{executor: txGraphExecutor{ctx: contextOrBackground(ctx), tx: tx}}
+		return struct{}{}, fn(graph)
+	})
+	return err
+}
+
 // Graph returns a read-model graph helper.
 func (c *Client) Graph() *Graph {
 	return &Graph{executor: c}
@@ -162,4 +191,24 @@ func contextOrBackground(ctx context.Context) context.Context {
 		return context.Background()
 	}
 	return ctx
+}
+
+type txGraphExecutor struct {
+	ctx context.Context
+	tx  neo4j.ManagedTransaction
+}
+
+func (e txGraphExecutor) executeWrite(ctx context.Context, cypher string, params map[string]any) error {
+	if e.tx == nil {
+		return fmt.Errorf("%w: nil transaction", ErrInvalidConfig)
+	}
+	if ctx == nil {
+		ctx = e.ctx
+	}
+	result, err := e.tx.Run(contextOrBackground(ctx), cypher, params)
+	if err != nil {
+		return err
+	}
+	_, err = result.Consume(contextOrBackground(ctx))
+	return err
 }

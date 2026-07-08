@@ -4,21 +4,21 @@
 package main
 
 import (
+	projecthandler "github.com/saramand9/bignet/kpro/internal/modules/projects/handler"
 	userhandler "github.com/saramand9/bignet/kpro/internal/modules/users/handler"
-	userservice "github.com/saramand9/bignet/kpro/internal/modules/users/service"
 	"github.com/saramand9/bignet/kpro/middleware"
 	"github.com/saramand9/bignet/kpro/server"
 	"github.com/saramand9/bignet/kpro/transport/httpx"
 )
 
-func registerMessageRoutes(endpoint *server.Endpoint, userService *userservice.Service) {
+func registerMessageRoutes(endpoint *server.Endpoint, services appServices) {
 	endpoint.Handle(appMsgEcho, echo)
-	if userService != nil {
-		userhandler.RegisterMessage(endpoint, userService)
+	if services.Users != nil {
+		userhandler.RegisterMessage(endpoint, services.Users)
 	}
 }
 
-func registerHTTPRoutes(endpoint *httpx.Endpoint, metrics *middleware.Metrics, userService *userservice.Service) {
+func registerHTTPRoutes(endpoint *httpx.Endpoint, metrics *middleware.Metrics, services appServices) {
 	endpoint.Get("/health", func(ctx *httpx.Context) error {
 		return ctx.Text(200, "ok\n")
 	})
@@ -32,7 +32,10 @@ func registerHTTPRoutes(endpoint *httpx.Endpoint, metrics *middleware.Metrics, u
 		}
 		return ctx.JSON(200, map[string]any{"echo": string(body)})
 	})
-	if userService != nil {
-		userhandler.RegisterHTTP(endpoint, userService)
+	if services.Users != nil {
+		userhandler.RegisterHTTP(endpoint, services.Users)
+	}
+	if services.Projects != nil {
+		projecthandler.RegisterHTTP(endpoint, services.Projects)
 	}
 }
