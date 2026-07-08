@@ -101,6 +101,28 @@ func TestGraphUpsertNodeAndEdge(t *testing.T) {
 	}
 }
 
+func TestGraphBatchUpsert(t *testing.T) {
+	executor := &fakeGraphExecutor{}
+	graph := &Graph{executor: executor}
+
+	if err := graph.BatchUpsertNodes(context.Background(),
+		readmodels.Node{Label: "User", ID: "u1"},
+		readmodels.Node{Label: "Project", ID: "p1"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := graph.BatchUpsertEdges(context.Background(), readmodels.Edge{
+		Type: "OWNS",
+		From: readmodels.NodeRef{Label: "User", ID: "u1"},
+		To:   readmodels.NodeRef{Label: "Project", ID: "p1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(executor.writes) != 3 {
+		t.Fatalf("writes=%d, want 3", len(executor.writes))
+	}
+}
 func TestGraphRejectsUnsafeIdentifiers(t *testing.T) {
 	graph := &Graph{executor: &fakeGraphExecutor{}}
 	err := graph.UpsertNode(context.Background(), readmodels.Node{

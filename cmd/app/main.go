@@ -14,6 +14,7 @@ import (
 
 	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/bignet/kpro/internal/app/persistence"
 	"github.com/saramand9/bignet/kpro/middleware"
 	"github.com/saramand9/bignet/kpro/platform/logx"
 	"github.com/saramand9/bignet/kpro/server"
@@ -40,7 +41,8 @@ func main() {
 	http3Cert := flag.String("http3-cert", "", "http3 certificate file")
 	http3Key := flag.String("http3-key", "", "http3 private key file")
 	sseAddr := flag.String("sse", ":8081", "sse listen address")
-	gormDSN := flag.String("gorm-dsn", "file:kpro-app.db", "sqlite DSN for GORM-backed app modules, disabled when empty")
+	gormDriver := flag.String("gorm-driver", "sqlite", "gorm driver: sqlite, mysql, or postgres")
+	gormDSN := flag.String("gorm-dsn", "file:kpro-app.db", "gorm data source name, disabled when empty")
 	defaultLog := logx.DefaultConfig("kpro-app")
 	logLevel := flag.String("log-level", defaultLog.Level, "log level: debug, info, warn, error, dpanic, panic, fatal")
 	logFile := flag.String("log-file", defaultLog.FileName, "log file path")
@@ -62,7 +64,12 @@ func main() {
 	defer cleanup()
 
 	ctx := context.Background()
-	resources, userService, err := initAppPersistence(ctx, *gormDSN)
+	resources, services, err := initAppPersistence(ctx, persistence.Config{
+		SQL: persistence.SQLConfig{
+			Driver: *gormDriver,
+			DSN:    *gormDSN,
+		},
+	})
 	if err != nil {
 		logger.Fatal("init gorm persistence", zap.Error(err))
 	}
@@ -77,13 +84,13 @@ func main() {
 		Codec:        codec.KProV1(),
 		MaxFrameSize: 64 * 1024,
 	}).Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024))
-	registerMessageRoutes(tcpEndpoint, userService)
+	registerMessageRoutes(tcpEndpoint, services)
 
 	kcpEndpoint := app.KCP(*kcpAddr, kcp.Config{
 		Codec:        codec.KProV1(),
 		MaxFrameSize: 64 * 1024,
 	}).Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024))
-	registerMessageRoutes(kcpEndpoint, userService)
+	registerMessageRoutes(kcpEndpoint, services)
 
 	if *quicAddr != "" {
 		if *quicCert == "" || *quicKey == "" {
@@ -96,20 +103,20 @@ func main() {
 			CertFile:     *quicCert,
 			KeyFile:      *quicKey,
 		}).Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024))
-		registerMessageRoutes(quicEndpoint, userService)
+		registerMessageRoutes(quicEndpoint, services)
 	}
 
 	udpEndpoint := app.UDP(*udpAddr, udp.Config{
 		Codec:         codec.KProV1(),
 		MaxPacketSize: 2048,
 	}).Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(1500))
-	registerMessageRoutes(udpEndpoint, userService)
+	registerMessageRoutes(udpEndpoint, services)
 
 	wsEndpoint := app.WebSocket(*wsAddr, "/ws").Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024))
-	registerMessageRoutes(wsEndpoint, userService)
+	registerMessageRoutes(wsEndpoint, services)
 
 	httpEndpoint := app.HTTP(*httpAddr)
-	registerHTTPRoutes(httpEndpoint, metrics, userService)
+	registerHTTPRoutes(httpEndpoint, metrics, services)
 
 	if *http3Addr != "" {
 		if *http3Cert == "" || *http3Key == "" {
@@ -169,7 +176,8 @@ func main() {
 		zap.String("http", *httpAddr),
 		zap.String("http3", *http3Addr),
 		zap.String("sse", *sseAddr),
-		zap.Bool("gorm_enabled", userService != nil),
+		zap.Bool("gorm_enabled", services.Users != nil),
+		zap.String("gorm_driver", *gormDriver),
 		zap.String("log_file", *logFile),
 	)
 	if err := app.ListenAndServe(); err != nil {

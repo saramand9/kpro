@@ -53,7 +53,7 @@ HTTP/gRPC/TCP handler
 -> MySQL
 ```
 
-`database/gorm` opens, wraps, checks, and closes native GORM handles. It also provides a small versioned migration runner that records applied versions in `schema_migrations`. Module repositories still use GORM's own API for CRUD and transactions. Domain models stay in module root packages; GORM table rows and mapper functions stay inside the module store package.
+`database/gorm` opens, wraps, checks, and closes native GORM handles. It also provides a versioned migration runner that records checksum, status, started time, applied time, and errors in `schema_migrations`. MySQL and Postgres migrations use advisory locks. Module repositories still use GORM's own API for CRUD and transactions. Domain models stay in module root packages; GORM table rows and mapper functions stay inside the module store package.
 
 ## Schema Migrations
 
@@ -64,7 +64,7 @@ internal/modules/users/store.Migrations()
 internal/modules/projects/store.Migrations()
 ```
 
-`store.InitGORM(ctx, database)` applies those migrations through `database/gorm.ApplyMigrations`. The runner sorts migrations by version, skips already applied versions, and records successful runs in `schema_migrations`.
+`store.InitGORM(ctx, database)` applies those migrations through `database/gorm.ApplyMigrations`. The runner sorts migrations by version, validates checksums for already-applied versions, blocks dirty or failed versions, and records successful runs in `schema_migrations`.
 
 ## Model Boundaries
 
@@ -84,7 +84,7 @@ For example, `internal/modules/users.User` has no `json` or `gorm` tags. The use
 
 ## Business Projector Boundary
 
-`eventing/projector` only owns the generic scheduling mechanics:
+`eventing/delivery` provides the reliable delivery contract and a GORM-backed outbox store. `eventing/projector` owns the generic scheduling mechanics:
 
 ```text
 Projector interface
@@ -102,7 +102,7 @@ internal/modules/orders/projectors/analytics.go  -> writes ClickHouse
 ```
 
 The database adapters only execute storage operations. They do not decide whether
-`order.created` should update Redis, Elasticsearch, ClickHouse, or nothing.
+`order.created` should update Redis, Elasticsearch, ClickHouse, Neo4j, or nothing.
 
 ## Adapter Flow Examples
 
@@ -127,6 +127,18 @@ users service calls users.Store
 users.Store maps users.User <-> userRow and calls gorm.DB directly
 ```
 
+
+### Event Outbox Path
+
+```text
+service creates event envelope
+-> eventing/delivery.GORMStore.Append
+-> event_outbox_events
+-> projector.Runner.Fetch(consumer)
+-> event_outbox_deliveries status=inflight
+-> projector.Handle
+-> Ack / Fail
+```
 ### Redis Path
 
 ```text
@@ -159,6 +171,7 @@ service or projector
 ```text
 service or projector
 -> database/neo4j.Graph
+-> UpsertNode / UpsertEdge / BatchUpsertNodes / BatchUpsertEdges / WriteTransaction
 -> neo4j-go-driver
 -> Neo4j graph
 ```
