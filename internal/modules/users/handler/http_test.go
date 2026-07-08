@@ -13,7 +13,6 @@ import (
 	"testing"
 
 	gormstore "github.com/saramand9/bignet/kpro/database/gorm"
-	"github.com/saramand9/bignet/kpro/internal/modules/users"
 	userservice "github.com/saramand9/bignet/kpro/internal/modules/users/service"
 	userstore "github.com/saramand9/bignet/kpro/internal/modules/users/store"
 	"github.com/saramand9/bignet/kpro/transport/httpx"
@@ -38,7 +37,7 @@ func TestHTTPCreateUsesDTOAndReturnsStoredUser(t *testing.T) {
 	if resp.Code != http.StatusCreated {
 		t.Fatalf("create status = %d, body = %q", resp.Code, resp.Body.String())
 	}
-	var created users.User
+	var created userResponse
 	if err := json.Unmarshal(resp.Body.Bytes(), &created); err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +66,7 @@ func openHTTPTestDatabase(t *testing.T) *gormstore.Database {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := users.Init(context.Background(), database); err != nil {
+	if err := userstore.InitGORM(context.Background(), database); err != nil {
 		t.Fatal(err)
 	}
 	return database

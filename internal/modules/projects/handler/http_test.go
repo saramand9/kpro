@@ -13,7 +13,6 @@ import (
 	"testing"
 
 	gormstore "github.com/saramand9/bignet/kpro/database/gorm"
-	"github.com/saramand9/bignet/kpro/internal/modules/projects"
 	projectservice "github.com/saramand9/bignet/kpro/internal/modules/projects/service"
 	projectstore "github.com/saramand9/bignet/kpro/internal/modules/projects/store"
 	"github.com/saramand9/bignet/kpro/transport/httpx"
@@ -38,7 +37,7 @@ func TestHTTPCreateUpdateAndFindProject(t *testing.T) {
 	if resp.Code != http.StatusCreated {
 		t.Fatalf("create status = %d, body = %q", resp.Code, resp.Body.String())
 	}
-	var created projects.Project
+	var created projectResponse
 	if err := json.Unmarshal(resp.Body.Bytes(), &created); err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +71,7 @@ func openHTTPTestDatabase(t *testing.T) *gormstore.Database {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := projects.Init(context.Background(), database); err != nil {
+	if err := projectstore.InitGORM(context.Background(), database); err != nil {
 		t.Fatal(err)
 	}
 	return database

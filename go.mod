@@ -7,6 +7,7 @@ require (
 	github.com/alicebob/miniredis/v2 v2.33.0
 	github.com/elastic/go-elasticsearch/v8 v8.14.0
 	github.com/influxdata/influxdb-client-go/v2 v2.14.0
+	github.com/neo4j/neo4j-go-driver/v5 v5.28.4
 	github.com/quic-go/quic-go v0.45.2
 	github.com/redis/go-redis/v9 v9.5.1
 	github.com/xtaci/kcp-go v5.4.20+incompatible

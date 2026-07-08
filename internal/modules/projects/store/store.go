@@ -7,7 +7,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 
+	"github.com/saramand9/bignet/kpro/database/common/lifecycle"
 	gormstore "github.com/saramand9/bignet/kpro/database/gorm"
 	"github.com/saramand9/bignet/kpro/internal/modules/projects"
 	"gorm.io/gorm"
@@ -28,33 +30,51 @@ func NewGORM(database *gormstore.Database) *Store {
 
 // List returns all projects.
 func (s *Store) List(ctx context.Context) ([]projects.Project, error) {
-	var rows []projects.Project
-	if err := s.db.WithContext(ctx).Order("id ASC").Find(&rows).Error; err != nil {
+	db, err := s.gormDB()
+	if err != nil {
 		return nil, err
 	}
-	return rows, nil
+	var rows []projectRow
+	if err := db.WithContext(ctx).Order("id ASC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return projectRowsToDomain(rows), nil
 }
 
 // Find returns one project by id.
 func (s *Store) Find(ctx context.Context, id int64) (projects.Project, error) {
-	var project projects.Project
-	if err := s.db.WithContext(ctx).First(&project, id).Error; err != nil {
+	db, err := s.gormDB()
+	if err != nil {
+		return projects.Project{}, err
+	}
+	var row projectRow
+	if err := db.WithContext(ctx).First(&row, id).Error; err != nil {
 		return projects.Project{}, normalizeFindError(err)
 	}
-	return project, nil
+	return projectRowToDomain(row), nil
 }
 
 // Create inserts a project and returns the persisted row.
 func (s *Store) Create(ctx context.Context, project projects.Project) (projects.Project, error) {
-	if err := s.db.WithContext(ctx).Create(&project).Error; err != nil {
+	db, err := s.gormDB()
+	if err != nil {
 		return projects.Project{}, err
 	}
-	return s.Find(ctx, project.ID)
+	row := projectRowFromDomain(project)
+	if err := db.WithContext(ctx).Create(&row).Error; err != nil {
+		return projects.Project{}, err
+	}
+	return s.Find(ctx, row.ID)
 }
 
 // Update stores a project and returns the persisted row.
 func (s *Store) Update(ctx context.Context, project projects.Project) (projects.Project, error) {
-	if err := s.db.WithContext(ctx).Save(&project).Error; err != nil {
+	db, err := s.gormDB()
+	if err != nil {
+		return projects.Project{}, err
+	}
+	row := projectRowFromDomain(project)
+	if err := db.WithContext(ctx).Save(&row).Error; err != nil {
 		return projects.Project{}, err
 	}
 	return s.Find(ctx, project.ID)
@@ -62,7 +82,18 @@ func (s *Store) Update(ctx context.Context, project projects.Project) (projects.
 
 // Delete removes one project by id.
 func (s *Store) Delete(ctx context.Context, id int64) error {
-	return s.db.WithContext(ctx).Delete(&projects.Project{}, id).Error
+	db, err := s.gormDB()
+	if err != nil {
+		return err
+	}
+	return db.WithContext(ctx).Delete(&projectRow{}, id).Error
+}
+
+func (s *Store) gormDB() (*gorm.DB, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("%w: projects gorm store is nil", lifecycle.ErrUnavailable)
+	}
+	return s.db, nil
 }
 
 func normalizeFindError(err error) error {

@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/saramand9/bignet/kpro/internal/modules/users"
 	userservice "github.com/saramand9/bignet/kpro/internal/modules/users/service"
 	"github.com/saramand9/bignet/kpro/transport/httpx"
 )
@@ -41,6 +43,13 @@ func (r UpdateRequest) toInput() userservice.UpdateInput {
 	}
 }
 
+type userResponse struct {
+	ID        int64     `json:"id"`
+	Name      string    `json:"name"`
+	Age       int       `json:"age"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 // RegisterHTTP exposes user routes with HTTP DTO handlers.
 func RegisterHTTP(endpoint *httpx.Endpoint, service *userservice.Service) {
 	endpoint.Get("/users", getUsers(service))
@@ -57,7 +66,7 @@ func getUsers(service *userservice.Service) httpx.Handler {
 			if err != nil {
 				return err
 			}
-			return ctx.JSON(http.StatusOK, users)
+			return ctx.JSON(http.StatusOK, newUserResponses(users))
 		}
 		userID, err := parseID(id)
 		if err != nil {
@@ -67,7 +76,7 @@ func getUsers(service *userservice.Service) httpx.Handler {
 		if err != nil {
 			return writeServiceError(ctx, err)
 		}
-		return ctx.JSON(http.StatusOK, user)
+		return ctx.JSON(http.StatusOK, newUserResponse(user))
 	}
 }
 
@@ -81,7 +90,7 @@ func createUser(service *userservice.Service) httpx.Handler {
 		if err != nil {
 			return writeServiceError(ctx, err)
 		}
-		return ctx.JSON(http.StatusCreated, created)
+		return ctx.JSON(http.StatusCreated, newUserResponse(created))
 	}
 }
 
@@ -99,7 +108,7 @@ func updateUser(service *userservice.Service) httpx.Handler {
 		if err != nil {
 			return writeServiceError(ctx, err)
 		}
-		return ctx.JSON(http.StatusOK, updated)
+		return ctx.JSON(http.StatusOK, newUserResponse(updated))
 	}
 }
 
@@ -139,4 +148,21 @@ func writeServiceError(ctx *httpx.Context, err error) error {
 
 func writeError(ctx *httpx.Context, status int, message string) error {
 	return ctx.JSON(status, map[string]string{"error": message})
+}
+
+func newUserResponses(values []users.User) []userResponse {
+	responses := make([]userResponse, 0, len(values))
+	for _, value := range values {
+		responses = append(responses, newUserResponse(value))
+	}
+	return responses
+}
+
+func newUserResponse(value users.User) userResponse {
+	return userResponse{
+		ID:        value.ID,
+		Name:      value.Name,
+		Age:       value.Age,
+		CreatedAt: value.CreatedAt,
+	}
 }

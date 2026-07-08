@@ -62,14 +62,14 @@ func main() {
 	defer cleanup()
 
 	ctx := context.Background()
-	database, userService, err := initAppPersistence(ctx, *gormDSN)
+	resources, userService, err := initAppPersistence(ctx, *gormDSN)
 	if err != nil {
 		logger.Fatal("init gorm persistence", zap.Error(err))
 	}
 
 	app := server.New(server.Config{Name: "kpro-app"})
-	if database != nil {
-		app.Manage(database)
+	if resources.Managed() {
+		app.Manage(resources)
 	}
 	metrics := middleware.NewMetrics()
 
