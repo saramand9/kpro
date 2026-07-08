@@ -4,6 +4,7 @@
 package main
 
 import (
+	commercehandler "github.com/saramand9/bignet/kpro/internal/modules/commerce/handler"
 	projecthandler "github.com/saramand9/bignet/kpro/internal/modules/projects/handler"
 	userhandler "github.com/saramand9/bignet/kpro/internal/modules/users/handler"
 	"github.com/saramand9/bignet/kpro/middleware"
@@ -37,5 +38,8 @@ func registerHTTPRoutes(endpoint *httpx.Endpoint, metrics *middleware.Metrics, s
 	}
 	if services.Projects != nil {
 		projecthandler.RegisterHTTP(endpoint, services.Projects)
+	}
+	if services.Commerce != nil {
+		commercehandler.RegisterHTTP(endpoint, services.Commerce)
 	}
 }

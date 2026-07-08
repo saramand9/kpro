@@ -7,6 +7,8 @@ import (
 	"context"
 
 	"github.com/saramand9/bignet/kpro/internal/app/persistence"
+	commerceservice "github.com/saramand9/bignet/kpro/internal/modules/commerce/service"
+	commercestore "github.com/saramand9/bignet/kpro/internal/modules/commerce/store"
 	projectservice "github.com/saramand9/bignet/kpro/internal/modules/projects/service"
 	projectstore "github.com/saramand9/bignet/kpro/internal/modules/projects/store"
 	userservice "github.com/saramand9/bignet/kpro/internal/modules/users/service"
@@ -16,6 +18,7 @@ import (
 type appServices struct {
 	Users    *userservice.Service
 	Projects *projectservice.Service
+	Commerce *commerceservice.Service
 }
 
 func initAppPersistence(ctx context.Context, config persistence.Config) (*persistence.Resources, appServices, error) {
@@ -34,8 +37,13 @@ func initAppPersistence(ctx context.Context, config persistence.Config) (*persis
 		_ = resources.Close()
 		return nil, appServices{}, err
 	}
+	if err := commercestore.InitGORM(ctx, resources.SQL); err != nil {
+		_ = resources.Close()
+		return nil, appServices{}, err
+	}
 	return resources, appServices{
 		Users:    userservice.NewWithStore(userstore.NewGORM(resources.SQL)),
 		Projects: projectservice.NewWithStore(projectstore.NewGORM(resources.SQL)),
+		Commerce: commerceservice.NewWithStore(commercestore.NewGORM(resources.SQL)),
 	}, nil
 }
