@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/saramand9/bignet/kpro/internal/modules/projects"
 	projectservice "github.com/saramand9/bignet/kpro/internal/modules/projects/service"
 	"github.com/saramand9/bignet/kpro/transport/httpx"
 )
@@ -45,6 +47,14 @@ func (r UpdateRequest) toInput() projectservice.UpdateInput {
 	}
 }
 
+type projectResponse struct {
+	ID          int64     `json:"id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	Status      string    `json:"status"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
 // RegisterHTTP exposes project routes with HTTP DTO handlers.
 func RegisterHTTP(endpoint *httpx.Endpoint, service *projectservice.Service) {
 	endpoint.Get("/projects", getProjects(service))
@@ -61,7 +71,7 @@ func getProjects(service *projectservice.Service) httpx.Handler {
 			if err != nil {
 				return err
 			}
-			return ctx.JSON(http.StatusOK, projects)
+			return ctx.JSON(http.StatusOK, newProjectResponses(projects))
 		}
 		projectID, err := parseID(id)
 		if err != nil {
@@ -71,7 +81,7 @@ func getProjects(service *projectservice.Service) httpx.Handler {
 		if err != nil {
 			return writeServiceError(ctx, err)
 		}
-		return ctx.JSON(http.StatusOK, project)
+		return ctx.JSON(http.StatusOK, newProjectResponse(project))
 	}
 }
 
@@ -85,7 +95,7 @@ func createProject(service *projectservice.Service) httpx.Handler {
 		if err != nil {
 			return writeServiceError(ctx, err)
 		}
-		return ctx.JSON(http.StatusCreated, created)
+		return ctx.JSON(http.StatusCreated, newProjectResponse(created))
 	}
 }
 
@@ -103,7 +113,7 @@ func updateProject(service *projectservice.Service) httpx.Handler {
 		if err != nil {
 			return writeServiceError(ctx, err)
 		}
-		return ctx.JSON(http.StatusOK, updated)
+		return ctx.JSON(http.StatusOK, newProjectResponse(updated))
 	}
 }
 
@@ -143,4 +153,22 @@ func writeServiceError(ctx *httpx.Context, err error) error {
 
 func writeError(ctx *httpx.Context, status int, message string) error {
 	return ctx.JSON(status, map[string]string{"error": message})
+}
+
+func newProjectResponses(values []projects.Project) []projectResponse {
+	responses := make([]projectResponse, 0, len(values))
+	for _, value := range values {
+		responses = append(responses, newProjectResponse(value))
+	}
+	return responses
+}
+
+func newProjectResponse(value projects.Project) projectResponse {
+	return projectResponse{
+		ID:          value.ID,
+		Name:        value.Name,
+		Description: value.Description,
+		Status:      value.Status,
+		CreatedAt:   value.CreatedAt,
+	}
 }

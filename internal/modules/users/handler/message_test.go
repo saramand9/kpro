@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/internal/modules/users"
 	userservice "github.com/saramand9/bignet/kpro/internal/modules/users/service"
 	userstore "github.com/saramand9/bignet/kpro/internal/modules/users/store"
 )
@@ -35,7 +34,7 @@ func TestMessageCreateUserPersistsWithGORM(t *testing.T) {
 	if reply.ID != MsgCreateUser || reply.Seq != 77 {
 		t.Fatalf("reply = %#v", reply)
 	}
-	var created users.User
+	var created userResponse
 	if err := json.Unmarshal(reply.Data, &created); err != nil {
 		t.Fatal(err)
 	}

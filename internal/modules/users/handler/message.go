@@ -34,7 +34,7 @@ func messageCreateUser(service *userservice.Service) core.Handler {
 		if err != nil {
 			return writeMessageServiceError(ctx, err)
 		}
-		return replyKProJSON(ctx, MsgCreateUser, created)
+		return replyKProJSON(ctx, MsgCreateUser, newUserResponse(created))
 	}
 }
 

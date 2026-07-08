@@ -10,6 +10,7 @@ which events update which external stores.
 | `database/redis` | `redis` | `Cache[T]`, `Lock`, `Stream`, `ZSet` |
 | `database/es` | `search` | `Index[T]`, `SearchRaw`, `BulkService` |
 | `database/qdrant` | `vector` | `Collection[T]`, create/drop, upsert/delete, `SearchRaw` |
+| `database/neo4j` | `graph` | `Graph`, `UpsertNode`, `UpsertEdge`, raw Cypher writes |
 | `database/mongo` | `document` | Mongo client/database, typed `Collection[T]` CRUD helpers |
 | `database/clickhouse` | `analytics` | pool lifecycle, SQL/Tx, `AnalyticsTable[T]` |
 | `database/influx` | `metrics` | `Writer`, `Measurement[T]`, Flux `Query` |
@@ -18,6 +19,7 @@ which events update which external stores.
 
 | Package | Purpose |
 | --- | --- |
+| `internal/app/persistence` | App-level database resource composition, health, and shutdown ownership. |
 | `database/common/lifecycle` | Shared resource lifecycle, health, and observation types. |
 | `database/common/readmodels` | Shared cache/search/vector/graph/analytics/metrics read-model interfaces. |
 | `eventing/events` | Event envelope, schema, codec, and registry. |
@@ -37,4 +39,7 @@ which events update which external stores.
 The default `go test ./eventing/... ./database/...` suite runs without external
 services. Redis uses `miniredis`; Elasticsearch, Qdrant, and InfluxDB use
 protocol-level HTTP test servers; ClickHouse uses a fake `database/sql` driver;
-Mongo validates configuration and construction without connecting to a live server.
+Mongo and Neo4j validate configuration and construction without connecting to a
+live server. Neo4j also has an opt-in `neo4jintegration` suite driven by
+`KPRO_TEST_NEO4J_URI`, `KPRO_TEST_NEO4J_USER`, `KPRO_TEST_NEO4J_PASSWORD`, and
+`KPRO_TEST_NEO4J_DATABASE`.
