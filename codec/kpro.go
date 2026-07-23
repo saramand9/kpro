@@ -94,6 +94,9 @@ func (k KProV1Codec) DecodePacket(data []byte) (core.Message, error) {
 		return core.Message{}, io.ErrUnexpectedEOF
 	}
 	end := FrameHeaderSize + int(length)
+	if end != len(data) {
+		return core.Message{}, ErrTrailingData
+	}
 	if length > 0 {
 		msg.Data = make([]byte, int(length))
 		copy(msg.Data, data[FrameHeaderSize:end])

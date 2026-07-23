@@ -34,8 +34,31 @@ jobs:
       - name: Vet root module
         run: go vet ./...
 
+      - name: Generate a service scaffold
+        run: go run ./cmd/kpro new "${RUNNER_TEMP}/kpro-scaffold-smoke" --module example.com/kpro-scaffold-smoke --name scaffold-smoke
+
+      - name: Compile generated service scaffold
+        working-directory: ${{ runner.temp }}/kpro-scaffold-smoke
+        run: |
+          go mod tidy
+          go test ./...
+
       - name: Race test root module
         run: go test -race ./...
+
+      - name: Guard hot-path performance budgets
+        run: |
+          go test ./core ./transport/httpx -run '^$' -bench 'Benchmark(RouterDispatchSync|EndpointServeHTTP)$' -benchmem -benchtime=250ms -count=1 > benchmark-current.txt
+          cat benchmark-current.txt
+          go run ./cmd/benchguard -budget benchmark/budgets.json -input benchmark-current.txt
+
+      - name: Upload benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hot-path-benchmarks
+          path: benchmark-current.txt
+          if-no-files-found: ignore
 
       - name: Test benchmark compare module
         working-directory: benchmark/compare
@@ -90,4 +113,29 @@ jobs:
           KPRO_REQUIRE_EXTERNAL_DB: "1"
           KPRO_TEST_MYSQL_DSN: kpro:kpro@tcp(127.0.0.1:3306)/kpro?parseTime=true
           KPRO_TEST_POSTGRES_DSN: postgres://kpro:kpro@127.0.0.1:5432/kpro?sslmode=disable
-        run: go test -tags dbintegration ./database/...
+        run: go test -tags dbintegration ./database/... ./eventing/delivery
+
+  windows-smoke:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test Windows core and developer tooling
+        run: go test ./core ./server ./transport/... ./cmd/kpro ./examples/...
+
+      - name: Generate and compile a service
+        shell: pwsh
+        run: |
+          $target = Join-Path $env:RUNNER_TEMP 'kpro-scaffold-smoke'
+          go run ./cmd/kpro new $target --module example.com/kpro-scaffold-smoke --name scaffold-smoke
+          Push-Location $target
+          go mod tidy
+          go test ./...
+          Pop-Location

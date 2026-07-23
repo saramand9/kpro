@@ -160,6 +160,58 @@ func TestQUICOversizedFrameClosesWithoutDispatch(t *testing.T) {
 	}
 }
 
+func TestContextCancellationClosesListenerAndAcceptedConnection(t *testing.T) {
+	certFile, keyFile := quicTestSelfSignedCert(t)
+	addr := freeQUICTestAddr(t)
+	server := New(Config{Addr: addr, CertFile: certFile, KeyFile: keyFile})
+	t.Cleanup(func() { _ = server.Shutdown(context.Background()) })
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- server.ListenAndServe(ctx, func(core.Context) error { return nil }) }()
+	time.Sleep(50 * time.Millisecond)
+
+	conn := dialQUICTest(t, addr)
+	defer conn.CloseWithError(0, "")
+	stream := openQUICTestStream(t, conn)
+	defer stream.Close()
+	deadline := time.Now().Add(time.Second)
+	var acceptedConnection quicgo.Connection
+	for {
+		server.connections.Range(func(key, _ interface{}) bool {
+			acceptedConnection, _ = key.(quicgo.Connection)
+			return false
+		})
+		if acceptedConnection != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("accepted QUIC connection was not tracked")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("ListenAndServe() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("QUIC server did not stop after context cancellation")
+	}
+	select {
+	case <-acceptedConnection.Context().Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("server-side QUIC connection remained open after cancellation")
+	}
+
+	listener, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		t.Fatalf("QUIC listener address remained bound: %v", err)
+	}
+	_ = listener.Close()
+}
+
 func TestNormalizeConfigUsesMaxStreams(t *testing.T) {
 	config := normalizeConfig(Config{MaxStreams: 7, MaxConnections: 3})
 	if config.MaxStreams != 7 {
@@ -177,6 +229,42 @@ func TestNormalizeConfigKeepsMaxConnectionsCompatibility(t *testing.T) {
 	}
 	if config.MaxConnections != 5 {
 		t.Fatalf("compat max connections = %d, want 5", config.MaxConnections)
+	}
+}
+
+func TestTryAcquireStreamSlotIsAtomic(t *testing.T) {
+	server := New(Config{MaxStreams: 1})
+	const contenders = 128
+	start := make(chan struct{})
+	results := make(chan bool, contenders)
+	var wg sync.WaitGroup
+	for index := 0; index < contenders; index++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results <- server.tryAcquireStreamSlot()
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	acquired := 0
+	for result := range results {
+		if result {
+			acquired++
+		}
+	}
+	if acquired != 1 {
+		t.Fatalf("acquired slots = %d, want 1", acquired)
+	}
+	if active := atomic.LoadInt64(&server.active); active != 1 {
+		t.Fatalf("active streams = %d, want 1", active)
+	}
+	server.releaseStreamSlot()
+	if active := atomic.LoadInt64(&server.active); active != 0 {
+		t.Fatalf("active streams after release = %d, want 0", active)
 	}
 }
 

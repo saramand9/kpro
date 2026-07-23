@@ -132,13 +132,17 @@ users.Store maps users.User <-> userRow and calls gorm.DB directly
 
 ```text
 service creates event envelope
--> eventing/delivery.GORMStore.Append
+-> domain write + eventing/delivery.GORMStore.AppendTx in one transaction
 -> event_outbox_events
--> projector.Runner.Fetch(consumer)
--> event_outbox_deliveries status=inflight
+-> projector.Runner.Run
+-> event_outbox_deliveries status=inflight with a visibility lease
 -> projector.Handle
--> Ack / Fail
+-> attempt-fenced Ack / Fail
 ```
+
+Expired inflight rows are reclaimed automatically. Projector handlers remain
+idempotent because the contract is at-least-once, and the lease must cover the
+worst-case time required to process a fetched batch.
 ### Redis Path
 
 ```text

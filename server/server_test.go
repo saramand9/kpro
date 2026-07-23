@@ -7,9 +7,12 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/saramand9/bignet/kpro/transport"
 )
 
 func TestListenAndServeRequiresTransport(t *testing.T) {
@@ -27,6 +30,18 @@ func TestShutdownAcceptsNilContext(t *testing.T) {
 
 	if err := app.Shutdown(nil); err != nil {
 		t.Fatalf("Shutdown(nil) returned error: %v", err)
+	}
+}
+
+func TestNewAppliesDefaultShutdownTimeout(t *testing.T) {
+	app := New(Config{Name: "test"})
+
+	if app.config.ShutdownTimeout != DefaultShutdownTimeout {
+		t.Fatalf(
+			"shutdown timeout = %v, want %v",
+			app.config.ShutdownTimeout,
+			DefaultShutdownTimeout,
+		)
 	}
 }
 
@@ -60,6 +75,83 @@ func TestListenAndServeShutsDownRunnersAfterFirstExit(t *testing.T) {
 	}
 	if got := blocked.shutdowns.Load(); got == 0 {
 		t.Fatal("blocked runner was not shut down")
+	}
+}
+
+func TestListenAndServeBoundsAutomaticShutdown(t *testing.T) {
+	app := New(Config{ShutdownTimeout: 10 * time.Millisecond})
+	fast := newFakeRunner("fast", nil, false)
+	blocked := newFakeRunner("blocked-shutdown", nil, true)
+	blocked.blockShutdown = true
+	resource := &managedTestResource{}
+	app.MountRunner(fast)
+	app.MountRunner(blocked)
+	app.Manage(resource)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- app.ListenAndServe()
+	}()
+
+	waitForClosed(t, fast.started, "fast runner did not start")
+	waitForClosed(t, blocked.started, "blocked runner did not start")
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf(
+				"ListenAndServe error = %v, want %v",
+				err,
+				context.DeadlineExceeded,
+			)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ListenAndServe did not honor automatic shutdown timeout")
+	}
+	if got := resource.shutdowns.Load(); got != 0 {
+		t.Fatalf("resource shutdowns = %d, want 0 while runner shutdown failed", got)
+	}
+}
+
+func TestListenAndServeDoesNotWaitForeverForUnresponsiveRunner(t *testing.T) {
+	app := New(Config{ShutdownTimeout: 10 * time.Millisecond})
+	fast := newFakeRunner("fast", nil, false)
+	stuck := newUnresponsiveRunner()
+	resource := &managedTestResource{}
+	app.MountRunner(fast)
+	app.MountRunner(stuck)
+	app.Manage(resource)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- app.ListenAndServe()
+	}()
+
+	waitForClosed(t, fast.started, "fast runner did not start")
+	waitForClosed(t, stuck.started, "unresponsive runner did not start")
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf(
+				"ListenAndServe error = %v, want %v",
+				err,
+				context.DeadlineExceeded,
+			)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ListenAndServe waited forever for unresponsive runner")
+	}
+	if resource.shutdowns.Load() != 0 {
+		t.Fatal("resource shutdown was consumed while a runner was still active")
+	}
+
+	close(stuck.release)
+	if err := app.Shutdown(context.Background()); err != nil {
+		t.Fatalf("retry shutdown after runner exit: %v", err)
+	}
+	if got := resource.shutdowns.Load(); got != 1 {
+		t.Fatalf("resource shutdowns = %d, want 1", got)
 	}
 }
 
@@ -122,6 +214,8 @@ func TestShutdownReturnsContextErrorWhenRunnerShutdownBlocks(t *testing.T) {
 	runner := newFakeRunner("blocked-shutdown", nil, false)
 	runner.blockShutdown = true
 	app.MountRunner(runner)
+	resource := &managedTestResource{}
+	app.Manage(resource)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 
@@ -133,6 +227,51 @@ func TestShutdownReturnsContextErrorWhenRunnerShutdownBlocks(t *testing.T) {
 	if got := runner.shutdowns.Load(); got != 1 {
 		t.Fatalf("shutdown count = %d, want 1", got)
 	}
+	if got := resource.shutdowns.Load(); got != 0 {
+		t.Fatalf("resource shutdowns = %d, want 0 while runner shutdown failed", got)
+	}
+}
+
+func TestConcurrentRunnerShutdownCallsAreCoalesced(t *testing.T) {
+	runner := newBlockingShutdownRunner()
+	app := New()
+	runners := []transport.Runner{runner}
+	firstResult := make(chan error, 1)
+	go func() {
+		firstResult <- app.shutdownRunners(context.Background(), runners)
+	}()
+	waitForClosed(t, runner.entered, "first runner shutdown did not start")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if err := app.shutdownRunners(ctx, runners); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("coalesced shutdown error = %v, want %v", err, context.DeadlineExceeded)
+	}
+	if got := runner.calls.Load(); got != 1 {
+		t.Fatalf("concurrent runner shutdown calls = %d, want 1", got)
+	}
+
+	close(runner.release)
+	if err := <-firstResult; err != nil {
+		t.Fatalf("first shutdown error = %v", err)
+	}
+}
+
+func TestRunnerShutdownTimeoutStillAttemptsOtherRunners(t *testing.T) {
+	stuck := newBlockingShutdownRunner()
+	responsive := newFakeRunner("responsive", nil, false)
+	app := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	err := app.shutdownRunners(ctx, []transport.Runner{stuck, responsive})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown error = %v, want %v", err, context.DeadlineExceeded)
+	}
+	if got := responsive.shutdowns.Load(); got != 1 {
+		t.Fatalf("responsive shutdown calls = %d, want 1", got)
+	}
+	close(stuck.release)
 }
 
 func TestServerManageShutsResourcesAfterRunners(t *testing.T) {
@@ -155,6 +294,39 @@ func TestServerManageShutsResourcesAfterRunners(t *testing.T) {
 	want := []string{"runner", "resource", "runner"}
 	if !reflect.DeepEqual(order, want) {
 		t.Fatalf("shutdown order = %v, want %v", order, want)
+	}
+}
+
+func TestServerRetriesManagedResourceAfterShutdownFailure(t *testing.T) {
+	wantErr := errors.New("temporary shutdown failure")
+	resource := &retryingManagedResource{firstErr: wantErr}
+	app := New().Manage(resource)
+
+	if err := app.Shutdown(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("first Shutdown error = %v, want %v", err, wantErr)
+	}
+	if err := app.Shutdown(context.Background()); err != nil {
+		t.Fatalf("retry Shutdown error = %v", err)
+	}
+	if got := resource.attempts.Load(); got != 2 {
+		t.Fatalf("resource shutdown attempts = %d, want 2", got)
+	}
+}
+
+func TestServerWaitReusesOneWaiter(t *testing.T) {
+	app := New()
+	app.wg.Add(1)
+	for i := 0; i < 2; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+		err := app.wait(ctx)
+		cancel()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("wait %d error = %v, want deadline exceeded", i, err)
+		}
+	}
+	app.wg.Done()
+	if err := app.wait(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -231,10 +403,72 @@ func (r *managedTestRunner) Shutdown(context.Context) error {
 }
 
 type managedTestResource struct {
-	shutdown func()
+	shutdown  func()
+	shutdowns atomic.Int32
+}
+
+type retryingManagedResource struct {
+	attempts atomic.Int32
+	firstErr error
+}
+
+func (r *retryingManagedResource) Shutdown(context.Context) error {
+	if r.attempts.Add(1) == 1 {
+		return r.firstErr
+	}
+	return nil
+}
+
+type unresponsiveRunner struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+type blockingShutdownRunner struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+	calls   atomic.Int32
+}
+
+func newBlockingShutdownRunner() *blockingShutdownRunner {
+	return &blockingShutdownRunner{entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (r *blockingShutdownRunner) Name() string { return "blocking-shutdown" }
+func (r *blockingShutdownRunner) ListenAndServe(context.Context) error {
+	return nil
+}
+func (r *blockingShutdownRunner) Shutdown(context.Context) error {
+	r.calls.Add(1)
+	r.once.Do(func() { close(r.entered) })
+	<-r.release
+	return nil
+}
+
+func newUnresponsiveRunner() *unresponsiveRunner {
+	return &unresponsiveRunner{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (r *unresponsiveRunner) Name() string {
+	return "unresponsive"
+}
+
+func (r *unresponsiveRunner) ListenAndServe(context.Context) error {
+	close(r.started)
+	<-r.release
+	return nil
+}
+
+func (r *unresponsiveRunner) Shutdown(context.Context) error {
+	return nil
 }
 
 func (r *managedTestResource) Shutdown(context.Context) error {
+	r.shutdowns.Add(1)
 	if r.shutdown != nil {
 		r.shutdown()
 	}

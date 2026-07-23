@@ -142,13 +142,21 @@ msg := result.Message
 _ = handler(core.AcquireContext(s, msg))
 ```
 
-这里的 `s` 是当前 `tcp.session`。`AcquireContext` 当前只是创建一个新的 `core.BaseContext`：
+这里的 `s` 是当前 `tcp.session`。`AcquireContext` 从内部对象池借用一个
+`core.BaseContext`，填入当前 session 和 message；router 在任务执行或拒绝后
+把它清空并归还对象池，以降低每条消息的临时分配：
 
 ```go
 func AcquireContext(session Session, message Message) *BaseContext {
-	return NewContext(session, message)
+	ctx := baseContextPool.Get().(*BaseContext)
+	// reset session, message and handler-local values
+	return ctx
 }
 ```
+
+借用的 context 只在当前 handler 调用期间有效。后台 goroutine 若需要保留
+message 或 context values，必须先调用 `core.CloneContext(ctx)`；clone 会复制
+message data、headers、meta 容器和 handler-local values。
 
 因此 context 不是新的协议对象，它只是把当前连接和当前消息组合起来：
 
@@ -171,14 +179,18 @@ Dispatch 的核心流程：
 ctx.Message()
   -> 按 Message.ID 查找 route
   -> 没有 route：ctx.Error(ErrNoHandler)
-  -> 找到 route：快照当前 middleware
-  -> 创建 dispatchTask{ctx, handler, middlewares, sessionExecutor}
+  -> 找到 route：读取预编译的 middleware handler
+  -> 创建 dispatchTask{ctx, invocationHandler, sessionExecutor}
   -> sync route：进入当前 session 的串行队列
   -> async route：进入全局 async worker 队列
   -> execute task：构造 NewMessageInvocation
   -> core.Middleware 链
   -> 业务 handler
 ```
+
+middleware 链在 route 注册或 `Use` 配置变化时构建，不在每次 dispatch 时
+重复组合。构建在 router 锁外完成，因此 middleware 构造器可以安全地回调
+router 配置 API；构造出的 handler 会被并发复用，其内部状态需要并发安全。
 
 ### 同步 route
 
@@ -484,7 +496,9 @@ Data = "no handler"
 
 ### Queue Full / Too Many In-Flight
 
-如果调度时队列满，或者超过 `MaxInflightPerSession`，router 会通过当前 context/session 发错误响应：
+如果调度时队列满，或者超过单 session 的 `MaxInflightPerSession` / 全局
+`MaxInflight`，router 会通过当前 context/session 发错误响应。对应的全局
+准入错误是 `core.ErrGlobalInflightLimit`：
 
 ```text
 ID   = core.MsgError
@@ -506,7 +520,7 @@ TCP 路径体现了当前工程的职责划分：
 transport 负责 I/O、连接、session 生命周期
 protocol 负责 bytes <-> Message
 context 负责把当前连接和当前消息暴露给业务
-router 负责 route 查找、middleware 快照、同步/异步调度，并在 handler 执行点创建 Invocation
+router 负责 route 查找、预编译 middleware、同步/异步调度，并在 handler 执行点创建 Invocation
 handler 负责业务逻辑
 session.Send 负责把响应交回 transport 写出
 ```

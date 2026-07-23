@@ -13,6 +13,7 @@ import (
 
 	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/bignet/kpro/transport/internal/serveutil"
 	"github.com/saramand9/bignet/kpro/transport/internal/streamutil"
 )
 
@@ -45,8 +46,12 @@ type Config struct {
 
 // Server accepts TCP connections and turns frames into core.Message contexts.
 type Server struct {
-	config Config
-	ln     net.Listener
+	config      Config
+	rawConfig   Config
+	ln          net.Listener
+	lifecycleMu sync.Mutex
+	accepting   bool
+	started     bool
 
 	nextID   uint64
 	active   int64
@@ -55,7 +60,7 @@ type Server struct {
 
 // New creates a TCP transport with normalized defaults.
 func New(config Config) *Server {
-	return &Server{config: normalizeConfig(config)}
+	return &Server{config: normalizeConfig(config), rawConfig: config, accepting: true}
 }
 
 // NewServer is an alias for New.
@@ -70,28 +75,40 @@ func (s *Server) Name() string {
 
 // ListenAndServe accepts TCP connections until ctx is cancelled or the listener fails.
 func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error {
-	ln, err := net.Listen("tcp", s.config.Addr)
-	if err != nil {
+	if err := s.Validate(); err != nil {
 		return err
 	}
-	s.ln = ln
-
-	go func() {
-		<-ctx.Done()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := s.claimStart(); err != nil {
+		return err
+	}
+	ln, err := net.Listen("tcp", s.config.Addr)
+	if err != nil {
+		s.rollbackStart()
+		return err
+	}
+	if !s.publishListener(ln) {
 		_ = ln.Close()
-	}()
+		return core.ErrClosed
+	}
+
+	serveDone := make(chan struct{})
+	watcherDone := serveutil.ShutdownOnCancel(ctx, serveDone, func() {
+		_ = s.Shutdown(context.Background())
+	})
+	defer serveutil.FinishContextWatcher(serveDone, watcherDone)
 
 	for {
 		raw, err := ln.Accept()
 		if err != nil {
-			select {
-			case <-ctx.Done():
+			if ctx.Err() != nil || !s.isAccepting() {
 				return nil
-			default:
-				return err
 			}
+			return err
 		}
-		if s.config.MaxConnections > 0 && atomic.LoadInt64(&s.active) >= int64(s.config.MaxConnections) {
+		if !s.tryAcquireConnectionSlot() {
 			_ = raw.Close()
 			continue
 		}
@@ -103,16 +120,52 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 			sendQueue: make(chan []byte, s.config.SendQueueSize),
 			done:      make(chan struct{}),
 		}
-		atomic.AddInt64(&s.active, 1)
-		s.sessions.Store(id, session)
-		session.start(handler)
+		if !s.registerSession(session, handler) {
+			_ = raw.Close()
+			s.releaseConnectionSlot()
+		}
 	}
+}
+
+func (s *Server) claimStart() error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if !s.accepting {
+		return core.ErrClosed
+	}
+	if s.started {
+		return core.ErrAlreadyStarted
+	}
+	s.started = true
+	return nil
+}
+
+func (s *Server) rollbackStart() {
+	s.lifecycleMu.Lock()
+	if s.accepting && s.ln == nil {
+		s.started = false
+	}
+	s.lifecycleMu.Unlock()
+}
+
+func (s *Server) publishListener(listener net.Listener) bool {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if !s.accepting {
+		return false
+	}
+	s.ln = listener
+	return true
 }
 
 // Shutdown closes the listener and all active TCP sessions.
 func (s *Server) Shutdown(context.Context) error {
-	if s.ln != nil {
-		_ = s.ln.Close()
+	s.lifecycleMu.Lock()
+	s.accepting = false
+	ln := s.ln
+	s.lifecycleMu.Unlock()
+	if ln != nil {
+		_ = ln.Close()
 	}
 	s.sessions.Range(func(_, value interface{}) bool {
 		if session, ok := value.(*session); ok {
@@ -121,6 +174,44 @@ func (s *Server) Shutdown(context.Context) error {
 		return true
 	})
 	return nil
+}
+
+func (s *Server) isAccepting() bool {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	return s.accepting
+}
+
+func (s *Server) registerSession(session *session, handler core.Handler) bool {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if !s.accepting {
+		return false
+	}
+	s.sessions.Store(session.id, session)
+	session.start(handler)
+	return true
+}
+
+func (s *Server) tryAcquireConnectionSlot() bool {
+	limit := int64(s.config.MaxConnections)
+	if limit <= 0 {
+		atomic.AddInt64(&s.active, 1)
+		return true
+	}
+	for {
+		active := atomic.LoadInt64(&s.active)
+		if active >= limit {
+			return false
+		}
+		if atomic.CompareAndSwapInt64(&s.active, active, active+1) {
+			return true
+		}
+	}
+}
+
+func (s *Server) releaseConnectionSlot() {
+	atomic.AddInt64(&s.active, -1)
 }
 
 type session struct {
@@ -149,6 +240,11 @@ func (s *session) Done() <-chan struct{} {
 }
 
 func (s *session) Send(msg core.Message) error {
+	select {
+	case <-s.done:
+		return core.ErrClosed
+	default:
+	}
 	frame, err := s.server.config.Codec.Encode(msg)
 	if err != nil {
 		return err
@@ -169,7 +265,7 @@ func (s *session) Close() error {
 		close(s.done)
 		_ = s.raw.Close()
 		s.server.sessions.Delete(s.id)
-		atomic.AddInt64(&s.server.active, -1)
+		s.server.releaseConnectionSlot()
 	})
 	return nil
 }

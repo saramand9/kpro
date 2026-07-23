@@ -55,15 +55,66 @@ Production rules:
 
 ```text
 service writes event envelope
--> delivery.GORMStore.Append
+-> domain write + delivery.GORMStore.AppendTx in one GORM transaction
 -> event_outbox_events
--> projector.Runner.Fetch(consumer)
--> event_outbox_deliveries status=inflight
+-> projector.Runner.Run
+-> delivery.GORMStore.Fetch(consumer)
+-> event_outbox_deliveries status=inflight with a visibility lease
+-> RenewAttempts once for the unprocessed batch and periodically near lease expiry
 -> projector.Handle
--> Ack / Fail
+-> fenced AckAttempt / FailAttempt
 ```
 
-Projector handlers must be idempotent because delivery can retry. Failed records are scheduled for retry until `MaxAttempts`, then move to `dead`.
+Use `AppendTx` when the domain row and event share a GORM database; the caller
+owns commit or rollback. `Append` remains available for event-only writes.
+Inflight records become fetchable again after `WithLease` expires, so a process
+crash cannot strand them forever. The runner uses attempt-aware settlement when
+the store implements `delivery.AttemptStore`, preventing an expired worker from
+acknowledging or failing a newer attempt. With `delivery.RenewableAttemptStore`,
+the built-in runner renews a record before handling and halfway through each
+remaining lease; renewal loss cancels the handler context and the stale attempt
+is not settled. When the store also implements
+`delivery.BatchRenewableAttemptStore`, one initial renewal protects the current
+record and the still-unprocessed tail from one database-clock sample. Fast
+records reuse that lease window instead of updating an N-item tail N times; a
+long handler renews the remaining tail again near half-life. This prevents a
+slow first handler from letting later records expire without O(N²) write
+amplification. Configure the lease above normal database latency and scheduling
+jitter. Lease decisions use the database server's UTC clock on SQLite, MySQL
+and PostgreSQL, so worker host clock skew cannot cause an early reclaim. Keep
+projector handlers idempotent because delivery is at least once. Failed or
+repeatedly expired records move to `dead` after the configured maximum attempts.
+
+Code that fetches and settles records directly should call `AckAttempt` and
+`FailAttempt` with the attempt returned by `Fetch`. `GORMStore.Ack` and `Fail`
+remain only as first-attempt compatibility methods and deliberately return
+`ErrLeaseLost` after a record has been reclaimed.
+
+Operational tooling can discover optional capabilities without widening the
+base `delivery.Store` interface:
+
+- `BacklogStore.Backlog` returns pending, inflight, failed, and dead counts for
+  one consumer in a single query. Events whose consumer row has not yet been
+  materialized are counted as pending. The query aggregates the narrow
+  consumer delivery index and a separate event count instead of a full-history
+  `LEFT JOIN`.
+- `DeadLetterStore.DeadLetters` returns deterministic dead-letter pages.
+- `DeadLetterStore.ReplayDeadLetter` performs an atomic `dead -> pending`
+  transition only. It preserves the dead attempts/error in audit columns,
+  keeps lease receipts monotonic across replay generations, restarts the
+  per-generation retry budget, and returns `ErrNotDead` for an active lease or
+  a concurrent replay loser.
+- `Runner.Snapshot` and `Runner.Health` expose process-local progress and the
+  latest pass health. `WithRetryPolicy` selects bounded application-specific
+  retry delay; it does not change delivery attempt fencing.
+
+Register `prometheusx.NewBacklogCollector` and
+`prometheusx.NewProjectorCollector` with an application-owned Prometheus
+registry when these values should be scraped. Consumer and projector labels
+are explicit constructor input; event IDs and error text are never metric
+labels. Retention remains an application policy: archive or purge delivered
+history only after every required consumer has crossed the corresponding
+watermark, and measure the backlog query plan at production cardinality.
 
 ## Tests
 
@@ -73,6 +124,16 @@ Default tests do not require external databases:
 go test ./...
 ```
 
+MySQL and PostgreSQL connection, migration-lock, idempotent-migration, and
+transaction-rollback paths run in CI through the opt-in suite:
+
+```sh
+KPRO_REQUIRE_EXTERNAL_DB=1 \
+KPRO_TEST_MYSQL_DSN='...' \
+KPRO_TEST_POSTGRES_DSN='...' \
+go test -tags dbintegration ./database/... ./eventing/delivery
+```
+
 Adapter unit tests use local fakes where possible:
 
 - Redis uses `miniredis`.
@@ -80,4 +141,6 @@ Adapter unit tests use local fakes where possible:
 - ClickHouse uses a fake `database/sql` driver.
 - MongoDB and Neo4j tests validate configuration and construction without requiring a live server.
 
-Real Redis, Elasticsearch, Qdrant, MongoDB, Neo4j, ClickHouse, InfluxDB, MySQL, and Postgres end-to-end tests should be added as opt-in integration suites when those services are part of the deployment topology.
+Real Redis, Elasticsearch, Qdrant, MongoDB, ClickHouse, and InfluxDB end-to-end
+tests should be added as opt-in integration suites when those services are part
+of the deployment topology. Neo4j already has a separate opt-in suite.

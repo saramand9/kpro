@@ -22,7 +22,9 @@ type InvocationHandler func(Invocation) error
 // Middleware wraps an InvocationHandler for cross-cutting behavior.
 type Middleware func(InvocationHandler) InvocationHandler
 
-// Invocation is the protocol-neutral view passed through middleware.
+// Invocation is the protocol-neutral, request-scoped view passed through
+// middleware. Implementations may lazily materialize metadata, so callers must
+// not retain an Invocation after its handler returns.
 //
 // Field examples:
 //   - TCP message 100: Transport=TransportTCP, Operation="message/100",
@@ -43,7 +45,7 @@ type Invocation interface {
 	ConnID() uint64
 	// RemoteAddr is the peer address string when the transport exposes one.
 	RemoteAddr() string
-	// Headers contains protocol headers copied from the incoming call.
+	// Headers returns a stable view of protocol headers for this invocation.
 	Headers() map[string]string
 	// Meta carries protocol-specific attributes such as path, method, or stream flags.
 	Meta() map[string]any
@@ -97,6 +99,7 @@ type BaseInvocation struct {
 	done      <-chan struct{}
 	connDone  <-chan struct{}
 	values    map[string]any
+	cleanup   func()
 }
 
 // NewInvocation builds an invocation and defensively copies metadata maps.
@@ -120,15 +123,15 @@ func NewInvocation(opts InvocationOptions) *BaseInvocation {
 	}
 }
 
-// NewMessageInvocation adapts a message Context into the middleware invocation model.
+// NewMessageInvocation adapts a message Context into the middleware invocation
+// model. Call Release after handling finishes to promptly detach cancellation
+// callbacks. Release is a no-op on the common background-context path.
 func NewMessageInvocation(ctx context.Context, msgCtx Context) *BaseInvocation {
 	msg := msgCtx.Message()
-	var done <-chan struct{}
-	if doneSession, ok := msgCtx.Session().(interface{ Done() <-chan struct{} }); ok {
-		done = doneSession.Done()
-	}
-	return NewInvocation(InvocationOptions{
-		Context:   ctx,
+	done := SessionDone(msgCtx.Session())
+	invocationCtx, cleanup := mergeSessionContext(ctx, done)
+	invocation := NewInvocation(InvocationOptions{
+		Context:   invocationCtx,
 		Transport: msgCtx.Transport(),
 		Operation: MessageOperation(msg.ID),
 		ConnID:    msgCtx.ConnID(),
@@ -139,6 +142,8 @@ func NewMessageInvocation(ctx context.Context, msgCtx Context) *BaseInvocation {
 		Native:    msgCtx,
 		Done:      done,
 	})
+	invocation.cleanup = cleanup
+	return invocation
 }
 
 // MessageOperation returns the stable operation name for a message id.
@@ -155,6 +160,24 @@ func Chain(middlewares ...Middleware) Middleware {
 		return next
 	}
 }
+
+// WithInvocationContext returns a request-scoped invocation view whose Context
+// is ctx while every other operation delegates to invocation. Native adapters
+// propagate this view into their terminal handler context. This is intended for
+// tracing and deadline middleware; callers must not retain the returned view.
+func WithInvocationContext(invocation Invocation, ctx context.Context) Invocation {
+	if invocation == nil || ctx == nil {
+		return invocation
+	}
+	return invocationContext{Invocation: invocation, ctx: ctx}
+}
+
+type invocationContext struct {
+	Invocation
+	ctx context.Context
+}
+
+func (i invocationContext) Context() context.Context { return i.ctx }
 
 // Context returns the request or stream context associated with the invocation.
 func (c *BaseInvocation) Context() context.Context {
@@ -209,6 +232,16 @@ func (c *BaseInvocation) Done() <-chan struct{} {
 // ConnDone returns the cancellation channel associated with the underlying connection.
 func (c *BaseInvocation) ConnDone() <-chan struct{} {
 	return c.connDone
+}
+
+// Release releases cancellation callbacks owned by a message invocation.
+// It is safe to call more than once.
+func (c *BaseInvocation) Release() {
+	cleanup := c.cleanup
+	c.cleanup = nil
+	if cleanup != nil {
+		cleanup()
+	}
 }
 
 // Set stores a middleware-local value, delegating to Native when supported.

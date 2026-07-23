@@ -152,9 +152,7 @@ func (c *Context) CopyBody(status int, contentType string) error {
 	if len(body) == 0 {
 		return nil
 	}
-	copied := make([]byte, len(body))
-	copy(copied, body)
-	_, err = c.w.Write(copied)
+	_, err = c.w.Write(body)
 	return err
 }
 

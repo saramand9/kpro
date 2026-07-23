@@ -29,12 +29,37 @@ allocs/op
 qps
 ```
 
-Latest saved smoke result: [RESULTS.md](RESULTS.md).
+Latest saved benchmark evidence: [RESULTS.md](RESULTS.md).
+
+## CI hot-path budgets
+
+CI runs deterministic in-process Router and HTTP handler benchmarks separately
+from localhost protocol comparisons. Limits live in [budgets.json](budgets.json)
+and cover `ns/op`, `B/op`, and `allocs/op`:
+
+```sh
+go test ./core ./transport/httpx -run '^$' \
+  -bench 'Benchmark(RouterDispatchSync|EndpointServeHTTP)$' \
+  -benchmem -benchtime=250ms -count=1 > benchmark-current.txt
+go run ./cmd/benchguard \
+  -budget benchmark/budgets.json \
+  -input benchmark-current.txt
+```
+
+Latency ceilings are deliberately wider than local results because shared CI
+hardware varies. Allocation and byte budgets are tighter and should only be
+raised with a documented reason. The workflow uploads the raw benchmark output
+so a failed or changed run remains inspectable.
+
+Use repeated runs and `benchstat` when evaluating an optimization; passing the
+budget is a regression guard, not evidence that a change is faster.
 
 Current coverage:
 
 ```text
 BenchmarkTCP_Echo
+BenchmarkKCP_Echo
+BenchmarkQUIC_Echo
 BenchmarkUDP_Echo
 BenchmarkWebSocket_Echo
 BenchmarkHTTP_Echo

@@ -23,6 +23,8 @@ const (
 	TransportHTTP Transport = "http"
 	// TransportHTTPS identifies native HTTPS requests.
 	TransportHTTPS Transport = "https"
+	// TransportHTTP3 identifies native HTTP/3 requests.
+	TransportHTTP3 Transport = "http3"
 	// TransportSSE identifies Server-Sent Events streams.
 	TransportSSE Transport = "sse"
 	// TransportGRPC identifies gRPC unary or stream calls.

@@ -134,6 +134,43 @@ func TestUseWrapsStreamRequest(t *testing.T) {
 	}
 }
 
+type streamTerminalContextKey struct{}
+
+type contextOnlyServerStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (s *contextOnlyServerStream) Context() context.Context {
+	return s.ctx
+}
+
+func TestStreamMiddlewareContextReachesNativeHandler(t *testing.T) {
+	srv := NewServer(":0")
+	srv.Use(func(next core.InvocationHandler) core.InvocationHandler {
+		return func(invocation core.Invocation) error {
+			ctx := context.WithValue(invocation.Context(), streamTerminalContextKey{}, "active")
+			return next(core.WithInvocationContext(invocation, ctx))
+		}
+	})
+
+	interceptor := srv.streamCallInterceptor()
+	err := interceptor(
+		struct{}{},
+		&contextOnlyServerStream{ctx: context.Background()},
+		&grpc.StreamServerInfo{FullMethod: streamEchoFullMethod, IsClientStream: true, IsServerStream: true},
+		func(_ any, stream grpc.ServerStream) error {
+			if got := stream.Context().Value(streamTerminalContextKey{}); got != "active" {
+				t.Fatalf("native stream context value = %v, want active", got)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestUseCanRejectStreamBeforeHandler(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
