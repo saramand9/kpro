@@ -6,6 +6,8 @@ Start with the quickstart and golden path. The remaining guides separate impleme
 
 | Document | Purpose |
 | --- | --- |
+| [Analysis Index](analysis-index.md) | Reopen the repository quickly, find critical code paths, and reuse validation commands. |
+| [Project Map](project-map.md) | Understand package ownership, runtime flow, extension points, and evidence files. |
 | [10-Minute Quick Start](quickstart.md) | Run a checked HTTP example or scaffold a starter with middleware and graceful shutdown. |
 | [Recommended Golden Path](golden-path.md) | Choose a protocol, structure an application, validate startup, own observability/lifecycle, and grow safely. |
 | [Observability Example](../examples/observability/main.go) | Run bounded health and Prometheus endpoints with Zap, OTel wiring, and a custom runner descriptor. |
