@@ -9,22 +9,42 @@ import (
 	"github.com/saramand9/bignet/kpro/core"
 )
 
-// Server is implemented by message transports that dispatch core.Context handlers.
-type Server interface {
-	// Name returns the transport identifier used in diagnostics.
+// Component is the common lifecycle surface shared by message and native
+// transports. Startup remains mode-specific so implementations do not need to
+// erase their handler type behind any.
+type Component interface {
+	// Name returns the component identifier used in diagnostics.
 	Name() string
-	// ListenAndServe starts the transport and dispatches decoded messages to handler.
-	ListenAndServe(context.Context, core.Handler) error
-	// Shutdown stops the transport and releases active sessions.
+	// Shutdown gracefully stops the component.
 	Shutdown(context.Context) error
 }
 
-// Runner is implemented by native protocol endpoints managed by server.Server.
-type Runner interface {
+// MessageServer is implemented by message transports that dispatch
+// core.Context handlers.
+type MessageServer interface {
+	Component
+	// Name returns the transport identifier used in diagnostics.
+	// ListenAndServe starts the transport and dispatches decoded messages to handler.
+	ListenAndServe(context.Context, core.Handler) error
+}
+
+// Server is kept as a source-compatible alias for MessageServer.
+type Server = MessageServer
+
+// NativeRunner is implemented by native protocol endpoints managed by
+// server.Server.
+type NativeRunner interface {
+	Component
 	// Name returns the runner identifier used in diagnostics.
-	Name() string
 	// ListenAndServe starts the native endpoint until the context stops or serving fails.
 	ListenAndServe(context.Context) error
-	// Shutdown gracefully stops the native endpoint.
-	Shutdown(context.Context) error
+}
+
+// Runner is kept as a source-compatible alias for NativeRunner.
+type Runner = NativeRunner
+
+// MiddlewareTarget is the optional capability implemented by transports that
+// accept protocol-neutral invocation middleware.
+type MiddlewareTarget interface {
+	ApplyMiddleware(...core.Middleware)
 }

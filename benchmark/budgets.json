@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "benchmarks": {
+    "BenchmarkRouterDispatchSync/no_middleware": {
+      "max_ns_per_op": 10000,
+      "max_bytes_per_op": 256,
+      "max_allocs_per_op": 3
+    },
+    "BenchmarkRouterDispatchSync/one_middleware": {
+      "max_ns_per_op": 12000,
+      "max_bytes_per_op": 256,
+      "max_allocs_per_op": 3
+    },
+    "BenchmarkRouterDispatchSync/four_middlewares": {
+      "max_ns_per_op": 15000,
+      "max_bytes_per_op": 256,
+      "max_allocs_per_op": 3
+    },
+    "BenchmarkEndpointServeHTTP/direct": {
+      "max_ns_per_op": 2000,
+      "max_bytes_per_op": 160,
+      "max_allocs_per_op": 3
+    },
+    "BenchmarkEndpointServeHTTP/middleware": {
+      "max_ns_per_op": 3000,
+      "max_bytes_per_op": 384,
+      "max_allocs_per_op": 4
+    },
+    "BenchmarkEndpointServeHTTP/middleware_headers_meta": {
+      "max_ns_per_op": 6000,
+      "max_bytes_per_op": 1280,
+      "max_allocs_per_op": 11
+    }
+  }
+}

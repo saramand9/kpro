@@ -1,0 +1,8 @@
+module {{.Module}}
+
+go 1.21
+
+require github.com/saramand9/bignet/kpro v0.0.0
+
+// KPro is pre-release and currently consumed from a local checkout.
+replace github.com/saramand9/bignet/kpro => {{.KProReplace}}

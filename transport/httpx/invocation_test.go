@@ -4,8 +4,10 @@
 package httpx
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/saramand9/bignet/kpro/core"
@@ -60,6 +62,129 @@ func TestEndpointUseWrapsNativeHTTPRoute(t *testing.T) {
 	}
 	if got := resp.Body.String(); got != "body:hello" {
 		t.Fatalf("body = %q", got)
+	}
+}
+
+type httpTerminalContextKey struct{}
+
+func TestEndpointMiddlewareContextReachesNativeHTTPRoute(t *testing.T) {
+	endpoint := New(Config{})
+	endpoint.Use(func(next core.InvocationHandler) core.InvocationHandler {
+		return func(invocation core.Invocation) error {
+			ctx := context.WithValue(invocation.Context(), httpTerminalContextKey{}, "active")
+			return next(core.WithInvocationContext(invocation, ctx))
+		}
+	})
+	endpoint.Get("/context", func(ctx *Context) error {
+		if got := ctx.Context().Value(httpTerminalContextKey{}); got != "active" {
+			t.Fatalf("native request context value = %v, want active", got)
+		}
+		return ctx.Text(http.StatusOK, "ok")
+	})
+
+	resp := executeTestRequest(endpoint, http.MethodGet, "/context", "")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
+	}
+}
+
+func TestHTTPInvocationBuildsHeadersAndMetaLazily(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/lazy?q=kpro", nil)
+	req.Header.Set("X-Test", "value")
+	ctx := &Context{w: httptest.NewRecorder(), r: req}
+	inv := newHTTPInvocation(ctx, core.TransportHTTP, "GET /lazy").(*httpInvocation)
+
+	if inv.headersReady || inv.headers != nil {
+		t.Fatal("headers should not be copied before Headers is called")
+	}
+	if inv.metaReady || inv.meta != nil {
+		t.Fatal("meta should not be built before Meta is called")
+	}
+	if got := inv.Headers()["X-Test"]; got != "value" {
+		t.Fatalf("header = %q, want value", got)
+	}
+	if got := inv.Meta()["query"]; got != "q=kpro" {
+		t.Fatalf("query meta = %v, want q=kpro", got)
+	}
+	if !inv.headersReady || !inv.metaReady {
+		t.Fatal("headers and meta should be cached after first access")
+	}
+}
+
+func TestNewWithTransportUsesTransportName(t *testing.T) {
+	endpoint := NewWithTransport(Config{TLS: true}, core.TransportHTTP3)
+	if got := endpoint.Name(); got != string(core.TransportHTTP3) {
+		t.Fatalf("name = %q, want %q", got, core.TransportHTTP3)
+	}
+	if err := endpoint.ListenAndServe(context.Background()); !errors.Is(err, ErrNativeAdapterRequired) {
+		t.Fatalf("ListenAndServe error = %v, want %v", err, ErrNativeAdapterRequired)
+	}
+	if endpoint := NewWithTransport(Config{TLS: false}, core.TransportHTTPS); !endpoint.config.TLS {
+		t.Fatal("HTTPS transport did not enable TLS serving")
+	}
+	if endpoint := NewWithTransport(Config{TLS: true}, core.TransportHTTP); endpoint.config.TLS {
+		t.Fatal("HTTP transport retained conflicting TLS serving")
+	}
+}
+
+func TestWithConnectionContextExposesAdapterConnectionLifecycle(t *testing.T) {
+	endpoint := New(Config{})
+	done := make(chan struct{})
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/conn", nil)
+	req = req.WithContext(endpoint.WithConnectionContext(req.Context(), "peer:443", done))
+	ctx := &Context{w: httptest.NewRecorder(), r: req}
+	inv := newHTTPInvocation(ctx, core.TransportHTTP3, "GET /conn").(*httpInvocation)
+
+	if inv.ConnID() == 0 {
+		t.Fatal("connection id was not assigned")
+	}
+	if inv.RemoteAddr() != "peer:443" {
+		t.Fatalf("remote = %q, want peer:443", inv.RemoteAddr())
+	}
+	if inv.ConnDone() != done {
+		t.Fatal("connection done signal was not propagated")
+	}
+}
+
+func TestHTTPMiddlewareChainCompiledOncePerRouteSnapshot(t *testing.T) {
+	endpoint := New(Config{})
+	builds := 0
+	endpoint.Use(func(next core.InvocationHandler) core.InvocationHandler {
+		builds++
+		return func(inv core.Invocation) error {
+			return next(inv)
+		}
+	})
+	endpoint.Get("/compiled", func(ctx *Context) error {
+		return ctx.Text(http.StatusOK, "ok")
+	})
+
+	if builds != 0 {
+		t.Fatalf("middleware builds before first request = %d, want 0", builds)
+	}
+	for requestIndex := 0; requestIndex < 3; requestIndex++ {
+		resp := executeTestRequest(endpoint, http.MethodGet, "/compiled", "")
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
+		}
+	}
+	if builds != 1 {
+		t.Fatalf("middleware builds after requests = %d, want 1", builds)
+	}
+
+	endpoint.Get("/second", func(ctx *Context) error {
+		return ctx.Text(http.StatusOK, "second")
+	})
+	_ = executeTestRequest(endpoint, http.MethodGet, "/compiled", "")
+	if builds != 1 {
+		t.Fatalf("existing route middleware rebuilt after adding route: builds = %d, want 1", builds)
+	}
+	resp := executeTestRequest(endpoint, http.MethodGet, "/second", "")
+	if resp.Code != http.StatusOK || resp.Body.String() != "second" {
+		t.Fatalf("second route status/body = %d/%q", resp.Code, resp.Body.String())
+	}
+	if builds != 2 {
+		t.Fatalf("middleware builds for two routes = %d, want 2", builds)
 	}
 }
 

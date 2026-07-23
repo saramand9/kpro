@@ -164,7 +164,9 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		logger.Info("shutdown requested")
-		_ = app.Shutdown(ctx)
+		if err := app.Shutdown(ctx); err != nil {
+			logger.Error("graceful shutdown failed", zap.Error(err))
+		}
 	}()
 
 	logger.Info("app server listening",

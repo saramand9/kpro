@@ -4,6 +4,7 @@
 package udp
 
 import (
+	"context"
 	"errors"
 	"net"
 	"testing"
@@ -12,6 +13,39 @@ import (
 	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
 )
+
+func TestListenAndServeRejectsSecondStartAndStopsWithNilContext(t *testing.T) {
+	server := New(Config{Addr: "127.0.0.1:0"})
+	errCh := make(chan error, 1)
+	go func() { errCh <- server.ListenAndServe(nil, nil) }()
+	deadline := time.Now().Add(time.Second)
+	for {
+		server.mu.Lock()
+		started := server.conn != nil
+		server.mu.Unlock()
+		if started {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("UDP server did not start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := server.ListenAndServe(context.Background(), nil); !errors.Is(err, core.ErrAlreadyStarted) {
+		t.Fatalf("second ListenAndServe() error = %v, want %v", err, core.ErrAlreadyStarted)
+	}
+	if err := server.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("first ListenAndServe() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("UDP server did not stop")
+	}
+}
 
 func TestPacketSessionSendUsesQueueAndWriteLoop(t *testing.T) {
 	serverConn := listenUDPTestConn(t)
@@ -212,13 +246,14 @@ func newUDPTestPacketSession(server *Server, remote string) *packetSession {
 	if err != nil {
 		panic(err)
 	}
-	return &packetSession{
-		id:         sessionID(addr),
-		key:        addr.String(),
-		server:     server,
-		remote:     addr,
-		sendQueue:  make(chan []byte, server.config.SendQueueSize),
-		done:       make(chan struct{}),
-		lastActive: time.Now(),
+	session := &packetSession{
+		id:        sessionID(addr),
+		key:       addr.String(),
+		server:    server,
+		remote:    addr,
+		sendQueue: make(chan []byte, server.config.SendQueueSize),
+		done:      make(chan struct{}),
 	}
+	session.lastActive.Store(server.activityTick(time.Now()))
+	return session
 }

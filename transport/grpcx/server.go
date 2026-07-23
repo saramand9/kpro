@@ -8,12 +8,14 @@ import (
 	"errors"
 	"hash/fnv"
 	"net"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/bignet/kpro/transport/internal/serveutil"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
@@ -36,8 +38,10 @@ type Server struct {
 	connTracker     *connStatsHandler
 	shutdownTimeout time.Duration
 
-	mu sync.Mutex
-	ln net.Listener
+	mu        sync.Mutex
+	ln        net.Listener
+	accepting bool
+	started   bool
 }
 
 // NewServer creates a gRPC server bound to addr when ListenAndServe is called.
@@ -46,6 +50,7 @@ func NewServer(addr string, opts ...Option) *Server {
 		addr:            addr,
 		connTracker:     &connStatsHandler{},
 		shutdownTimeout: DefaultShutdownTimeout,
+		accepting:       true,
 	}
 	s.middlewareValue.Store([]core.Middleware{})
 	for _, opt := range opts {
@@ -67,7 +72,7 @@ func WithServerOptions(opts ...grpc.ServerOption) Option {
 // WithShutdownTimeout overrides the graceful shutdown timeout.
 func WithShutdownTimeout(timeout time.Duration) Option {
 	return func(s *Server) {
-		if timeout > 0 {
+		if timeout != 0 {
 			s.shutdownTimeout = timeout
 		}
 	}
@@ -89,7 +94,7 @@ func (s *Server) Use(middlewares ...core.Middleware) *Server {
 	return s
 }
 
-// ApplyMiddleware implements server.MiddlewareTarget for app-level middleware.
+// ApplyMiddleware implements transport.MiddlewareTarget for app-level middleware.
 func (s *Server) ApplyMiddleware(middlewares ...core.Middleware) {
 	s.mu.Lock()
 	s.middlewares = append(s.middlewares, middlewares...)
@@ -105,41 +110,107 @@ func (s *Server) Serve() error {
 
 // ListenAndServe listens on the configured address and serves until stopped.
 func (s *Server) ListenAndServe(ctx context.Context) error {
-	ln, err := net.Listen("tcp", s.addr)
-	if err != nil {
+	if err := s.Validate(); err != nil {
 		return err
 	}
-	return s.ServeListenerContext(ctx, ln)
+	if err := s.claimStart(); err != nil {
+		return err
+	}
+	ln, err := net.Listen("tcp", s.addr)
+	if err != nil {
+		s.rollbackStart()
+		return err
+	}
+	return s.serveClaimed(ctx, ln)
 }
 
-// ServeListener serves gRPC traffic on an existing listener.
+// ServeListener serves gRPC traffic on an existing listener. Ownership remains
+// with the caller when validation or the one-shot start claim fails; after the
+// claim succeeds, the server owns and closes the listener.
 func (s *Server) ServeListener(ln net.Listener) error {
 	return s.ServeListenerContext(context.Background(), ln)
 }
 
-// ServeListenerContext serves gRPC traffic on an existing listener until ctx stops.
+// ServeListenerContext serves gRPC traffic on an existing listener until ctx
+// stops. Ownership remains with the caller when validation or the one-shot
+// start claim fails; after the claim succeeds, the server owns and closes the
+// listener.
 func (s *Server) ServeListenerContext(ctx context.Context, ln net.Listener) error {
+	if err := s.validateRuntime(); err != nil {
+		return err
+	}
+	if isNilListener(ln) {
+		return errors.New("grpc listener is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := s.claimStart(); err != nil {
+		return err
+	}
+	return s.serveClaimed(ctx, ln)
+}
+
+func (s *Server) serveClaimed(ctx context.Context, ln net.Listener) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	s.mu.Lock()
+	if !s.accepting {
+		s.mu.Unlock()
+		_ = ln.Close()
+		return core.ErrClosed
+	}
 	s.ln = ln
 	s.mu.Unlock()
 
-	if done := ctx.Done(); done != nil {
-		go func() {
-			<-done
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), s.shutdownTimeout)
-			defer cancel()
-			_ = s.Shutdown(shutdownCtx)
-		}()
-	}
+	serveDone := make(chan struct{})
+	watcherDone := serveutil.ShutdownOnCancel(ctx, serveDone, func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), s.shutdownTimeout)
+		defer cancel()
+		_ = s.Shutdown(shutdownCtx)
+	})
+	defer serveutil.FinishContextWatcher(serveDone, watcherDone)
 
 	err := s.grpc.Serve(ln)
 	if errors.Is(err, grpc.ErrServerStopped) {
 		return nil
 	}
 	return err
+}
+
+func (s *Server) claimStart() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.accepting {
+		return core.ErrClosed
+	}
+	if s.started {
+		return core.ErrAlreadyStarted
+	}
+	s.started = true
+	return nil
+}
+
+func (s *Server) rollbackStart() {
+	s.mu.Lock()
+	if s.accepting && s.ln == nil {
+		s.started = false
+	}
+	s.mu.Unlock()
+}
+
+func isNilListener(listener net.Listener) bool {
+	if listener == nil {
+		return true
+	}
+	value := reflect.ValueOf(listener)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 // Addr returns the active listener address after serving starts.
@@ -159,6 +230,7 @@ func (s *Server) GRPCServer() *grpc.Server {
 
 // Shutdown gracefully stops the underlying gRPC server or forces Stop on ctx expiry.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.markNotAccepting()
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -185,12 +257,20 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 // GracefulStop delegates to the underlying gRPC server.
 func (s *Server) GracefulStop() {
+	s.markNotAccepting()
 	s.grpc.GracefulStop()
 }
 
 // Stop immediately stops the underlying gRPC server.
 func (s *Server) Stop() {
+	s.markNotAccepting()
 	s.grpc.Stop()
+}
+
+func (s *Server) markNotAccepting() {
+	s.mu.Lock()
+	s.accepting = false
+	s.mu.Unlock()
 }
 
 // UnaryInvocationNative is exposed through Invocation.Native for unary calls.
@@ -297,9 +377,9 @@ func (s *Server) unaryCallInterceptor() grpc.UnaryServerInterceptor {
 
 		var resp any
 		inv := newUnaryInvocation(ctx, req, info)
-		invHandler := core.Chain(middlewares...)(func(core.Invocation) error {
+		invHandler := core.Chain(middlewares...)(func(invocation core.Invocation) error {
 			var err error
-			resp, err = handler(ctx, req)
+			resp, err = handler(invocation.Context(), req)
 			return err
 		})
 		err := invHandler(inv)
@@ -318,12 +398,13 @@ func (s *Server) streamCallInterceptor() grpc.StreamServerInterceptor {
 			ServerStream: stream,
 		}
 		inv := newStreamInvocation(srv, stream, info)
-		invHandler := core.Chain(middlewares...)(func(ctx core.Invocation) error {
-			if value, ok := ctx.Get(core.PacketLimiterKey); ok {
+		invHandler := core.Chain(middlewares...)(func(invocation core.Invocation) error {
+			if value, ok := invocation.Get(core.PacketLimiterKey); ok {
 				if limiter, ok := value.(core.PacketLimiter); ok {
 					limited.packetLimiter = limiter
 				}
 			}
+			limited.ctx = invocation.Context()
 			return handler(srv, limited)
 		})
 		return invHandler(inv)
@@ -338,6 +419,14 @@ func (s *Server) middlewaresSnapshot() []core.Middleware {
 type middlewareServerStream struct {
 	grpc.ServerStream
 	packetLimiter core.PacketLimiter
+	ctx           context.Context
+}
+
+func (s *middlewareServerStream) Context() context.Context {
+	if s.ctx != nil {
+		return s.ctx
+	}
+	return s.ServerStream.Context()
 }
 
 func (s *middlewareServerStream) RecvMsg(msg any) error {

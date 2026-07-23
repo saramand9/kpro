@@ -1,0 +1,68 @@
+name: Bug report
+description: Report a reproducible KPro defect or unexpected runtime behavior.
+title: "[bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials, certificates, private payloads, or customer data.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Release tag or full reviewed commit hash.
+      placeholder: v0.x.y or commit hash
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Core router or lifecycle
+        - HTTP, HTTP/3, SSE, or gRPC
+        - TCP, UDP, KCP, QUIC, or WebSocket
+        - Eventing or projector
+        - Database adapter or migration
+        - Observability
+        - Documentation or developer tooling
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include the smallest safe code sample, command, and deterministic steps.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include sanitized errors, race output, or profiles when relevant.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: Go version, OS/architecture, protocol, database, deployment shape
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks performed
+      options:
+        - label: I searched existing issues.
+          required: true
+        - label: I removed secrets and private data.
+          required: true

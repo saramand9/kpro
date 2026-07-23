@@ -29,6 +29,38 @@ SSE         implemented
 gRPC        implemented through transport/grpcx and server.GRPC
 ```
 
+Implemented means the code path and repository-level tests exist; it is not a production certification or a capacity/availability guarantee. The repository currently has no release tags and should be treated as pre-1.0 software.
+
+Developer and operational support currently includes checked server
+construction and component preflight validation, transport capability
+descriptors, `cmd/kpro` service scaffolding, optional OTel/Prometheus/Zap/health
+packages, and CI-enforced Router/HTTP microbenchmark budgets. OTel exporters,
+telemetry backends, deployment sizing, and workload-specific validation remain
+application or platform responsibilities.
+
+## Start Here
+
+| Goal | Guide |
+| --- | --- |
+| Run or scaffold a minimal service | [10-Minute Quick Start](docs/quickstart.md) |
+| Add health, Prometheus, Zap, and OTel wiring | [Observability Example](examples/observability/main.go) |
+| Choose protocols and application structure | [Recommended Golden Path](docs/golden-path.md) |
+| Prepare a deployment | [Production Readiness Checklist](docs/production-readiness.md) |
+| Plan failure recovery and capacity | [Operations and Capacity Planning](docs/operations.md) |
+| Understand compatibility expectations | [API Stability, Versioning, and Deprecation](docs/api-stability.md) |
+| Add a transport, middleware, codec, or database adapter | [Extending KPro](docs/extending-kpro.md) |
+
+From this checkout, create a starter service in a missing or empty directory:
+
+```sh
+go run ./cmd/kpro new ../hello-kpro --module example.com/hello-kpro --name hello-kpro
+```
+
+Authentication and authorization are application or gateway integrations and are outside the minimal framework quickstart.
+
+See [CHANGELOG.md](CHANGELOG.md) for repository changes and
+[CONTRIBUTING.md](CONTRIBUTING.md) before proposing a change.
+
 ## Architecture
 
 High-level structure:
@@ -192,7 +224,9 @@ Built-in message IDs:
 
 Application message IDs are user-defined. The examples below use `100` as a local echo message ID.
 
-## App Server Example
+## Multi-Transport API Sketch
+
+Use [the quickstart](docs/quickstart.md) as the application template. The dense sketch below is an API inventory for mounting many protocols; it intentionally omits the full signal, timeout, resource, and deployment setup described by the [golden path](docs/golden-path.md).
 
 ```go
 package main
@@ -218,7 +252,10 @@ import (
 const msgEcho uint32 = 100
 
 func main() {
-	app := server.New(server.Config{Name: "gateway"})
+	app, err := server.NewChecked(server.Config{Name: "gateway"})
+	if err != nil {
+		log.Fatal(err)
+	}
 	metrics := middleware.NewMetrics()
 
 	app.TCP(":8088", tcp.Config{
@@ -333,10 +370,14 @@ Invoke-RestMethod -Uri http://127.0.0.1:8080/echo -Method Post -Body "hello" -Co
 
 ## Examples
 
-Standalone examples live under [examples/](examples/). Each protocol has a server and client:
+Standalone examples live under [examples/](examples/). Start with `examples/quickstart`; each protocol also has a server and client:
 
 ```text
+examples/quickstart
+examples/observability
 examples/tcp/server          examples/tcp/client
+examples/kcp/server          examples/kcp/client
+examples/quic/server         examples/quic/client
 examples/udp/server          examples/udp/client
 examples/websocket/server    examples/websocket/client
 examples/http/server         examples/http/client
@@ -356,8 +397,12 @@ See [examples/README.md](examples/README.md) for startup commands.
 - HTTP/HTTPS keep native method + path routing for REST-style APIs and do not convert requests into `core.Message`.
 - HTTP/3 uses the same path-routing handler model over QUIC/UDP and requires TLS certificates.
 - QUIC uses bidirectional QUIC streams as `core.Session` instances and runs KPro messages directly over them. `quic.Config.MaxStreams` limits active stream sessions; the older `MaxConnections` field is kept as a compatibility alias.
-- `server.Server.Use(...)` installs unified `core.Middleware` for TCP, UDP, WebSocket, HTTP, HTTPS, SSE and gRPC endpoints mounted before or after the call.
-- `core.Middleware` runs on `core.Invocation`; TCP, UDP and WebSocket build the invocation at real handler execution time after Router scheduling.
+- `server.Server.Use(...)` installs unified `core.Middleware` for TCP, KCP, QUIC, UDP, WebSocket, HTTP, HTTPS, HTTP/3, SSE and gRPC endpoints mounted before or after the call.
+- `core.Middleware` runs on `core.Invocation`; TCP, KCP, QUIC, UDP and WebSocket build the invocation at real handler execution time after Router scheduling.
+- `server.NewChecked` validates server configuration, while `ListenAndServe` preflights mounted `transport.Validator` components before serving; `server.New` remains the permissive compatibility constructor.
+- Built-in transports advertise mode and capabilities through `transport.Descriptor`; `transport.Describe` gives tooling a conservative fallback for older custom components.
+- `prometheusx` uses bounded transport/operation/result labels, `zapx` uses an application logger, `healthx` bounds probe responses, and every health check must honor its context.
+- `otelx` instruments invocations with an application-supplied or global provider; the application configures and owns the SDK, sampler, exporter, flush, and shutdown lifecycle.
 - SSE is one-way server push and has its own `sse.Context`; the stream setup can reuse unified `core.Middleware`.
 - gRPC uses native gRPC service and method routing. Unary and stream RPCs reuse unified `core.Middleware` through `server.GRPC` / `grpcx.Server.Use`; they are not converted into `core.Message`.
 - The framework avoids exposing a Netty-style pipeline API. The public model is `Protocol + Middleware + Router + Handler`.
@@ -366,6 +411,7 @@ See [examples/README.md](examples/README.md) for startup commands.
 - More detailed call-flow diagrams are in [docs/call-flow.md](docs/call-flow.md).
 - TCP internal flow guide is in [docs/tcp-internal-flow.md](docs/tcp-internal-flow.md).
 - Network correctness requirements for message-based transports are in [docs/network-test-requirements.md](docs/network-test-requirements.md).
+- The complete documentation index is [docs/README.md](docs/README.md).
 
 ## Test
 
@@ -374,20 +420,25 @@ $env:GOCACHE='C:\tmp\go-build-bignet-kpro'
 gofmt -l .
 go test ./...
 go vet ./...
-
-Push/PR CI also runs:
-
 go test -race ./...
+```
 
+Run the same selected hot-path budget guard used by CI:
+
+```powershell
+go test ./core ./transport/httpx -run '^$' -bench 'Benchmark(RouterDispatchSync|EndpointServeHTTP)$' -benchmem -benchtime=250ms -count=1 > benchmark-current.txt
+go run ./cmd/benchguard -budget benchmark/budgets.json -input benchmark-current.txt
+```
+
+The thresholds in [benchmark/budgets.json](benchmark/budgets.json) are
+regression guards, not service capacity or latency guarantees. CI also tests
+and vets the comparison module:
+
+```powershell
 cd .\benchmark\compare
 go test ./...
 go vet ./...
 ```
-
-
-
-
-
 
 
 

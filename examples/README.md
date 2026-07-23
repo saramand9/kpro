@@ -2,11 +2,64 @@
 
 Each protocol example has a standalone server and client. Start the server in one terminal, then run the matching client in another terminal.
 
+## Recommended Quickstart
+
+For a first application, run the production-shaped HTTP example with explicit limits, middleware, signal handling, and graceful shutdown:
+
+```powershell
+go run .\examples\quickstart -addr :8080
+```
+
+Then follow the requests and code walkthrough in [the 10-minute guide](../docs/quickstart.md). Authentication and authorization are application integrations and intentionally not part of this minimal example.
+
+Create a separate starter service in a missing or empty directory with:
+
+```powershell
+go run .\cmd\kpro new ..\hello-kpro --module example.com/hello-kpro --name hello-kpro
+```
+
+## Observability and Health
+
+This example keeps application traffic on `:8080` and standard-library health
+and Prometheus handlers on an independently bounded admin listener at `:9090`:
+
+```powershell
+go run .\examples\observability -api-addr :8080 -admin-addr :9090
+Invoke-RestMethod http://127.0.0.1:8080/hello
+Invoke-RestMethod http://127.0.0.1:9090/livez
+Invoke-RestMethod http://127.0.0.1:9090/readyz
+Invoke-WebRequest http://127.0.0.1:9090/metrics
+```
+
+It wires `healthx`, `prometheusx`, `zapx`, `otelx`, checked server
+configuration, and a custom runner descriptor/validator. The OTel middleware
+uses the global provider in this runnable example; no exporter is installed. A
+real application must configure and own its SDK/exporter lifecycle. Every
+health check must honor the context supplied by `healthx`. The admin listener's
+production exposure, TLS, and access policy are application/platform concerns.
+
 ## TCP
 
 ```powershell
 go run .\examples\tcp\server -addr :8088
 go run .\examples\tcp\client -addr 127.0.0.1:8088 -text "hello tcp"
+```
+
+## KCP
+
+```powershell
+go run .\examples\kcp\server -addr :8090
+go run .\examples\kcp\client -addr 127.0.0.1:8090 -text "hello kcp"
+```
+
+## QUIC message streams
+
+The server creates an in-memory self-signed localhost certificate. The client
+skips verification only for this local example.
+
+```powershell
+go run .\examples\quic\server -addr :8444
+go run .\examples\quic\client -addr 127.0.0.1:8444 -text "hello quic"
 ```
 
 ## UDP
@@ -75,7 +128,8 @@ go run .\examples\grpc\client -addr 127.0.0.1:9090 -name "hello grpc"
 
 ## Modular Route Examples
 
-These demos keep startup code, route assembly, and feature modules separate. Each protocol has its own standalone modular server.
+These demos keep startup code, route assembly, and feature modules separate.
+Modular variants are provided for the protocols listed below.
 Message-protocol modular examples use `HandleSync` by default; use `HandleAsync` for routes that can run concurrently and return out of order.
 
 ### HTTP Modular
@@ -155,4 +209,3 @@ go run .\examples\https\client -base https://127.0.0.1:8443 -text "hello modular
 ```powershell
 go test .\examples\...
 ```
-

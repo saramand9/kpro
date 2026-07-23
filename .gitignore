@@ -20,6 +20,7 @@ build/
 *.out
 coverage.out
 coverage.html
+/benchmark-current.txt
 
 # Local runtime output
 logs/

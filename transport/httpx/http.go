@@ -7,17 +7,39 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
 
 	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/bignet/kpro/transport/internal/serveutil"
 )
 
 // Handler processes one native HTTP request.
 type Handler func(*Context) error
+
+// ErrBodyTooLarge identifies HTTP request bodies rejected by a configured limit.
+var ErrBodyTooLarge = errors.New("http request body too large")
+
+// ErrNativeAdapterRequired means an endpoint tagged as a non-TCP HTTP
+// transport must be served by its native adapter instead of ListenAndServe.
+var ErrNativeAdapterRequired = errors.New("native HTTP adapter required")
+
+// BodyTooLargeError reports the observed and configured request body sizes.
+type BodyTooLargeError struct {
+	Size  int
+	Limit int
+}
+
+func (e *BodyTooLargeError) Error() string {
+	return fmt.Sprintf("payload too large: %d > %d", e.Size, e.Limit)
+}
+
+// Unwrap lets callers classify the error with errors.Is.
+func (e *BodyTooLargeError) Unwrap() error {
+	return ErrBodyTooLarge
+}
 
 type compiledRoutes map[string]map[string]Handler
 
@@ -26,7 +48,8 @@ type connContextKey struct{}
 type connState struct {
 	id        uint64
 	remote    string
-	done      chan struct{}
+	done      <-chan struct{}
+	ownedDone chan struct{}
 	closeOnce sync.Once
 }
 
@@ -42,16 +65,22 @@ func (s *connState) close() {
 		return
 	}
 	s.closeOnce.Do(func() {
-		close(s.done)
+		if s.ownedDone != nil {
+			close(s.ownedDone)
+		}
 	})
 }
 
 // Endpoint routes native HTTP requests and exposes them to middleware as invocations.
 type Endpoint struct {
-	config Config
-	server *http.Server
+	config    Config
+	rawConfig Config
+	transport core.Transport
+	server    *http.Server
 
 	mu          sync.RWMutex
+	accepting   bool
+	started     bool
 	routes      map[string]map[string]Handler
 	middlewares []core.Middleware
 	compiled    atomic.Value
@@ -63,22 +92,54 @@ type Endpoint struct {
 
 // New creates an HTTP endpoint with normalized defaults.
 func New(config Config) *Endpoint {
+	transport := core.TransportHTTP
+	if config.TLS {
+		transport = core.TransportHTTPS
+	}
+	return NewWithTransport(config, transport)
+}
+
+// NewWithTransport creates an HTTP handler endpoint whose middleware
+// invocations use transport. It is intended for native adapters such as
+// HTTP/3; non-HTTP/HTTPS transports must be served by that adapter and cannot
+// call this endpoint's ListenAndServe directly.
+func NewWithTransport(config Config, transport core.Transport) *Endpoint {
+	rawConfig := config
 	config = normalizeConfig(config)
+	if transport == "" {
+		transport = core.TransportHTTP
+		if config.TLS {
+			transport = core.TransportHTTPS
+		}
+	}
+	switch transport {
+	case core.TransportHTTP:
+		config.TLS = false
+	case core.TransportHTTPS:
+		config.TLS = true
+	}
 	e := &Endpoint{
-		config: config,
-		routes: make(map[string]map[string]Handler),
-		conns:  make(map[net.Conn]*connState),
+		config:    config,
+		rawConfig: rawConfig,
+		transport: transport,
+		accepting: true,
+		routes:    make(map[string]map[string]Handler),
+		conns:     make(map[net.Conn]*connState),
 	}
 	e.compiled.Store(compiledRoutes{})
 	return e
 }
 
-// Name returns http or https according to the endpoint configuration.
+// Name returns the native HTTP transport used by the endpoint.
 func (e *Endpoint) Name() string {
-	if e.config.TLS {
-		return "https"
+	switch e.transport {
+	case core.TransportHTTP, core.TransportHTTPS, core.TransportHTTP3:
+		return string(e.transport)
 	}
-	return "http"
+	if e.config.TLS {
+		return string(core.TransportHTTPS)
+	}
+	return string(core.TransportHTTP)
 }
 
 // Use installs middleware on all registered HTTP routes and returns the endpoint.
@@ -87,8 +148,11 @@ func (e *Endpoint) Use(middlewares ...core.Middleware) *Endpoint {
 	return e
 }
 
-// ApplyMiddleware implements server.MiddlewareTarget for app-level middleware.
+// ApplyMiddleware implements transport.MiddlewareTarget for app-level middleware.
 func (e *Endpoint) ApplyMiddleware(middlewares ...core.Middleware) {
+	if len(middlewares) == 0 {
+		return
+	}
 	e.mu.Lock()
 	e.middlewares = append(e.middlewares, middlewares...)
 	e.rebuildCompiledLocked()
@@ -122,24 +186,43 @@ func (e *Endpoint) Handle(method, path string, h Handler) *Endpoint {
 		e.routes[path] = make(map[string]Handler)
 	}
 	e.routes[path][method] = h
-	e.rebuildCompiledLocked()
+	e.updateCompiledRouteLocked(method, path, h)
 	e.mu.Unlock()
 	return e
 }
 
 // ListenAndServe starts the HTTP server until ctx is cancelled or serving fails.
 func (e *Endpoint) ListenAndServe(ctx context.Context) error {
+	if err := e.Validate(); err != nil {
+		return err
+	}
+	if e.transport != core.TransportHTTP && e.transport != core.TransportHTTPS {
+		return fmt.Errorf("%w: %s", ErrNativeAdapterRequired, e.transport)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	server := e.buildServer()
 	e.mu.Lock()
+	if !e.accepting {
+		e.mu.Unlock()
+		return core.ErrClosed
+	}
+	if e.started {
+		e.mu.Unlock()
+		return core.ErrAlreadyStarted
+	}
+	e.started = true
 	e.server = server
 	e.mu.Unlock()
 
-	go func() {
-		<-ctx.Done()
+	serveDone := make(chan struct{})
+	watcherDone := serveutil.ShutdownOnCancel(ctx, serveDone, func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), e.config.ShutdownTimeout)
 		defer cancel()
 		_ = e.Shutdown(shutdownCtx)
-	}()
+	})
+	defer serveutil.FinishContextWatcher(serveDone, watcherDone)
 	if e.config.TLS {
 		return ignoreServerClosed(server.ListenAndServeTLS(e.config.CertFile, e.config.KeyFile))
 	}
@@ -148,9 +231,13 @@ func (e *Endpoint) ListenAndServe(ctx context.Context) error {
 
 // Shutdown gracefully stops the HTTP server.
 func (e *Endpoint) Shutdown(ctx context.Context) error {
-	e.mu.RLock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	e.mu.Lock()
+	e.accepting = false
 	server := e.server
-	e.mu.RUnlock()
+	e.mu.Unlock()
 	if server == nil {
 		return nil
 	}
@@ -171,14 +258,34 @@ func (e *Endpoint) buildServer() *http.Server {
 }
 
 func (e *Endpoint) connContext(ctx context.Context, conn net.Conn) context.Context {
+	done := make(chan struct{})
 	state := &connState{
-		id:     atomic.AddUint64(&e.nextConnID, 1),
-		remote: remoteFromConn(conn),
-		done:   make(chan struct{}),
+		id:        atomic.AddUint64(&e.nextConnID, 1),
+		remote:    remoteFromConn(conn),
+		done:      done,
+		ownedDone: done,
 	}
 	e.connMu.Lock()
 	e.conns[conn] = state
 	e.connMu.Unlock()
+	return context.WithValue(ctx, connContextKey{}, state)
+}
+
+// WithConnectionContext attaches connection identity and lifetime to a request
+// context for native HTTP adapters such as HTTP/3.
+func (e *Endpoint) WithConnectionContext(
+	ctx context.Context,
+	remote string,
+	done <-chan struct{},
+) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	state := &connState{
+		id:     atomic.AddUint64(&e.nextConnID, 1),
+		remote: remote,
+		done:   done,
+	}
 	return context.WithValue(ctx, connContextKey{}, state)
 }
 
@@ -226,24 +333,21 @@ func (e *Endpoint) serve(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("method not allowed"))
 		return
 	}
-	e.serveHandler(h)(w, r)
-}
-
-func (e *Endpoint) serveHandler(h Handler) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := &Context{w: w, r: r, maxBody: e.config.MaxBodyBytes}
-		if err := h(ctx); err != nil {
-			if ctx.wroteHeader {
-				return
-			}
-			status := httpStatusForError(err)
-			w.WriteHeader(status)
-			_, _ = w.Write([]byte(err.Error()))
+	ctx := &Context{w: w, r: r, maxBody: e.config.MaxBodyBytes}
+	if err := h(ctx); err != nil {
+		if ctx.wroteHeader {
+			return
 		}
+		status := httpStatusForError(err)
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(err.Error()))
 	}
 }
 
 func httpStatusForError(err error) int {
+	if errors.Is(err, ErrBodyTooLarge) {
+		return http.StatusRequestEntityTooLarge
+	}
 	var maxBytesErr *http.MaxBytesError
 	if errors.As(err, &maxBytesErr) {
 		return http.StatusRequestEntityTooLarge
@@ -275,26 +379,48 @@ func (e *Endpoint) rebuildCompiledLocked() {
 	e.compiled.Store(routes)
 }
 
+func (e *Endpoint) updateCompiledRouteLocked(method, path string, h Handler) {
+	current, _ := e.compiled.Load().(compiledRoutes)
+	routes := make(compiledRoutes, len(current)+1)
+	for currentPath, methods := range current {
+		routes[currentPath] = methods
+	}
+	currentMethods := current[path]
+	methods := make(map[string]Handler, len(currentMethods)+1)
+	for currentMethod, handler := range currentMethods {
+		methods[currentMethod] = handler
+	}
+	methods[method] = e.wrapRoute(method, path, h)
+	routes[path] = methods
+	e.compiled.Store(routes)
+}
+
 func (e *Endpoint) wrapRoute(method, path string, h Handler) Handler {
-	if len(e.middlewares) == 0 {
+	if h == nil || len(e.middlewares) == 0 {
 		return h
 	}
 	operation := httpOperation(method, path)
 	middlewares := append([]core.Middleware(nil), e.middlewares...)
+	var once sync.Once
+	var handler core.InvocationHandler
 	return func(ctx *Context) error {
-		inv := newHTTPInvocation(ctx, e.config.TLS, operation, NewBodyPayload(ctx))
-		handler := core.Chain(middlewares...)(func(core.Invocation) error {
-			return h(ctx)
+		once.Do(func() {
+			handler = core.Chain(middlewares...)(func(inv core.Invocation) error {
+				native := inv.Native().(*Context)
+				// The common middleware path forwards the original lazy HTTP
+				// invocation. Avoid cloning http.Request unless middleware has
+				// actually replaced the invocation view (for example tracing).
+				if _, unchanged := inv.(*httpInvocation); !unchanged {
+					native.r = native.r.WithContext(inv.Context())
+				}
+				return h(native)
+			})
 		})
-		return handler(inv)
+		return handler(newHTTPInvocation(ctx, e.transport, operation))
 	}
 }
 
-func newHTTPInvocation(ctx *Context, tls bool, operation string, payload any) core.Invocation {
-	transport := core.TransportHTTP
-	if tls {
-		transport = core.TransportHTTPS
-	}
+func newHTTPInvocation(ctx *Context, transport core.Transport, operation string) core.Invocation {
 	remote := ""
 	connID := sessionIDFromRemote(ctx.r.RemoteAddr)
 	var connDone <-chan struct{}
@@ -302,30 +428,129 @@ func newHTTPInvocation(ctx *Context, tls bool, operation string, payload any) co
 		connID = state.id
 		remote = state.remote
 		connDone = state.Done()
-	} else if addr := parseRemoteAddr(ctx.r.RemoteAddr); addr != nil {
-		remote = addr.String()
+	} else {
+		remote = ctx.r.RemoteAddr
 	}
-	return core.NewInvocation(core.InvocationOptions{
-		Context:   ctx.r.Context(),
-		Transport: transport,
-		Operation: operation,
-		ConnID:    connID,
-		Remote:    remote,
-		Headers:   httpHeaders(ctx.r),
-		Meta:      httpMeta(ctx.r),
-		Payload:   payload,
-		Native:    ctx,
-		Done:      ctx.r.Context().Done(),
-		ConnDone:  connDone,
-	})
+	path := ""
+	query := ""
+	hasURL := ctx.r.URL != nil
+	if ctx.r.URL != nil {
+		path = ctx.r.URL.Path
+		query = ctx.r.URL.RawQuery
+	}
+	inv := &httpInvocation{
+		ctx:       ctx,
+		transport: transport,
+		operation: operation,
+		connID:    connID,
+		remote:    remote,
+		connDone:  connDone,
+		host:      ctx.r.Host,
+		method:    ctx.r.Method,
+		path:      path,
+		query:     query,
+		hasURL:    hasURL,
+	}
+	inv.payload.ctx = ctx
+	return inv
 }
 
-func httpHeaders(r *http.Request) map[string]string {
-	headers := make(map[string]string, len(r.Header)+1)
-	if r.Host != "" {
-		headers["Host"] = r.Host
+type httpInvocation struct {
+	ctx       *Context
+	transport core.Transport
+	operation string
+	connID    uint64
+	remote    string
+	connDone  <-chan struct{}
+	host      string
+	method    string
+	path      string
+	query     string
+	hasURL    bool
+	payload   BodyPayload
+
+	headersReady bool
+	headers      map[string]string
+	metaReady    bool
+	meta         map[string]any
+	values       map[string]any
+}
+
+var _ core.Invocation = (*httpInvocation)(nil)
+
+func (i *httpInvocation) Context() context.Context {
+	return i.ctx.Context()
+}
+
+func (i *httpInvocation) Transport() core.Transport {
+	return i.transport
+}
+
+func (i *httpInvocation) Operation() string {
+	return i.operation
+}
+
+func (i *httpInvocation) ConnID() uint64 {
+	return i.connID
+}
+
+func (i *httpInvocation) RemoteAddr() string {
+	return i.remote
+}
+
+func (i *httpInvocation) Headers() map[string]string {
+	if !i.headersReady {
+		i.headers = httpHeaders(i.host, i.ctx.r.Header)
+		i.headersReady = true
 	}
-	for key, values := range r.Header {
+	return i.headers
+}
+
+func (i *httpInvocation) Meta() map[string]any {
+	if !i.metaReady {
+		i.meta = httpMeta(i.method, i.host, i.path, i.query, i.hasURL)
+		i.metaReady = true
+	}
+	return i.meta
+}
+
+func (i *httpInvocation) Payload() any {
+	return &i.payload
+}
+
+func (i *httpInvocation) Native() any {
+	return i.ctx
+}
+
+func (i *httpInvocation) Done() <-chan struct{} {
+	return i.ctx.Context().Done()
+}
+
+func (i *httpInvocation) ConnDone() <-chan struct{} {
+	return i.connDone
+}
+
+func (i *httpInvocation) Set(key string, value any) {
+	if i.values == nil {
+		i.values = make(map[string]any)
+	}
+	i.values[key] = value
+}
+
+func (i *httpInvocation) Get(key string) (any, bool) {
+	value, ok := i.values[key]
+	return value, ok
+}
+
+func httpHeaders(host string, source http.Header) map[string]string {
+	if host == "" && len(source) == 0 {
+		return nil
+	}
+	headers := make(map[string]string, len(source)+1)
+	if host != "" {
+		headers["Host"] = host
+	}
+	for key, values := range source {
 		if len(values) > 0 {
 			headers[key] = values[0]
 		}
@@ -336,14 +561,14 @@ func httpHeaders(r *http.Request) map[string]string {
 	return headers
 }
 
-func httpMeta(r *http.Request) map[string]any {
+func httpMeta(method, host, path, query string, hasURL bool) map[string]any {
 	meta := map[string]any{
-		"method": r.Method,
-		"host":   r.Host,
+		"method": method,
+		"host":   host,
 	}
-	if r.URL != nil {
-		meta["path"] = r.URL.Path
-		meta["query"] = r.URL.RawQuery
+	if hasURL {
+		meta["path"] = path
+		meta["query"] = query
 	}
 	return meta
 }
@@ -352,34 +577,21 @@ func sessionIDFromRemote(remote string) uint64 {
 	if remote == "" {
 		return 1
 	}
-	hash := fnv.New64a()
-	_, _ = hash.Write([]byte(remote))
-	id := hash.Sum64()
+	const (
+		fnvOffset64 = 14695981039346656037
+		fnvPrime64  = 1099511628211
+	)
+	id := uint64(fnvOffset64)
+	for index := 0; index < len(remote); index++ {
+		id ^= uint64(remote[index])
+		id *= fnvPrime64
+	}
 	if id == 0 {
 		return 1
 	}
 	return id
 }
 
-func parseRemoteAddr(remote string) net.Addr {
-	if remote == "" {
-		return stringAddr("")
-	}
-	if addr, err := net.ResolveTCPAddr("tcp", remote); err == nil {
-		return addr
-	}
-	return stringAddr(remote)
-}
-
-type stringAddr string
-
-func (a stringAddr) Network() string {
-	return "tcp"
-}
-
-func (a stringAddr) String() string {
-	return string(a)
-}
 func httpOperation(method, path string) string {
 	if path == "" {
 		path = "/"
@@ -427,7 +639,7 @@ func (p *BodyPayload) LimitPayload(size int) error {
 		return nil
 	}
 	if payloadSize, ok := p.PayloadSize(); ok && payloadSize > size {
-		return fmt.Errorf("payload too large: %d > %d", payloadSize, size)
+		return &BodyTooLargeError{Size: payloadSize, Limit: size}
 	}
 	if p.ctx.bodyRead || p.ctx.r.Body == nil {
 		return nil

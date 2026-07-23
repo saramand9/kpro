@@ -12,16 +12,24 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/bignet/kpro/transport/internal/serveutil"
 )
 
 const (
-	DefaultAddr            = ":8081"
-	DefaultPath            = "/events"
-	DefaultShutdownTimeout = 5 * time.Second
+	DefaultAddr             = ":8081"
+	DefaultPath             = "/events"
+	DefaultMaxStreams       = 10000
+	DefaultHandshakeTimeout = 5 * time.Second
+	DefaultIdleTimeout      = 60 * time.Second
+	DefaultShutdownTimeout  = 5 * time.Second
 )
+
+// ErrTooManyStreams reports an SSE request rejected by the active stream cap.
+var ErrTooManyStreams = errors.New("sse stream limit reached")
 
 // Config controls SSE listener, path, TLS, and shutdown settings.
 type Config struct {
@@ -37,6 +45,12 @@ type Config struct {
 	KeyFile string
 	// WriteTimeout is passed to net/http.Server.
 	WriteTimeout time.Duration
+	// MaxStreams caps active SSE handlers across all HTTP connections.
+	MaxStreams int
+	// HandshakeTimeout bounds reading HTTP request headers.
+	HandshakeTimeout time.Duration
+	// IdleTimeout bounds idle keep-alive connections between requests.
+	IdleTimeout time.Duration
 	// ShutdownTimeout bounds graceful shutdown after the parent context is cancelled.
 	ShutdownTimeout time.Duration
 }
@@ -71,21 +85,35 @@ func (s *connState) close() {
 
 // Endpoint serves one SSE stream route and wraps it with middleware.
 type Endpoint struct {
-	config Config
-	server *http.Server
+	config         Config
+	rawConfig      Config
+	server         *http.Server
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
 
 	mu          sync.RWMutex
+	accepting   bool
+	started     bool
 	handler     Handler
 	middlewares []core.Middleware
 
 	connMu     sync.Mutex
 	conns      map[net.Conn]*connState
 	nextConnID uint64
+	active     int64
 }
 
 // New creates an SSE endpoint with normalized defaults.
 func New(config Config) *Endpoint {
-	return &Endpoint{config: normalizeConfig(config), conns: make(map[net.Conn]*connState)}
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
+	return &Endpoint{
+		config:         normalizeConfig(config),
+		rawConfig:      config,
+		shutdownCtx:    shutdownCtx,
+		shutdownCancel: shutdownCancel,
+		accepting:      true,
+		conns:          make(map[net.Conn]*connState),
+	}
 }
 
 // Name returns the transport name.
@@ -99,7 +127,7 @@ func (e *Endpoint) Use(middlewares ...core.Middleware) *Endpoint {
 	return e
 }
 
-// ApplyMiddleware implements server.MiddlewareTarget for app-level middleware.
+// ApplyMiddleware implements transport.MiddlewareTarget for app-level middleware.
 func (e *Endpoint) ApplyMiddleware(middlewares ...core.Middleware) {
 	e.mu.Lock()
 	e.middlewares = append(e.middlewares, middlewares...)
@@ -115,24 +143,36 @@ func (e *Endpoint) Handle(h Handler) *Endpoint {
 }
 
 // ListenAndServe starts the SSE HTTP server until ctx is cancelled or serving fails.
-func (e *Endpoint) ListenAndServe(ctx context.Context) error {
-	mux := http.NewServeMux()
-	mux.HandleFunc(e.config.Path, e.serve)
-	server := &http.Server{
-		Addr:         e.config.Addr,
-		Handler:      mux,
-		WriteTimeout: e.config.WriteTimeout,
-		ConnContext:  e.connContext,
-		ConnState:    e.trackConnState,
+func (e *Endpoint) ListenAndServe(ctx context.Context) (serveErr error) {
+	if err := e.Validate(); err != nil {
+		return err
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	server := e.buildHTTPServer()
 	e.mu.Lock()
+	if !e.accepting {
+		e.mu.Unlock()
+		return core.ErrClosed
+	}
+	if e.started {
+		e.mu.Unlock()
+		return core.ErrAlreadyStarted
+	}
+	e.started = true
 	e.server = server
 	e.mu.Unlock()
-	go func() {
-		<-ctx.Done()
+	serveDone := make(chan struct{})
+	var shutdownErr error
+	watcherDone := serveutil.ShutdownOnCancel(ctx, serveDone, func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), e.config.ShutdownTimeout)
 		defer cancel()
-		_ = e.Shutdown(shutdownCtx)
+		shutdownErr = e.Shutdown(shutdownCtx)
+	})
+	defer func() {
+		serveutil.FinishContextWatcher(serveDone, watcherDone)
+		serveErr = errors.Join(serveErr, shutdownErr)
 	}()
 	if e.config.TLS {
 		return ignoreServerClosed(server.ListenAndServeTLS(e.config.CertFile, e.config.KeyFile))
@@ -140,11 +180,33 @@ func (e *Endpoint) ListenAndServe(ctx context.Context) error {
 	return ignoreServerClosed(server.ListenAndServe())
 }
 
+func (e *Endpoint) buildHTTPServer() *http.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc(e.config.Path, e.serve)
+	return &http.Server{
+		Addr:              e.config.Addr,
+		Handler:           mux,
+		ReadHeaderTimeout: e.config.HandshakeTimeout,
+		WriteTimeout:      e.config.WriteTimeout,
+		IdleTimeout:       e.config.IdleTimeout,
+		ConnContext:       e.connContext,
+		ConnState:         e.trackConnState,
+		BaseContext: func(net.Listener) context.Context {
+			return e.shutdownCtx
+		},
+	}
+}
+
 // Shutdown gracefully stops the SSE HTTP server.
 func (e *Endpoint) Shutdown(ctx context.Context) error {
-	e.mu.RLock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	e.shutdownCancel()
+	e.mu.Lock()
+	e.accepting = false
 	server := e.server
-	e.mu.RUnlock()
+	e.mu.Unlock()
 	if server == nil {
 		return nil
 	}
@@ -172,7 +234,9 @@ func (e *Endpoint) trackConnState(conn net.Conn, state http.ConnState) {
 	tracked := e.conns[conn]
 	delete(e.conns, conn)
 	e.connMu.Unlock()
-	tracked.close()
+	if tracked != nil {
+		tracked.close()
+	}
 }
 
 func sseConnStateFromContext(ctx context.Context) *connState {
@@ -197,6 +261,11 @@ func (e *Endpoint) serve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
+	if !e.tryAcquireStreamSlot() {
+		http.Error(w, ErrTooManyStreams.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	defer e.releaseStreamSlot()
 	streamCtx := &Context{
 		ResponseWriter: w,
 		Request:        r,
@@ -230,7 +299,12 @@ func (e *Endpoint) serve(w http.ResponseWriter, r *http.Request) {
 		err = run()
 	} else {
 		inv := newSSEInvocation(r, e.config.TLS, streamCtx)
-		handler := core.Chain(middlewares...)(func(core.Invocation) error {
+		handler := core.Chain(middlewares...)(func(invocation core.Invocation) error {
+			// BaseInvocation carries the request's original context. Clone the
+			// request only when middleware supplied a replacement invocation view.
+			if _, unchanged := invocation.(*core.BaseInvocation); !unchanged {
+				streamCtx.Request = streamCtx.Request.WithContext(invocation.Context())
+			}
 			return run()
 		})
 		err = handler(inv)
@@ -243,6 +317,27 @@ func (e *Endpoint) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Error(w, err.Error(), http.StatusInternalServerError)
+}
+
+func (e *Endpoint) tryAcquireStreamSlot() bool {
+	limit := int64(e.config.MaxStreams)
+	if limit <= 0 {
+		atomic.AddInt64(&e.active, 1)
+		return true
+	}
+	for {
+		active := atomic.LoadInt64(&e.active)
+		if active >= limit {
+			return false
+		}
+		if atomic.CompareAndSwapInt64(&e.active, active, active+1) {
+			return true
+		}
+	}
+}
+
+func (e *Endpoint) releaseStreamSlot() {
+	atomic.AddInt64(&e.active, -1)
 }
 
 func (e *Endpoint) snapshot() (Handler, []core.Middleware) {
@@ -426,6 +521,15 @@ func normalizeConfig(config Config) Config {
 	}
 	if config.Path == "" {
 		config.Path = DefaultPath
+	}
+	if config.MaxStreams <= 0 {
+		config.MaxStreams = DefaultMaxStreams
+	}
+	if config.HandshakeTimeout <= 0 {
+		config.HandshakeTimeout = DefaultHandshakeTimeout
+	}
+	if config.IdleTimeout <= 0 {
+		config.IdleTimeout = DefaultIdleTimeout
 	}
 	if config.ShutdownTimeout <= 0 {
 		config.ShutdownTimeout = DefaultShutdownTimeout
