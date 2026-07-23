@@ -1,0 +1,30 @@
+package websocket
+
+import (
+	"errors"
+
+	transportapi "github.com/saramand9/bignet/kpro/transport"
+	"github.com/saramand9/bignet/kpro/transport/internal/configcheck"
+)
+
+var _ transportapi.Validator = (*Server)(nil)
+
+// Validate checks WebSocket routing invariants before serving.
+func (s *Server) Validate() error {
+	if s == nil {
+		return errors.New("websocket server is nil")
+	}
+	validationErr := errors.Join(
+		s.Descriptor().Validate(),
+		configcheck.ListenAddress("WebSocket listen address", s.config.Addr),
+		configcheck.TypedNil("Codec", s.rawConfig.Codec),
+		configcheck.NonNegativeInt("MaxMessage", s.rawConfig.MaxMessage),
+		configcheck.NonNegativeInt("MaxConnections", s.rawConfig.MaxConnections),
+		configcheck.NonNegativeInt("SendQueueSize", s.rawConfig.SendQueueSize),
+		configcheck.NonNegativeDuration("ReadTimeout", s.rawConfig.ReadTimeout),
+		configcheck.NonNegativeDuration("WriteTimeout", s.rawConfig.WriteTimeout),
+		configcheck.NonNegativeDuration("HandshakeTimeout", s.rawConfig.HandshakeTimeout),
+	)
+	validationErr = errors.Join(validationErr, configcheck.HTTPPath("WebSocket path", s.config.Path))
+	return validationErr
+}

@@ -4,6 +4,7 @@
 package sse
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -61,6 +62,30 @@ func TestEndpointUseWrapsStream(t *testing.T) {
 	}
 	if body := recorder.Body.String(); !strings.Contains(body, "event: message") || !strings.Contains(body, "data: ok") {
 		t.Fatalf("body = %q", body)
+	}
+}
+
+type sseTerminalContextKey struct{}
+
+func TestEndpointMiddlewareContextReachesNativeSSEHandler(t *testing.T) {
+	endpoint := New(Config{Path: "/events"})
+	endpoint.Use(func(next core.InvocationHandler) core.InvocationHandler {
+		return func(invocation core.Invocation) error {
+			ctx := context.WithValue(invocation.Context(), sseTerminalContextKey{}, "active")
+			return next(core.WithInvocationContext(invocation, ctx))
+		}
+	})
+	endpoint.Handle(func(ctx *Context) error {
+		if got := ctx.Request.Context().Value(sseTerminalContextKey{}); got != "active" {
+			t.Fatalf("native request context value = %v, want active", got)
+		}
+		return ctx.Send("message", []byte("ok"))
+	})
+
+	recorder := httptest.NewRecorder()
+	endpoint.serve(recorder, httptest.NewRequest(http.MethodGet, "http://example.com/events", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
 	}
 }
 

@@ -1,0 +1,17 @@
+# {{.ServiceName}}
+
+Generated with the KPro service template.
+
+KPro is currently pre-release. `go.mod` contains a local `replace` pointing to
+the checkout used to generate this service; keep it valid until a versioned
+module release is available.
+
+```bash
+go mod tidy
+go run .
+```
+
+Then open `http://localhost:8080/healthz` or `/hello`.
+
+Before production, configure OpenTelemetry/Prometheus exporters and review the
+KPro production-readiness checklist.

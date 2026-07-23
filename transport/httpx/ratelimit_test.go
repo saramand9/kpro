@@ -5,6 +5,7 @@ package httpx
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -12,9 +13,33 @@ import (
 	"testing"
 	"time"
 
+	"github.com/saramand9/bignet/kpro/core"
 	"github.com/saramand9/bignet/kpro/middleware"
 	"golang.org/x/time/rate"
 )
+
+func TestListenAndServeRejectsSecondStartAndStopsWithNilContext(t *testing.T) {
+	addr := freeHTTPRateLimitAddr(t)
+	endpoint := New(Config{Addr: addr})
+	errCh := make(chan error, 1)
+	go func() { errCh <- endpoint.ListenAndServe(nil) }()
+	waitForHTTPRateLimitServer(t, addr, errCh)
+
+	if err := endpoint.ListenAndServe(context.Background()); !errors.Is(err, core.ErrAlreadyStarted) {
+		t.Fatalf("second ListenAndServe() error = %v, want %v", err, core.ErrAlreadyStarted)
+	}
+	if err := endpoint.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("first ListenAndServe() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("HTTP server did not stop")
+	}
+}
 
 func TestConnRateLimitPersistsAcrossHTTPKeepAliveRequests(t *testing.T) {
 	addr := freeHTTPRateLimitAddr(t)

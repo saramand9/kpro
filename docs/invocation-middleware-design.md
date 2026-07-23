@@ -67,6 +67,10 @@ gRPC stream Native()           -> grpcx.StreamInvocationNative
 
 Common middleware should prefer stable fields such as `Transport`, `Operation`, `Headers`, `Meta` and `Payload`. Protocol-specific middleware can inspect `Native()` when needed.
 
+An `Invocation` is valid only for the duration of its handler chain. Native
+adapters may build headers and metadata lazily on first access, so middleware
+must not retain the invocation for background work after the handler returns.
+
 
 ## Message protocol flow
 
@@ -87,6 +91,13 @@ transport input
 ```
 
 The important detail is where middleware runs. For message protocols, middleware runs at actual handler execution time, after Router scheduling, not outside `Router.Dispatch`.
+
+Middleware composition is cached rather than rebuilt per invocation. Message
+routes compile their chain when routes or middleware configuration changes;
+HTTP routes initialize their compiled chain once and reuse it. A middleware
+constructor can therefore return shared state, and that state must be safe for
+concurrent requests. Request-specific state belongs in `Invocation.Set` or the
+native request context.
 
 That preserves the meaning of middleware timing and panic recovery:
 

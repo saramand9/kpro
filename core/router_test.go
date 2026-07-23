@@ -244,6 +244,65 @@ func TestRouterRemovesSessionExecutorWhenSessionCloses(t *testing.T) {
 	waitForRouterSessionCount(t, router, 0)
 }
 
+func TestRouterDoesNotReuseExecutorForDifferentSessionWithSameID(t *testing.T) {
+	router := NewRouter(RouterConfig{
+		SyncQueueSize:         4,
+		AsyncWorkers:          1,
+		AsyncQueueSize:        4,
+		MaxInflightPerSession: 4,
+		SessionIdleTimeout:    time.Hour,
+	})
+	defer func() {
+		if err := router.Shutdown(context.Background()); err != nil {
+			t.Fatalf("shutdown router: %v", err)
+		}
+	}()
+
+	handled := make(chan Session, 2)
+	router.HandleSync(10, func(ctx Context) error {
+		handled <- ctx.Session()
+		return nil
+	})
+	first := newFakeSession(42)
+	second := newFakeSession(42)
+	if err := router.Dispatch(NewContext(first, Message{ID: 10, Seq: 1})); err != nil {
+		t.Fatalf("dispatch first session: %v", err)
+	}
+	if got := <-handled; got != first {
+		t.Fatalf("first handled session = %p, want %p", got, first)
+	}
+	if err := router.Dispatch(NewContext(second, Message{ID: 10, Seq: 2})); err != nil {
+		t.Fatalf("dispatch replacement session: %v", err)
+	}
+	if got := <-handled; got != second {
+		t.Fatalf("replacement handled session = %p, want %p", got, second)
+	}
+
+	value, ok := router.sessions.Load(sessionExecutorKey{id: 42, done: second.Done()})
+	if !ok || value.(*sessionExecutor).done != second.Done() {
+		t.Fatal("router executor retained the first session lifecycle")
+	}
+	if got := routerSessionCount(router); got != 2 {
+		t.Fatalf("executor count = %d, want one per live session", got)
+	}
+}
+
+func TestRouterDoesNotStartAsyncWorkersAfterClose(t *testing.T) {
+	router := NewRouter(RouterConfig{AsyncWorkers: 1})
+	router.Close()
+	router.HandleAsync(10, func(Context) error { return nil })
+
+	router.mu.RLock()
+	registered := router.routes[10].handler != nil
+	router.mu.RUnlock()
+	if registered {
+		t.Fatal("async route was registered after router close")
+	}
+	if err := router.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown router: %v", err)
+	}
+}
+
 type fakeSession struct {
 	id   uint64
 	done chan struct{}
@@ -306,18 +365,23 @@ func waitForRouterSessionCount(t *testing.T, router *Router, want int) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		router.sessionsMu.Lock()
-		got := len(router.sessions)
-		router.sessionsMu.Unlock()
+		got := routerSessionCount(router)
 		if got == want {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	router.sessionsMu.Lock()
-	got := len(router.sessions)
-	router.sessionsMu.Unlock()
+	got := routerSessionCount(router)
 	t.Fatalf("router session count = %d, want %d", got, want)
+}
+
+func routerSessionCount(router *Router) int {
+	count := 0
+	router.sessions.Range(func(_, _ any) bool {
+		count++
+		return true
+	})
+	return count
 }
 
 func waitForClosed(t *testing.T, ch <-chan struct{}, message string) {

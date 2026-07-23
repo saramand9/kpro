@@ -13,6 +13,7 @@ import (
 	quicgo "github.com/quic-go/quic-go"
 	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/bignet/kpro/transport/internal/serveutil"
 	"github.com/saramand9/bignet/kpro/transport/internal/streamutil"
 )
 
@@ -48,16 +49,23 @@ type Config struct {
 }
 
 type Server struct {
-	config Config
-	ln     *quicgo.Listener
+	config      Config
+	rawConfig   Config
+	ln          *quicgo.Listener
+	lifecycleMu sync.Mutex
+	accepting   bool
+	started     bool
 
-	nextID   uint64
-	active   int64
-	sessions sync.Map
+	nextID      uint64
+	active      int64
+	connections sync.Map
+	sessions    sync.Map
 }
 
 func New(config Config) *Server {
-	return &Server{config: normalizeConfig(config)}
+	rawConfig := config
+	config = cloneOwnedConfig(config)
+	return &Server{config: normalizeConfig(config), rawConfig: rawConfig, accepting: true}
 }
 
 func NewServer(config Config) *Server {
@@ -69,42 +77,104 @@ func (s *Server) Name() string {
 }
 
 func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error {
+	if err := s.Validate(); err != nil {
+		return err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := s.claimStart(); err != nil {
+		return err
+	}
 	tlsConfig, err := buildTLSConfig(s.config)
 	if err != nil {
+		s.rollbackStart()
 		return err
 	}
 	ln, err := quicgo.ListenAddr(s.config.Addr, tlsConfig, buildQUICConfig(s.config))
 	if err != nil {
+		s.rollbackStart()
 		return err
 	}
-	s.ln = ln
-
-	go func() {
-		<-ctx.Done()
+	if !s.publishListener(ln) {
 		_ = ln.Close()
-	}()
+		return core.ErrClosed
+	}
+
+	serveDone := make(chan struct{})
+	watcherDone := serveutil.ShutdownOnCancel(ctx, serveDone, func() {
+		_ = s.Shutdown(context.Background())
+	})
+	defer serveutil.FinishContextWatcher(serveDone, watcherDone)
 
 	for {
 		conn, err := ln.Accept(ctx)
 		if err != nil {
-			select {
-			case <-ctx.Done():
+			if ctx.Err() != nil {
+				_ = s.Shutdown(context.Background())
 				return nil
-			default:
-				if errors.Is(err, quicgo.ErrServerClosed) {
-					return nil
-				}
-				return err
 			}
+			if !s.isAccepting() {
+				return nil
+			}
+			if errors.Is(err, quicgo.ErrServerClosed) {
+				return nil
+			}
+			return err
 		}
-		go s.acceptStreams(ctx, conn, handler)
+		if !s.registerConnection(conn) {
+			_ = conn.CloseWithError(0, "server shutting down")
+			continue
+		}
+		go s.acceptStreams(conn, handler)
 	}
 }
 
-func (s *Server) Shutdown(context.Context) error {
-	if s.ln != nil {
-		_ = s.ln.Close()
+func (s *Server) claimStart() error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if !s.accepting {
+		return core.ErrClosed
 	}
+	if s.started {
+		return core.ErrAlreadyStarted
+	}
+	s.started = true
+	return nil
+}
+
+func (s *Server) rollbackStart() {
+	s.lifecycleMu.Lock()
+	if s.accepting && s.ln == nil {
+		s.started = false
+	}
+	s.lifecycleMu.Unlock()
+}
+
+func (s *Server) publishListener(listener *quicgo.Listener) bool {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if !s.accepting {
+		return false
+	}
+	s.ln = listener
+	return true
+}
+
+func (s *Server) Shutdown(context.Context) error {
+	s.lifecycleMu.Lock()
+	s.accepting = false
+	ln := s.ln
+	s.lifecycleMu.Unlock()
+	if ln != nil {
+		_ = ln.Close()
+	}
+	s.connections.Range(func(key, _ interface{}) bool {
+		if conn, ok := key.(quicgo.Connection); ok {
+			_ = conn.CloseWithError(0, "server shutting down")
+		}
+		return true
+	})
 	s.sessions.Range(func(_, value interface{}) bool {
 		if session, ok := value.(*session); ok {
 			_ = session.Close()
@@ -114,13 +184,17 @@ func (s *Server) Shutdown(context.Context) error {
 	return nil
 }
 
-func (s *Server) acceptStreams(ctx context.Context, conn quicgo.Connection, handler core.Handler) {
+func (s *Server) acceptStreams(conn quicgo.Connection, handler core.Handler) {
+	defer func() {
+		_ = conn.CloseWithError(0, "stream accept stopped")
+		s.connections.Delete(conn)
+	}()
 	for {
-		stream, err := conn.AcceptStream(ctx)
+		stream, err := conn.AcceptStream(conn.Context())
 		if err != nil {
 			return
 		}
-		if s.config.MaxStreams > 0 && atomic.LoadInt64(&s.active) >= int64(s.config.MaxStreams) {
+		if !s.tryAcquireStreamSlot() {
 			stream.CancelRead(0)
 			stream.CancelWrite(0)
 			continue
@@ -134,9 +208,56 @@ func (s *Server) acceptStreams(ctx context.Context, conn quicgo.Connection, hand
 			sendQueue: make(chan []byte, s.config.SendQueueSize),
 			done:      make(chan struct{}),
 		}
+		if !s.registerSession(session, handler) {
+			stream.CancelRead(0)
+			stream.CancelWrite(0)
+			s.releaseStreamSlot()
+			return
+		}
+	}
+}
+
+func (s *Server) isAccepting() bool {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	return s.accepting
+}
+
+func (s *Server) registerConnection(conn quicgo.Connection) bool {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if !s.accepting {
+		return false
+	}
+	s.connections.Store(conn, struct{}{})
+	return true
+}
+
+func (s *Server) registerSession(session *session, handler core.Handler) bool {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if !s.accepting {
+		return false
+	}
+	s.sessions.Store(session.id, session)
+	session.start(handler)
+	return true
+}
+
+func (s *Server) tryAcquireStreamSlot() bool {
+	limit := int64(s.config.MaxStreams)
+	if limit <= 0 {
 		atomic.AddInt64(&s.active, 1)
-		s.sessions.Store(id, session)
-		session.start(handler)
+		return true
+	}
+	for {
+		active := atomic.LoadInt64(&s.active)
+		if active >= limit {
+			return false
+		}
+		if atomic.CompareAndSwapInt64(&s.active, active, active+1) {
+			return true
+		}
 	}
 }
 
@@ -167,6 +288,11 @@ func (s *session) Done() <-chan struct{} {
 }
 
 func (s *session) Send(msg core.Message) error {
+	select {
+	case <-s.done:
+		return core.ErrClosed
+	default:
+	}
 	frame, err := s.server.config.Codec.Encode(msg)
 	if err != nil {
 		return err
@@ -188,9 +314,13 @@ func (s *session) Close() error {
 		s.stream.CancelRead(0)
 		_ = s.stream.Close()
 		s.server.sessions.Delete(s.id)
-		atomic.AddInt64(&s.server.active, -1)
+		s.server.releaseStreamSlot()
 	})
 	return nil
+}
+
+func (s *Server) releaseStreamSlot() {
+	atomic.AddInt64(&s.active, -1)
 }
 
 func (s *session) start(handler core.Handler) {
@@ -276,6 +406,24 @@ func normalizeConfig(config Config) Config {
 	}
 	if len(config.NextProtos) == 0 {
 		config.NextProtos = []string{DefaultALPN}
+	}
+	return config
+}
+
+func cloneOwnedConfig(config Config) Config {
+	config.NextProtos = append([]string(nil), config.NextProtos...)
+	if config.TLSConfig != nil {
+		tlsConfig := config.TLSConfig.Clone()
+		tlsConfig.NextProtos = append([]string(nil), config.TLSConfig.NextProtos...)
+		tlsConfig.Certificates = append([]tls.Certificate(nil), config.TLSConfig.Certificates...)
+		tlsConfig.CipherSuites = append([]uint16(nil), config.TLSConfig.CipherSuites...)
+		tlsConfig.CurvePreferences = append([]tls.CurveID(nil), config.TLSConfig.CurvePreferences...)
+		config.TLSConfig = tlsConfig
+	}
+	if config.QUICConfig != nil {
+		quicConfig := config.QUICConfig.Clone()
+		quicConfig.Versions = append([]quicgo.Version(nil), config.QUICConfig.Versions...)
+		config.QUICConfig = quicConfig
 	}
 	return config
 }

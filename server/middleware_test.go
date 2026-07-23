@@ -5,15 +5,19 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/saramand9/bignet/kpro/core"
+	http3x "github.com/saramand9/bignet/kpro/transport/http3"
 	"github.com/saramand9/bignet/kpro/transport/httpx"
 	"github.com/saramand9/bignet/kpro/transport/sse"
 )
@@ -124,6 +128,63 @@ func TestServerUseAppliesToMountedMessageEndpoints(t *testing.T) {
 	waitForSignal(t, handlerSeen, "handler")
 }
 
+func TestUseCheckedDoesNotHoldServerLockDuringMiddlewareCompilation(t *testing.T) {
+	app := New()
+	endpoint := app.Mount(&fakeTransport{name: string(core.TransportTCP)})
+	defer shutdownEndpointRouter(t, endpoint)
+	endpoint.HandleSync(testMsgEcho, func(core.Context) error { return nil })
+	resource := &managedTestResource{}
+
+	result := make(chan error, 1)
+	go func() {
+		result <- app.UseChecked(func(next core.InvocationHandler) core.InvocationHandler {
+			if err := app.ManageChecked(resource); err != nil {
+				return func(core.Invocation) error { return err }
+			}
+			return next
+		})
+	}()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("UseChecked() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("UseChecked deadlocked during reentrant middleware compilation")
+	}
+	if got := len(app.resources); got != 1 {
+		t.Fatalf("managed resources = %d, want 1", got)
+	}
+}
+
+func TestConcurrentUseCheckedReturnsBusyAndPreservesOrder(t *testing.T) {
+	app := New()
+	runner := newBlockingMiddlewareRunner()
+	app.MountRunner(runner)
+	middlewareA := func(next core.InvocationHandler) core.InvocationHandler { return next }
+	middlewareB := func(next core.InvocationHandler) core.InvocationHandler { return next }
+
+	firstResult := make(chan error, 1)
+	go func() { firstResult <- app.UseChecked(middlewareA) }()
+	waitForSignal(t, runner.entered, "first middleware application")
+	if err := app.UseChecked(middlewareB); !errors.Is(err, ErrConfigurationBusy) {
+		t.Fatalf("concurrent UseChecked() error = %v, want %v", err, ErrConfigurationBusy)
+	}
+	close(runner.release)
+	if err := <-firstResult; err != nil {
+		t.Fatalf("first UseChecked() error = %v", err)
+	}
+	if err := app.UseChecked(middlewareB); err != nil {
+		t.Fatalf("retried UseChecked() error = %v", err)
+	}
+	if got := runner.applied; got != 2 {
+		t.Fatalf("applied middleware count = %d, want 2", got)
+	}
+	if got := len(app.middlewares); got != 2 {
+		t.Fatalf("server middleware count = %d, want 2", got)
+	}
+}
+
 func TestServerUseAppliesToCustomMiddlewareRunner(t *testing.T) {
 	app := New()
 	runner := &customMiddlewareRunner{}
@@ -170,6 +231,34 @@ func TestServerUseAppliesToHTTPEndpoint(t *testing.T) {
 	}
 	assertNoServerTestMiddlewareError(t, middlewareErr)
 	waitForSignal(t, callSeen, "http middleware")
+}
+
+func TestServerUseAppliesToHTTP3Endpoint(t *testing.T) {
+	app := New()
+	endpoint := app.HTTP3("127.0.0.1:0", http3x.Config{})
+	callSeen := false
+	app.Use(func(next core.InvocationHandler) core.InvocationHandler {
+		return func(ctx core.Invocation) error {
+			callSeen = true
+			if ctx.Transport() != core.TransportHTTP3 {
+				t.Fatalf("transport = %s, want %s", ctx.Transport(), core.TransportHTTP3)
+			}
+			return next(ctx)
+		}
+	})
+	endpoint.Get("/middleware", func(ctx *httpx.Context) error {
+		return ctx.Text(http.StatusOK, "ok")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/middleware", nil)
+	resp := httptest.NewRecorder()
+	endpoint.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK || resp.Body.String() != "ok" {
+		t.Fatalf("status/body = %d/%q, want %d/ok", resp.Code, resp.Body.String(), http.StatusOK)
+	}
+	if !callSeen {
+		t.Fatal("HTTP/3 middleware was not called")
+	}
 }
 
 func TestServerUseAppliesToSSEEndpoint(t *testing.T) {
@@ -382,4 +471,28 @@ func (r *customMiddlewareRunner) Shutdown(context.Context) error {
 
 func (r *customMiddlewareRunner) ApplyMiddleware(middlewares ...core.Middleware) {
 	r.middlewareCount += len(middlewares)
+}
+
+type blockingMiddlewareRunner struct {
+	entered chan struct{}
+	release chan struct{}
+	first   sync.Once
+	applied int
+}
+
+func newBlockingMiddlewareRunner() *blockingMiddlewareRunner {
+	return &blockingMiddlewareRunner{entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (r *blockingMiddlewareRunner) Name() string { return "blocking-middleware" }
+func (r *blockingMiddlewareRunner) ListenAndServe(context.Context) error {
+	return nil
+}
+func (r *blockingMiddlewareRunner) Shutdown(context.Context) error { return nil }
+func (r *blockingMiddlewareRunner) ApplyMiddleware(middlewares ...core.Middleware) {
+	r.first.Do(func() {
+		close(r.entered)
+		<-r.release
+	})
+	r.applied += len(middlewares)
 }

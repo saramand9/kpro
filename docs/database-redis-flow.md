@@ -75,15 +75,15 @@ userCache key prefix = "kpro:" + "users:"
 | 2 | module service | service 方法 | command DTO | domain model 和 event | 校验业务规则，决定发生了什么变化。 |
 | 3 | `eventing/events/codec.go` | `JSONCodec.Encode(event)` | typed event struct | JSON bytes | 序列化 event payload。 |
 | 4 | `eventing/events/event.go` | `NewEnvelope(id, event, payload, occurredAt)` | event id、typed event、payload | `events.Envelope` | 给 event 加上类型、聚合 ID、schema version、时间等元数据。 |
-| 5 | 模块侧 GORM repository | `db.WithContext(ctx).Create(&user)` | domain model | MySQL row | 使用原生 GORM 保存事务状态。 |
-| 6 | 应用自己的 delivery store | `Append(ctx, envelope)` | `events.Envelope` | durable event record | 保存 event；具体可以用 MySQL 表、Redis Stream、Kafka 等，由应用自己选择。 |
-| 7 | `eventing/projector/runner.go` | `Runner.RunOnce(ctx)` | delivery store 和 projector 列表 | ack/fail 结果 | 拉取可投递 event，并调用每个 projector。 |
-| 8 | `eventing/delivery/store.go` | `Store.Fetch(ctx, consumer, limit)` | projector 名称、批大小 | `[]delivery.Record` | 创建/确认 delivery 行，把 pending event claim 成 `inflight`，返回 envelope。 |
+| 5 | 模块侧 GORM repository | `db.Transaction(...)` | domain model 和 event | MySQL row + outbox row | 在同一事务中保存领域状态，并调用 `GORMStore.AppendTx` 写 event。 |
+| 6 | `eventing/delivery.GORMStore` | `AppendTx(ctx, tx, envelope)` | GORM transaction、`events.Envelope` | durable event record | 由调用者统一提交或回滚，避免领域行与 event 双写不一致。 |
+| 7 | `eventing/projector/runner.go` | `Runner.Run(ctx)` | delivery store 和 projector 列表 | 持续续租和 fenced ack/fail；取消时退出 | 持续拉取可投递 event；处理前续租，长任务运行时按剩余租期的一半续租；`RunOnce` 保留给测试和外部调度器。 |
+| 8 | `eventing/delivery/store.go` | `Store.Fetch(ctx, consumer, limit)` | projector 名称、批大小 | `[]delivery.Record` | 创建 delivery 行，把可投递 event claim 成带 lease 的 `inflight`；进程崩溃后可自动重取。 |
 | 9 | 模块侧 projector，例如 `UserCacheProjector` | `Handle(ctx, envelope)` | `delivery.Record.Envelope` | Redis cache 命令 | 解码 payload，把 event 映射成 Redis 读模型。 |
 | 10 | `database/redis/cache.go` | `CacheView.Set(ctx, key, value, ttl)` | 逻辑 key、typed value、ttl | error 或 nil | 把 value marshal 成 JSON，然后调用 Redis `SET`。 |
 | 11 | `database/redis/client.go` | `Client.key(key, prefix)` | key `u_1001`，prefix `users:` | `kpro:users:u_1001` | 应用全局 prefix 和 cache-specific prefix。 |
 | 12 | go-redis | `SET key json ttl` | 最终 Redis key 和 JSON bytes | Redis reply | 发送 Redis 协议命令。 |
-| 13 | `eventing/projector/runner.go` | `store.Ack(...)` 或 `store.Fail(...)` | projector 名称、event id | delivery 状态更新 | 成功则标记 delivered；失败则重试或进入 dead-letter。 |
+| 13 | `eventing/projector/runner.go` | `AckAttempt(...)` 或 `FailAttempt(...)` | projector 名称、event id、attempt | delivery 状态更新 | fenced settlement 阻止过期 worker 覆盖新 attempt；失败则重试或进入 dead-letter。 |
 
 具体数据例子：
 
@@ -156,7 +156,7 @@ Map UserCreated -> UserCache
 Call cache.Set(ctx, "u_1001", UserCache{...}, 30m)
 
 输出:
-Redis 写请求；如果失败，则 Runner 会调用 Fail。
+Redis 写请求；如果失败，则 Runner 会用当前 attempt 调用 FailAttempt。
 ```
 
 进入 Redis adapter 边界时：
@@ -180,7 +180,7 @@ SET kpro:users:u_1001 {"id":"u_1001","name":"Ada","email":"ada@example.com"} EX 
 成功之后：
 
 ```text
-Runner 调用 delivery.Store.Ack(ctx, "redis.user-cache", "evt_9001")
+Runner 调用 delivery.AttemptStore.AckAttempt(ctx, "redis.user-cache", "evt_9001", attempt)
 delivery status = delivered
 ```
 
@@ -188,10 +188,16 @@ delivery status = delivered
 
 ```text
 CacheView.Set 返回 error
-Runner 调用 delivery.Store.Fail(ctx, "redis.user-cache", "evt_9001", err)
-status = failed, attempts += 1, available_at = now + RetryDelay
+Runner 调用 delivery.AttemptStore.FailAttempt(ctx, "redis.user-cache", "evt_9001", attempt, err)
+status = failed, available_at = now + RetryDelay；下一次 claim 时 attempts += 1
 超过 MaxAttempts 后 status = dead
 ```
+
+内置 `Runner` 在调用 projector 前会先续租，并在长时间处理期间持续续租。
+如果 lease 已被其他 worker reclaim，续租或 fenced settlement 会返回
+`delivery.ErrLeaseLost`，旧 worker 不会覆盖新 attempt 的状态。直接使用
+`Fetch` 的调用方也应使用 `AckAttempt`/`FailAttempt`；`GORMStore.Ack`/`Fail`
+只保留首次投递的兼容语义。
 
 ## Redis Cache 读取流程
 

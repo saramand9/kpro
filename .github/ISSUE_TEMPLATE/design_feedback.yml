@@ -1,0 +1,50 @@
+name: API or design feedback
+description: Propose an ergonomic, extension, or production-readiness improvement.
+title: "[design] "
+labels:
+  - enhancement
+body:
+  - type: dropdown
+    id: user
+    attributes:
+      label: Primary user
+      options:
+        - Application developer
+        - Framework or platform developer
+        - Operator or SRE
+        - Library or transport author
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Concrete problem
+      description: Describe the workflow, limitation, or ambiguity before proposing an API.
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: Current workaround
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed outcome
+      description: Include compatibility, module-boundary, and operational implications.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This request is not based on fabricated production evidence.
+          required: true
+        - label: I considered whether an optional package or capability is sufficient.
+          required: true

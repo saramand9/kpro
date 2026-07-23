@@ -21,16 +21,19 @@ import (
 
 	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/bignet/kpro/transport/internal/serveutil"
 	"github.com/saramand9/bignet/kpro/transport/internal/streamutil"
 )
 
 const (
-	DefaultAddr          = ":8091"
-	DefaultPath          = "/ws"
-	DefaultMaxMessage    = 64 * 1024
-	DefaultSendQueueSize = 64
-	DefaultReadTimeout   = 90 * time.Second
-	DefaultWriteTimeout  = 5 * time.Second
+	DefaultAddr             = ":8091"
+	DefaultPath             = "/ws"
+	DefaultMaxMessage       = 64 * 1024
+	DefaultMaxConnections   = 10000
+	DefaultSendQueueSize    = 64
+	DefaultReadTimeout      = 90 * time.Second
+	DefaultWriteTimeout     = 5 * time.Second
+	DefaultHandshakeTimeout = 5 * time.Second
 
 	opContinuation = 0x0
 	opText         = 0x1
@@ -45,6 +48,8 @@ var (
 	ErrBadFrame               = errors.New("bad websocket frame")
 	ErrFrameTooLarge          = errors.New("websocket frame too large")
 	ErrFragmentedControlFrame = errors.New("websocket control frame must not be fragmented")
+	ErrTooManyConnections     = errors.New("websocket connection limit reached")
+	ErrNotAccepting           = errors.New("websocket server is not accepting upgrades")
 )
 
 // Config controls WebSocket listener, path, codec, queue, and timeout settings.
@@ -57,26 +62,38 @@ type Config struct {
 	Codec codec.PacketCodec
 	// MaxMessage limits reassembled WebSocket message size.
 	MaxMessage int
+	// MaxConnections caps active upgraded WebSocket sessions.
+	MaxConnections int
 	// SendQueueSize is the per-session outbound frame queue length.
 	SendQueueSize int
 	// ReadTimeout is applied before each WebSocket frame read.
 	ReadTimeout time.Duration
 	// WriteTimeout is applied before each WebSocket frame write.
 	WriteTimeout time.Duration
+	// HandshakeTimeout bounds reading the HTTP upgrade headers.
+	HandshakeTimeout time.Duration
 }
 
 // Server upgrades HTTP requests to WebSocket sessions and dispatches KPro messages.
 type Server struct {
-	config Config
-	server *http.Server
+	config    Config
+	rawConfig Config
+	server    *http.Server
+
+	lifecycleMu sync.Mutex
+	accepting   bool
+	started     bool
+	upgrades    sync.WaitGroup
+	upgrading   sync.Map
 
 	nextID   uint64
+	active   int64
 	sessions sync.Map
 }
 
 // New creates a WebSocket transport with normalized defaults.
 func New(config Config) *Server {
-	return &Server{config: normalizeConfig(config)}
+	return &Server{config: normalizeConfig(config), rawConfig: config, accepting: true}
 }
 
 // NewServer is an alias for New.
@@ -91,36 +108,96 @@ func (s *Server) Name() string {
 
 // ListenAndServe starts the WebSocket HTTP server until ctx is cancelled or serving fails.
 func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error {
-	mux := http.NewServeMux()
-	mux.HandleFunc(s.config.Path, func(w http.ResponseWriter, r *http.Request) {
-		s.serveWS(w, r, handler)
-	})
-	s.server = &http.Server{Addr: s.config.Addr, Handler: mux}
-	go func() {
-		<-ctx.Done()
+	if err := s.Validate(); err != nil {
+		return err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	server := s.buildHTTPServer(handler)
+	s.lifecycleMu.Lock()
+	if !s.accepting {
+		s.lifecycleMu.Unlock()
+		return ErrNotAccepting
+	}
+	if s.started {
+		s.lifecycleMu.Unlock()
+		return core.ErrAlreadyStarted
+	}
+	s.started = true
+	s.server = server
+	s.lifecycleMu.Unlock()
+	serveDone := make(chan struct{})
+	watcherDone := serveutil.ShutdownOnCancel(ctx, serveDone, func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = s.Shutdown(shutdownCtx)
-	}()
-	err := s.server.ListenAndServe()
+	})
+	defer serveutil.FinishContextWatcher(serveDone, watcherDone)
+	err := server.ListenAndServe()
 	if err == http.ErrServerClosed {
 		return nil
 	}
 	return err
 }
 
+func (s *Server) buildHTTPServer(handler core.Handler) *http.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc(s.config.Path, func(w http.ResponseWriter, r *http.Request) {
+		s.serveWS(w, r, handler)
+	})
+	return &http.Server{
+		Addr:              s.config.Addr,
+		Handler:           mux,
+		ReadHeaderTimeout: s.config.HandshakeTimeout,
+	}
+}
+
 // Shutdown closes active WebSocket sessions and stops the HTTP server.
 func (s *Server) Shutdown(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.lifecycleMu.Lock()
+	s.accepting = false
+	server := s.server
+	s.lifecycleMu.Unlock()
+
+	s.upgrading.Range(func(key, _ interface{}) bool {
+		if conn, ok := key.(net.Conn); ok {
+			_ = conn.Close()
+		}
+		return true
+	})
 	s.sessions.Range(func(_, value interface{}) bool {
 		if session, ok := value.(*session); ok {
 			_ = session.Close()
 		}
 		return true
 	})
-	if s.server == nil {
-		return nil
+	var serverErr error
+	if server != nil {
+		serverErr = server.Shutdown(ctx)
 	}
-	return s.server.Shutdown(ctx)
+	upgradeErr := waitGroupContext(ctx, &s.upgrades)
+	return errors.Join(serverErr, upgradeErr)
+}
+
+func waitGroupContext(ctx context.Context, group *sync.WaitGroup) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	done := make(chan struct{})
+	go func() {
+		group.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *Server) serveWS(w http.ResponseWriter, r *http.Request, handler core.Handler) {
@@ -133,6 +210,21 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request, handler core.Ha
 		http.Error(w, ErrBadHandshake.Error(), http.StatusBadRequest)
 		return
 	}
+	if !s.beginUpgrade() {
+		http.Error(w, ErrNotAccepting.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	defer s.upgrades.Done()
+	if !s.tryAcquireConnectionSlot() {
+		http.Error(w, ErrTooManyConnections.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	sessionOwnsSlot := false
+	defer func() {
+		if !sessionOwnsSlot {
+			s.releaseConnectionSlot()
+		}
+	}()
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "hijacking unsupported", http.StatusInternalServerError)
@@ -141,6 +233,14 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request, handler core.Ha
 	conn, rw, err := hijacker.Hijack()
 	if err != nil {
 		return
+	}
+	s.upgrading.Store(conn, struct{}{})
+	defer s.upgrading.Delete(conn)
+	if s.config.HandshakeTimeout > 0 {
+		if err := conn.SetWriteDeadline(time.Now().Add(s.config.HandshakeTimeout)); err != nil {
+			_ = conn.Close()
+			return
+		}
 	}
 	accept := computeAcceptKey(key)
 	_, err = fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", accept)
@@ -162,8 +262,53 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request, handler core.Ha
 		sendQueue: make(chan wsFrame, s.config.SendQueueSize),
 		done:      make(chan struct{}),
 	}
-	s.sessions.Store(id, session)
+	if !s.registerSession(session, handler) {
+		_ = conn.Close()
+		return
+	}
+	sessionOwnsSlot = true
+}
+
+func (s *Server) beginUpgrade() bool {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if !s.accepting {
+		return false
+	}
+	s.upgrades.Add(1)
+	return true
+}
+
+func (s *Server) registerSession(session *session, handler core.Handler) bool {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if !s.accepting {
+		return false
+	}
+	s.sessions.Store(session.id, session)
 	session.start(handler)
+	return true
+}
+
+func (s *Server) tryAcquireConnectionSlot() bool {
+	limit := int64(s.config.MaxConnections)
+	if limit <= 0 {
+		atomic.AddInt64(&s.active, 1)
+		return true
+	}
+	for {
+		active := atomic.LoadInt64(&s.active)
+		if active >= limit {
+			return false
+		}
+		if atomic.CompareAndSwapInt64(&s.active, active, active+1) {
+			return true
+		}
+	}
+}
+
+func (s *Server) releaseConnectionSlot() {
+	atomic.AddInt64(&s.active, -1)
 }
 
 type wsFrame struct {
@@ -199,6 +344,11 @@ func (s *session) Done() <-chan struct{} {
 }
 
 func (s *session) Send(msg core.Message) error {
+	select {
+	case <-s.done:
+		return core.ErrClosed
+	default:
+	}
 	packet, err := s.server.config.Codec.EncodePacket(msg)
 	if err != nil {
 		return err
@@ -211,6 +361,7 @@ func (s *session) Close() error {
 		close(s.done)
 		_ = s.raw.Close()
 		s.server.sessions.Delete(s.id)
+		s.server.releaseConnectionSlot()
 	})
 	return nil
 }
@@ -221,6 +372,11 @@ func (s *session) start(handler core.Handler) {
 }
 
 func (s *session) enqueue(frame wsFrame) error {
+	select {
+	case <-s.done:
+		return core.ErrClosed
+	default:
+	}
 	select {
 	case s.sendQueue <- frame:
 		return nil
@@ -443,6 +599,9 @@ func normalizeConfig(config Config) Config {
 	if config.MaxMessage <= 0 {
 		config.MaxMessage = DefaultMaxMessage
 	}
+	if config.MaxConnections <= 0 {
+		config.MaxConnections = DefaultMaxConnections
+	}
 	if config.SendQueueSize <= 0 {
 		config.SendQueueSize = DefaultSendQueueSize
 	}
@@ -451,6 +610,9 @@ func normalizeConfig(config Config) Config {
 	}
 	if config.WriteTimeout <= 0 {
 		config.WriteTimeout = DefaultWriteTimeout
+	}
+	if config.HandshakeTimeout <= 0 {
+		config.HandshakeTimeout = DefaultHandshakeTimeout
 	}
 	return config
 }

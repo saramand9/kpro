@@ -9,10 +9,12 @@ import (
 	"hash/fnv"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/saramand9/bignet/kpro/codec"
 	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/bignet/kpro/transport/internal/serveutil"
 )
 
 const (
@@ -44,19 +46,25 @@ type Config struct {
 
 // Server maps UDP peers to virtual sessions and dispatches decoded packets.
 type Server struct {
-	config Config
-	conn   *net.UDPConn
+	config    Config
+	rawConfig Config
+	conn      *net.UDPConn
+	// clockBase lets atomic activity timestamps retain Go's monotonic clock.
+	clockBase time.Time
 
 	mu       sync.Mutex
 	sessions map[string]*packetSession
 	closed   bool
+	started  bool
 }
 
 // New creates a UDP transport with normalized defaults.
 func New(config Config) *Server {
 	return &Server{
-		config:   normalizeConfig(config),
-		sessions: make(map[string]*packetSession),
+		config:    normalizeConfig(config),
+		rawConfig: config,
+		sessions:  make(map[string]*packetSession),
+		clockBase: time.Now(),
 	}
 }
 
@@ -72,36 +80,52 @@ func (s *Server) Name() string {
 
 // ListenAndServe reads UDP packets until ctx is cancelled or the socket fails.
 func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error {
+	if err := s.Validate(); err != nil {
+		return err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := s.claimStart(); err != nil {
+		return err
+	}
 	addr, err := net.ResolveUDPAddr("udp", s.config.Addr)
 	if err != nil {
+		s.rollbackStart()
 		return err
 	}
 	conn, err := net.ListenUDP("udp", addr)
 	if err != nil {
+		s.rollbackStart()
 		return err
 	}
-
-	s.mu.Lock()
-	s.conn = conn
-	s.closed = false
-	s.mu.Unlock()
-
-	go func() {
-		<-ctx.Done()
+	if !s.publishConn(conn) {
 		_ = conn.Close()
+		return core.ErrClosed
+	}
+
+	serveDone := make(chan struct{})
+	watcherDone := serveutil.ShutdownOnCancel(ctx, serveDone, func() {
+		_ = s.Shutdown(context.Background())
+	})
+	cleanupDone := make(chan struct{})
+	go func() {
+		defer close(cleanupDone)
+		s.cleanupLoop(ctx, serveDone)
 	}()
-	go s.cleanupLoop(ctx)
+	defer func() {
+		serveutil.FinishContextWatcher(serveDone, watcherDone)
+		<-cleanupDone
+	}()
 
 	buf := make([]byte, s.config.MaxPacketSize)
 	for {
 		n, remote, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			select {
-			case <-ctx.Done():
+			if ctx.Err() != nil || s.isClosed() {
 				return nil
-			default:
-				return err
 			}
+			return err
 		}
 		msg, err := s.config.Codec.DecodePacket(buf[:n])
 		if err != nil {
@@ -111,13 +135,49 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 		if !ok {
 			continue
 		}
-		session.touch()
 		if msg.ID == core.MsgHeartbeat {
 			_ = session.Send(core.Message{ID: core.MsgPong, Seq: msg.Seq})
 			continue
 		}
 		_ = handler(core.AcquireContext(session, msg))
 	}
+}
+
+func (s *Server) claimStart() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return core.ErrClosed
+	}
+	if s.started {
+		return core.ErrAlreadyStarted
+	}
+	s.started = true
+	return nil
+}
+
+func (s *Server) rollbackStart() {
+	s.mu.Lock()
+	if !s.closed && s.conn == nil {
+		s.started = false
+	}
+	s.mu.Unlock()
+}
+
+func (s *Server) publishConn(conn *net.UDPConn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	s.conn = conn
+	return true
+}
+
+func (s *Server) isClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
 }
 
 // Shutdown closes the UDP socket and all virtual sessions.
@@ -153,7 +213,7 @@ func (s *Server) getOrCreateSession(addr *net.UDPAddr) (*packetSession, bool) {
 		return nil, false
 	}
 	if session := s.sessions[key]; session != nil && !session.isClosed() {
-		session.touchAt(now)
+		session.touchAtLocked(now)
 		return session, true
 	}
 	if s.config.MaxSessions > 0 && len(s.sessions) >= s.config.MaxSessions {
@@ -162,25 +222,17 @@ func (s *Server) getOrCreateSession(addr *net.UDPAddr) (*packetSession, bool) {
 
 	remote := *addr
 	session := &packetSession{
-		id:         sessionID(addr),
-		key:        key,
-		server:     s,
-		remote:     &remote,
-		sendQueue:  make(chan []byte, s.config.SendQueueSize),
-		done:       make(chan struct{}),
-		lastActive: now,
+		id:        sessionID(addr),
+		key:       key,
+		server:    s,
+		remote:    &remote,
+		sendQueue: make(chan []byte, s.config.SendQueueSize),
+		done:      make(chan struct{}),
 	}
+	session.lastActive.Store(s.activityTick(now))
 	s.sessions[key] = session
 	go session.writeLoop()
 	return session, true
-}
-
-func (s *Server) removeSession(session *packetSession) {
-	s.mu.Lock()
-	if s.sessions[session.key] == session {
-		delete(s.sessions, session.key)
-	}
-	s.mu.Unlock()
 }
 
 func (s *Server) udpConn() *net.UDPConn {
@@ -189,7 +241,7 @@ func (s *Server) udpConn() *net.UDPConn {
 	return s.conn
 }
 
-func (s *Server) cleanupLoop(ctx context.Context) {
+func (s *Server) cleanupLoop(ctx context.Context, serveDone <-chan struct{}) {
 	ticker := time.NewTicker(s.config.CleanupInterval)
 	defer ticker.Stop()
 	for {
@@ -197,6 +249,8 @@ func (s *Server) cleanupLoop(ctx context.Context) {
 		case now := <-ticker.C:
 			s.closeIdleSessions(now)
 		case <-ctx.Done():
+			return
+		case <-serveDone:
 			return
 		}
 	}
@@ -207,17 +261,16 @@ func (s *Server) closeIdleSessions(now time.Time) {
 		return
 	}
 	s.mu.Lock()
-	sessions := make([]*packetSession, 0, len(s.sessions))
 	for _, session := range s.sessions {
 		if session.idleSince(now) >= s.config.SessionIdleTimeout {
-			sessions = append(sessions, session)
+			session.closeLocked()
 		}
 	}
 	s.mu.Unlock()
+}
 
-	for _, session := range sessions {
-		_ = session.Close()
-	}
+func (s *Server) activityTick(now time.Time) int64 {
+	return now.Sub(s.clockBase).Nanoseconds()
 }
 
 func sessionID(addr *net.UDPAddr) uint64 {
@@ -236,9 +289,8 @@ type packetSession struct {
 	done      chan struct{}
 	closeOnce sync.Once
 
-	mu         sync.Mutex
-	closed     bool
-	lastActive time.Time
+	closed     atomic.Bool
+	lastActive atomic.Int64
 }
 
 func (s *packetSession) ID() uint64 {
@@ -283,14 +335,22 @@ func (s *packetSession) Send(msg core.Message) error {
 }
 
 func (s *packetSession) Close() error {
-	s.closeOnce.Do(func() {
-		s.mu.Lock()
-		s.closed = true
-		s.mu.Unlock()
-		close(s.done)
-		s.server.removeSession(s)
-	})
+	s.server.mu.Lock()
+	s.closeLocked()
+	s.server.mu.Unlock()
 	return nil
+}
+
+// closeLocked closes and removes the session while server.mu serializes it
+// with packet activity updates and idle cleanup.
+func (s *packetSession) closeLocked() {
+	s.closeOnce.Do(func() {
+		s.closed.Store(true)
+		close(s.done)
+		if s.server.sessions[s.key] == s {
+			delete(s.server.sessions, s.key)
+		}
+	})
 }
 
 func (s *packetSession) writeLoop() {
@@ -313,28 +373,29 @@ func (s *packetSession) writeLoop() {
 }
 
 func (s *packetSession) touch() {
-	s.touchAt(time.Now())
+	now := time.Now()
+	s.server.mu.Lock()
+	if !s.closed.Load() && s.server.sessions[s.key] == s {
+		s.touchAtLocked(now)
+	}
+	s.server.mu.Unlock()
 }
 
-func (s *packetSession) touchAt(now time.Time) {
-	s.mu.Lock()
-	s.lastActive = now
-	s.mu.Unlock()
+// touchAtLocked records activity while server.mu protects the decision against
+// idle cleanup closing the same session.
+func (s *packetSession) touchAtLocked(now time.Time) {
+	s.lastActive.Store(s.server.activityTick(now))
 }
 
 func (s *packetSession) idleSince(now time.Time) time.Duration {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
+	if s.closed.Load() {
 		return 0
 	}
-	return now.Sub(s.lastActive)
+	return time.Duration(s.server.activityTick(now) - s.lastActive.Load())
 }
 
 func (s *packetSession) isClosed() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.closed
+	return s.closed.Load()
 }
 
 func normalizeConfig(config Config) Config {

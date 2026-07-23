@@ -86,6 +86,37 @@ func TestUseWrapsUnaryRequest(t *testing.T) {
 	}
 }
 
+type unaryTerminalContextKey struct{}
+
+func TestUnaryMiddlewareContextReachesNativeHandler(t *testing.T) {
+	srv := NewServer(":0")
+	srv.Use(func(next core.InvocationHandler) core.InvocationHandler {
+		return func(invocation core.Invocation) error {
+			ctx := context.WithValue(invocation.Context(), unaryTerminalContextKey{}, "active")
+			return next(core.WithInvocationContext(invocation, ctx))
+		}
+	})
+
+	interceptor := srv.unaryCallInterceptor()
+	response, err := interceptor(
+		context.Background(),
+		wrapperspb.String("request"),
+		&grpc.UnaryServerInfo{FullMethod: GreeterSayHelloFullMethod},
+		func(ctx context.Context, request any) (any, error) {
+			if got := ctx.Value(unaryTerminalContextKey{}); got != "active" {
+				t.Fatalf("native unary context value = %v, want active", got)
+			}
+			return request, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.(*wrapperspb.StringValue).Value != "request" {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
 func TestUseCanRejectUnaryBeforeHandler(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

@@ -3,6 +3,8 @@
 
 package core
 
+import "sync"
+
 // Handler processes one decoded KPro message context.
 type Handler func(Context) error
 
@@ -36,6 +38,13 @@ type BaseContext struct {
 	session Session
 	message Message
 	values  map[string]interface{}
+	pooled  bool
+}
+
+var baseContextPool = sync.Pool{
+	New: func() any {
+		return new(BaseContext)
+	},
 }
 
 // NewContext creates a message context for the supplied session and message.
@@ -47,9 +56,15 @@ func NewContext(session Session, message Message) *BaseContext {
 }
 
 // AcquireContext creates a context for transport dispatch.
-// It currently does not pool or reuse context objects.
+// The returned context may be reused after its handler finishes. Call
+// CloneContext before retaining it in background work.
 func AcquireContext(session Session, message Message) *BaseContext {
-	return NewContext(session, message)
+	ctx := baseContextPool.Get().(*BaseContext)
+	ctx.session = session
+	ctx.message = message
+	ctx.values = nil
+	ctx.pooled = true
+	return ctx
 }
 
 // CloneContext returns a context snapshot. Message data and map containers are
@@ -74,7 +89,17 @@ func (c *BaseContext) Clone() *BaseContext {
 	return cloned
 }
 
-func releaseContext(Context) {}
+func releaseContext(ctx Context) {
+	base, ok := ctx.(*BaseContext)
+	if !ok || !base.pooled {
+		return
+	}
+	base.pooled = false
+	base.session = nil
+	base.message = Message{}
+	base.values = nil
+	baseContextPool.Put(base)
+}
 
 func cloneMessage(msg Message) Message {
 	cloned := msg

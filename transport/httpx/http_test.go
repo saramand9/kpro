@@ -205,11 +205,28 @@ func TestMaxPayloadRejectsByContentLengthWithoutReadingBody(t *testing.T) {
 	if handlerCalled {
 		t.Fatal("handler should not be called")
 	}
-	if resp.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want %d", resp.Code, http.StatusInternalServerError)
+	if resp.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusRequestEntityTooLarge)
 	}
 	if got := resp.Body.String(); !strings.Contains(got, "payload too large") {
 		t.Fatalf("body = %q, want payload too large error", got)
+	}
+}
+
+func TestBodyPayloadLimitReturnsTypedError(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/limited", strings.NewReader("toolong"))
+	ctx := &Context{w: httptest.NewRecorder(), r: req}
+
+	err := NewBodyPayload(ctx).LimitPayload(3)
+	if !errors.Is(err, ErrBodyTooLarge) {
+		t.Fatalf("error = %v, want errors.Is ErrBodyTooLarge", err)
+	}
+	var sizeErr *BodyTooLargeError
+	if !errors.As(err, &sizeErr) {
+		t.Fatalf("error type = %T, want *BodyTooLargeError", err)
+	}
+	if sizeErr.Size != len("toolong") || sizeErr.Limit != 3 {
+		t.Fatalf("body size error = %+v", sizeErr)
 	}
 }
 

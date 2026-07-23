@@ -6,6 +6,7 @@ package gormstore
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -22,6 +23,8 @@ const (
 	migrationLockName     = "kpro_schema_migrations"
 	postgresLockKey       = int64(742607080001)
 	migrationLockTimeout  = 30
+	lockReleaseTimeout    = 5 * time.Second
+	lockPollInterval      = 100 * time.Millisecond
 
 	migrationStatusDirty   = "dirty"
 	migrationStatusFailed  = "failed"
@@ -202,22 +205,87 @@ func resolveMigrations(migrations []Migration, dialect string) ([]resolvedMigrat
 
 func withMigrationLock(ctx context.Context, db *gorm.DB, fn func(*gorm.DB) error) error {
 	switch db.Dialector.Name() {
+	case "mysql", "postgres":
+		// Both locks are scoped to a physical database session. GORM operations
+		// normally return their connection to the pool after every statement, so
+		// the entire migration must be pinned to one connection.
+		return db.WithContext(contextOrBackground(ctx)).Connection(func(locked *gorm.DB) (err error) {
+			lockCtx, lockCancel := context.WithTimeout(
+				contextOrBackground(ctx),
+				time.Duration(migrationLockTimeout)*time.Second,
+			)
+			defer lockCancel()
+			if err = acquireMigrationLock(lockCtx, locked); err != nil {
+				return err
+			}
+			defer func() {
+				releaseCtx, cancel := context.WithTimeout(context.Background(), lockReleaseTimeout)
+				defer cancel()
+				err = errors.Join(err, releaseMigrationLock(locked.WithContext(releaseCtx)))
+			}()
+			return fn(locked)
+		})
+	default:
+		return fn(db.WithContext(contextOrBackground(ctx)))
+	}
+}
+
+func acquireMigrationLock(ctx context.Context, db *gorm.DB) error {
+	switch db.Dialector.Name() {
 	case "mysql":
 		var acquired int
-		if err := db.Raw("SELECT GET_LOCK(?, ?)", migrationLockName, migrationLockTimeout).Scan(&acquired).Error; err != nil {
+		if err := db.WithContext(ctx).Raw("SELECT GET_LOCK(?, ?)", migrationLockName, migrationLockTimeout).Scan(&acquired).Error; err != nil {
 			return err
 		}
 		if acquired != 1 {
 			return ErrMigrationLock
 		}
-		defer db.Exec("SELECT RELEASE_LOCK(?)", migrationLockName)
+		return nil
 	case "postgres":
-		if err := db.Exec("SELECT pg_advisory_lock(?)", postgresLockKey).Error; err != nil {
+		ticker := time.NewTicker(lockPollInterval)
+		defer ticker.Stop()
+		for {
+			var acquired bool
+			if err := db.WithContext(ctx).Raw("SELECT pg_try_advisory_lock(?)", postgresLockKey).Scan(&acquired).Error; err != nil {
+				return err
+			}
+			if acquired {
+				return nil
+			}
+			select {
+			case <-ctx.Done():
+				return errors.Join(ErrMigrationLock, context.Cause(ctx))
+			case <-ticker.C:
+			}
+		}
+	default:
+		return nil
+	}
+}
+
+func releaseMigrationLock(db *gorm.DB) error {
+	switch db.Dialector.Name() {
+	case "mysql":
+		var released sql.NullInt64
+		if err := db.Raw("SELECT RELEASE_LOCK(?)", migrationLockName).Scan(&released).Error; err != nil {
 			return err
 		}
-		defer db.Exec("SELECT pg_advisory_unlock(?)", postgresLockKey)
+		if !released.Valid || released.Int64 != 1 {
+			return ErrMigrationLock
+		}
+		return nil
+	case "postgres":
+		var released bool
+		if err := db.Raw("SELECT pg_advisory_unlock(?)", postgresLockKey).Scan(&released).Error; err != nil {
+			return err
+		}
+		if !released {
+			return ErrMigrationLock
+		}
+		return nil
+	default:
+		return nil
 	}
-	return fn(db.WithContext(contextOrBackground(ctx)))
 }
 
 func ensureMigrationsTable(db *gorm.DB) error {

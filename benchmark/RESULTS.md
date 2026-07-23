@@ -1,5 +1,48 @@
 # KPro benchmark results
 
+## 2026-07-23 hot-path regression baseline
+
+Environment:
+
+```text
+goos: windows
+goarch: amd64
+go: go1.26.4
+cpu: Intel(R) Core(TM) i5-14400
+source state: provisional Unreleased workspace based on b814121
+```
+
+This measurement predates the final commit for the Unreleased changes and is
+therefore provisional; refresh the source identifier after the work is
+committed. CI selects its Go version from `go.mod` (currently Go 1.21), while
+this local run used Go 1.26.4. Compare latency numbers only under the same Go
+toolchain and benchmark conditions; the checked-in budgets intentionally span
+normal CI toolchain and host variation.
+
+Command (the same benchmark selection enforced by CI):
+
+```powershell
+go test ./core ./transport/httpx -run '^$' -bench 'Benchmark(RouterDispatchSync|EndpointServeHTTP)$' -benchmem -benchtime=250ms -count=1 | Tee-Object -FilePath benchmark-current.txt
+go run ./cmd/benchguard -budget benchmark/budgets.json -input benchmark-current.txt
+```
+
+Observed result:
+
+```text
+BenchmarkRouterDispatchSync/no_middleware-16                 2109 ns/op    200 B/op     3 allocs/op
+BenchmarkRouterDispatchSync/one_middleware-16                1950 ns/op    200 B/op     3 allocs/op
+BenchmarkRouterDispatchSync/four_middlewares-16              1946 ns/op    200 B/op     3 allocs/op
+BenchmarkEndpointServeHTTP/direct-16                          116 ns/op    120 B/op     3 allocs/op
+BenchmarkEndpointServeHTTP/middleware-16                      195 ns/op    312 B/op     4 allocs/op
+BenchmarkEndpointServeHTTP/middleware_headers_meta-16         548 ns/op   1032 B/op    11 allocs/op
+```
+
+These short microbenchmarks are allocation-regression evidence, not capacity
+claims. `benchmark/budgets.json` is the pass/fail contract; latency ceilings
+include CI noise headroom while allocation ceilings intentionally remain tight.
+The older end-to-end and third-party comparisons below describe historical
+implementations and should not be used as a current framework ranking.
+
 ## 2026-05-26 smoke
 
 Environment:
