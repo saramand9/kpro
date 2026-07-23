@@ -42,6 +42,8 @@ application or platform responsibilities.
 
 | Goal | Guide |
 | --- | --- |
+| Re-enter project analysis quickly | [Analysis Index](docs/analysis-index.md) |
+| Understand package ownership and runtime flow | [Project Map](docs/project-map.md) |
 | Run or scaffold a minimal service | [10-Minute Quick Start](docs/quickstart.md) |
 | Add health, Prometheus, Zap, and OTel wiring | [Observability Example](examples/observability/main.go) |
 | Choose protocols and application structure | [Recommended Golden Path](docs/golden-path.md) |
