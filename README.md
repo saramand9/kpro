@@ -27,13 +27,15 @@ HTTPS       implemented through HTTP + TLS config
 HTTP/2      implemented through HTTPS native Go negotiation
 HTTP/3      implemented through QUIC + TLS config
 SSE         implemented
-gRPC        implemented through transport/grpcx and server.GRPC
+gRPC        implemented through transport/grpcx and generic server mounting
 ```
 
 Implemented means the code path and repository-level tests exist; it is not a
 production certification or a capacity/availability guarantee. `v0.1.0` is the
-initial developer release and remains pre-1.0: pin the exact version, review
-minor-version upgrades, and validate the framework against the target workload.
+initial developer release. Current `main` includes source-incompatible API work
+for the next minor release, so these documents describe `main`, not the
+`v0.1.0` API. Pin an exact version or reviewed commit, use the documentation at
+that revision, and validate the framework against the target workload.
 
 Developer and operational support currently includes checked server
 construction and component preflight validation, transport capability
@@ -51,25 +53,22 @@ application or platform responsibilities.
 | Run or scaffold a minimal service | [10-Minute Quick Start](docs/quickstart.md) |
 | Add health, Prometheus, Zap, and OTel wiring | [Observability Example](examples/observability/main.go) |
 | Choose protocols and application structure | [Recommended Golden Path](docs/golden-path.md) |
+| Understand compile-time dependency boundaries | [Dependency Boundaries](docs/dependency-boundaries.md) |
 | Prepare a deployment | [Production Readiness Checklist](docs/production-readiness.md) |
 | Plan failure recovery and capacity | [Operations and Capacity Planning](docs/operations.md) |
 | Understand compatibility expectations | [API Stability, Versioning, and Deprecation](docs/api-stability.md) |
 | Add a transport, middleware, codec, or database adapter | [Extending KPro](docs/extending-kpro.md) |
 
-Install the exact release and create a starter service in a missing or empty
-directory:
-
-```sh
-go install github.com/saramand9/kpro/cmd/kpro@v0.1.0
-kpro new ../hello-kpro --module example.com/hello-kpro --name hello-kpro
-```
-
-For unreleased development from this checkout, use the source-mode command; it
-adds a local `replace` to the generated module:
+The current documentation tracks unreleased `main`. Create a starter service
+from this checkout; source mode adds a local `replace` to the generated module:
 
 ```sh
 go run ./cmd/kpro new ../hello-kpro --module example.com/hello-kpro --name hello-kpro
 ```
+
+The tagged `v0.1.0` CLI and documentation remain internally consistent but
+predate the dependency-neutral mounting API. Do not combine source examples
+from `main` with a binary or module pinned to `v0.1.0`.
 
 Authentication and authorization are application or gateway integrations and are outside the minimal framework quickstart.
 
@@ -251,9 +250,9 @@ import (
 	"log"
 	"time"
 
+	"github.com/saramand9/kpro/codec"
 	"github.com/saramand9/kpro/core"
 	"github.com/saramand9/kpro/middleware"
-	"github.com/saramand9/kpro/codec"
 	"github.com/saramand9/kpro/server"
 	http3x "github.com/saramand9/kpro/transport/http3"
 	"github.com/saramand9/kpro/transport/httpx"
@@ -274,37 +273,43 @@ func main() {
 	}
 	metrics := middleware.NewMetrics()
 
-	app.TCP(":8088", tcp.Config{
+	app.Mount(tcp.New(tcp.Config{
+		Addr:  ":8088",
 		Codec: codec.KProV1(),
-	}).Use(middleware.Recover(), metrics.Middleware()).
+	})).Use(middleware.Recover(), metrics.Middleware()).
 		Handle(msgEcho, echo)
 
-	app.KCP(":8090", kcp.Config{
+	app.Mount(kcp.New(kcp.Config{
+		Addr:  ":8090",
 		Codec: codec.KProV1(),
-	}).Use(middleware.Recover(), metrics.Middleware()).
+	})).Use(middleware.Recover(), metrics.Middleware()).
 		Handle(msgEcho, echo)
 
-	app.QUIC(":8444", quictransport.Config{
-		Codec: codec.KProV1(),
+	app.Mount(quictransport.New(quictransport.Config{
+		Addr:     ":8444",
+		Codec:    codec.KProV1(),
 		CertFile: "server.crt",
 		KeyFile:  "server.key",
-	}).Use(middleware.Recover(), metrics.Middleware()).
+	})).Use(middleware.Recover(), metrics.Middleware()).
 		Handle(msgEcho, echo)
 
-	app.UDP(":8089", udp.Config{
-		Codec:      codec.KProV1(),
+	app.Mount(udp.New(udp.Config{
+		Addr:          ":8089",
+		Codec:         codec.KProV1(),
 		MaxPacketSize: 2048,
-	}).Use(middleware.Recover(), metrics.Middleware()).
+	})).Use(middleware.Recover(), metrics.Middleware()).
 		Handle(msgEcho, echo)
 
-	app.WebSocket(":8091", "/ws", websocket.Config{
-		Codec:   codec.KProV1(),
+	app.Mount(websocket.New(websocket.Config{
+		Addr:       ":8091",
+		Path:       "/ws",
+		Codec:      codec.KProV1(),
 		MaxMessage: 64 * 1024,
-	}).Use(middleware.Recover(), metrics.Middleware()).
+	})).Use(middleware.Recover(), metrics.Middleware()).
 		Handle(msgEcho, echo)
 
-	app.HTTP(":8080").
-		Get("/health", func(ctx *httpx.Context) error {
+	httpEndpoint := server.MountNative(app, httpx.New(httpx.Config{Addr: ":8080"}))
+	httpEndpoint.Get("/health", func(ctx *httpx.Context) error {
 			return ctx.Text(200, "ok\n")
 		}).
 		Get("/metrics", func(ctx *httpx.Context) error {
@@ -318,15 +323,17 @@ func main() {
 			return ctx.JSON(200, map[string]interface{}{"echo": string(body)})
 		})
 
-	app.HTTP3(":8443", http3x.Config{
+	http3Endpoint := server.MountNative(app, http3x.New(http3x.Config{
+		Addr:     ":8443",
 		CertFile: "server.crt",
 		KeyFile:  "server.key",
-	}).Get("/health", func(ctx *http3x.Context) error {
+	}))
+	http3Endpoint.Get("/health", func(ctx *http3x.Context) error {
 		return ctx.Text(200, "ok\n")
 	})
 
-	app.SSE(":8081", "/events").
-		Handle(func(ctx *sse.Context) error {
+	sseEndpoint := server.MountNative(app, sse.New(sse.Config{Addr: ":8081", Path: "/events"}))
+	sseEndpoint.Handle(func(ctx *sse.Context) error {
 			ticker := time.NewTicker(time.Second)
 			defer ticker.Stop()
 			for {
@@ -391,9 +398,14 @@ go run .\cmd\app -quic :8444 -quic-cert server.crt -quic-key server.key -quic-ma
 HTTP validation:
 
 ```powershell
-Invoke-RestMethod -Uri http://127.0.0.1:8080/health
+Invoke-RestMethod -Uri http://127.0.0.1:8080/livez
+Invoke-RestMethod -Uri http://127.0.0.1:8080/readyz
 Invoke-RestMethod -Uri http://127.0.0.1:8080/echo -Method Post -Body "hello" -ContentType "text/plain"
 ```
+
+`/health` remains a compatibility alias for readiness. When GORM is enabled,
+readiness performs a bounded SQL ping and returns only `ready` or `not_ready`;
+it does not expose the dependency error.
 
 ## Examples
 
@@ -431,12 +443,20 @@ See [examples/README.md](examples/README.md) for startup commands.
 - QUIC uses bidirectional QUIC streams as `core.Session` instances and runs KPro messages directly over them. `quic.Config.MaxConnections` caps physical QUIC connections, while `MaxStreams` independently caps active bidirectional stream sessions.
 - `server.Server.Use(...)` installs unified `core.Middleware` for TCP, KCP, QUIC, UDP, WebSocket, HTTP, HTTPS, HTTP/3, SSE and gRPC endpoints mounted before or after the call.
 - `core.Middleware` runs on `core.Invocation`; TCP, KCP, QUIC, UDP and WebSocket build the invocation at real handler execution time after Router scheduling.
+- `core.RouterConfig.ErrorObserver` receives payload-free handler, panic, and
+  error-response failures. Its original errors, peer address, and panic stack
+  are internal diagnostics and still require the application's redaction policy.
 - `server.NewChecked` validates server configuration, while `Start`/`Run` preflight mounted `transport.Validator` components before serving; `server.New` remains the permissive compatibility constructor.
 - Built-in transports advertise mode and capabilities through `transport.Descriptor`; `transport.Describe` gives tooling a conservative fallback for older custom components.
 - `prometheusx` uses bounded transport/operation/result labels, `zapx` uses an application logger, `healthx` bounds probe responses, and every health check must honor its context.
 - `otelx` instruments invocations with an application-supplied or global provider; the application configures and owns the SDK, sampler, exporter, flush, and shutdown lifecycle.
 - SSE is one-way server push and has its own `sse.Context`; the stream setup can reuse unified `core.Middleware`.
-- gRPC uses native gRPC service and method routing. Unary and stream RPCs reuse unified `core.Middleware` through `server.GRPC` / `grpcx.Server.Use`; they are not converted into `core.Message`.
+- HTTP and HTTPS first attempt graceful drain; a failed or expired drain
+  force-closes remaining non-hijacked HTTP connections and returns the shutdown
+  error. SSE first cancels stream request contexts, then uses the same bounded
+  drain and force-close fallback. A connection explicitly hijacked through
+  `net/http` is caller-owned.
+- gRPC uses native service and method routing. Unary and stream RPCs reuse unified `core.Middleware` through `server.MountNative` / `grpcx.Server.Use`; they are not converted into `core.Message`.
 - The framework avoids exposing a Netty-style pipeline API. The public model is `Protocol + Middleware + Router + Handler`.
 - App server usage is documented in [docs/app-server.md](docs/app-server.md).
 - GORM database and eventing architecture are documented in [docs/database-architecture.md](docs/database-architecture.md).

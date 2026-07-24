@@ -23,6 +23,13 @@ func TestInitAppPersistenceCreatesServices(t *testing.T) {
 	if resources == nil || resources.SQL == nil || services.Users == nil || services.Projects == nil || services.Commerce == nil {
 		t.Fatalf("resources=%v services=%#v", resources, services)
 	}
+	sqlDB, err := resources.SQL.SQLDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sqlDB.Stats().MaxOpenConnections; got != 1 {
+		t.Fatalf("sqlite MaxOpenConnections = %d, want 1", got)
+	}
 	defer func() {
 		if err := resources.Shutdown(context.Background()); err != nil {
 			t.Fatal(err)

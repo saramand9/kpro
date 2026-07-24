@@ -30,23 +30,26 @@ Use this route for a general project assessment:
    transports.
 2. Read [project-map.md](project-map.md) for package ownership and runtime flow.
 3. Read [golden-path.md](golden-path.md) for recommended application assembly.
-4. Read [production-readiness.md](production-readiness.md) for built-in versus
+4. Read [dependency-boundaries.md](dependency-boundaries.md) before changing
+   server/transport imports or introducing another module.
+5. Read [production-readiness.md](production-readiness.md) for built-in versus
    external production work.
-5. Read [api-stability.md](api-stability.md) before evaluating public API
+6. Read [api-stability.md](api-stability.md) before evaluating public API
    maturity.
-6. Check [benchmark/budgets.json](../benchmark/budgets.json) and
+7. Check [benchmark/budgets.json](../benchmark/budgets.json) and
    [benchmark/RESULTS.md](../benchmark/RESULTS.md) before making performance
    claims.
 
 Use this route for code-level runtime analysis:
 
 1. `server/server.go`
-2. `core/router.go`
-3. `core/invocation.go`
-4. `transport/transport.go`
-5. `transport/capability.go`
-6. `transport/validation.go`
-7. The specific transport package being changed.
+2. `server/mount.go`
+3. `core/router.go`
+4. `core/invocation.go`
+5. `transport/transport.go`
+6. `transport/capability.go`
+7. `transport/validation.go`
+8. The specific transport package being changed.
 
 Use this route for eventing/data analysis:
 
@@ -61,7 +64,7 @@ Use this route for eventing/data analysis:
 
 | Concern | Files |
 | --- | --- |
-| Server construction and lifecycle | `server/server.go`, `server/lifecycle.go`, `server/lifecycle_test.go` |
+| Server construction and lifecycle | `server/server.go`, `server/mount.go`, `server/lifecycle.go`, `server/lifecycle_test.go` |
 | Router admission and dispatch | `core/router.go`, `core/router_config.go`, `core/backpressure.go`, `core/router_backpressure_test.go` |
 | Middleware contract | `core/invocation.go`, `middleware/*.go`, `docs/invocation-middleware-design.md` |
 | Context/session lifecycle | `core/context.go`, `core/session.go`, `core/session_lifecycle.go` |

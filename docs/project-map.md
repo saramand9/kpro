@@ -27,7 +27,7 @@ for application code.
 | Path | Primary role | Key files |
 | --- | --- | --- |
 | `core/` | Transport-neutral runtime primitives and message dispatch. | `router.go`, `router_config.go`, `context.go`, `session_lifecycle.go`, `invocation.go`, `backpressure.go`, `lifecycle.go` |
-| `server/` | Process-level owner for transports, middleware, runners, readiness, component error provenance, and managed resources. | `server.go`, `component_error.go`, `lifecycle.go` |
+| `server/` | Dependency-neutral process owner for mounted transport contracts, middleware, readiness, component error provenance, and managed resources. | `server.go`, `mount.go`, `component_error.go`, `lifecycle.go` |
 | `transport/` | Shared transport contracts, readiness, handler-error policy, public extension helpers, capability descriptors, validation, and built-in protocol packages. | `transport.go`, `handler_error.go`, `transportkit/`, `capability.go`, `validation.go` |
 | `codec/` | Binary protocol implementation for KPro message traffic. | `kpro.go`, `codec.go` |
 | `middleware/` | Reusable invocation middleware. | `recover.go`, `ratelimit.go`, `limit.go`, `metrics.go` |
@@ -40,6 +40,9 @@ for application code.
 | `benchmark/` | Microbenchmarks, budget config, and comparison fixtures. | `budgets.json`, `protocol_benchmark_test.go`, `compare/` |
 | `docs/` | Guides for adoption, operation, extension, and internal flows. | `README.md`, `quickstart.md`, `golden-path.md`, `operations.md` |
 
+The compile-time dependency rules for these packages are documented in
+[Dependency Boundaries](dependency-boundaries.md).
+
 ## Runtime Flow
 
 Server startup follows this path:
@@ -47,7 +50,8 @@ Server startup follows this path:
 ```text
 application main
   -> server.NewChecked
-  -> app.Use / app.HTTP / app.Mount / app.Manage
+  -> construct selected concrete transports
+  -> app.Use / app.Mount / app.MountRunner / app.Manage
   -> app.Start(parent context)
   -> claim one-shot lifecycle
   -> validate mounted components

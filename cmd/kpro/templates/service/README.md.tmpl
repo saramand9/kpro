@@ -11,7 +11,10 @@ go mod tidy
 go run .
 ```
 
-Then open `http://localhost:8080/healthz` or `/hello`.
+Then open `http://localhost:8080/livez`, `/readyz`, or `/hello`.
+`/livez` reports process liveness. `/readyz` reports serving readiness; this
+starter has no external dependencies, so both probes succeed while the process
+is serving. `/healthz` is a compatibility alias for `/readyz`.
 
 Before production, configure OpenTelemetry/Prometheus exporters and review the
 KPro production-readiness checklist.

@@ -104,6 +104,9 @@ type Endpoint struct {
 	nextConnID uint64
 	ready      chan struct{}
 	readyOnce  sync.Once
+
+	forceCloseOnce sync.Once
+	forceCloseErr  error
 }
 
 // New creates an HTTP endpoint with normalized defaults.
@@ -270,7 +273,7 @@ func (e *Endpoint) HandleChecked(method, path string, h Handler, middlewares ...
 }
 
 // ListenAndServe starts the HTTP server until ctx is cancelled or serving fails.
-func (e *Endpoint) ListenAndServe(ctx context.Context) error {
+func (e *Endpoint) ListenAndServe(ctx context.Context) (serveErr error) {
 	if err := e.Validate(); err != nil {
 		return err
 	}
@@ -304,12 +307,16 @@ func (e *Endpoint) ListenAndServe(ctx context.Context) error {
 	e.signalReady()
 
 	serveDone := make(chan struct{})
+	var shutdownErr error
 	watcherDone := serveutil.ShutdownOnCancel(ctx, serveDone, func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), e.config.ShutdownTimeout)
 		defer cancel()
-		_ = e.Shutdown(shutdownCtx)
+		shutdownErr = e.Shutdown(shutdownCtx)
 	})
-	defer serveutil.FinishContextWatcher(serveDone, watcherDone)
+	defer func() {
+		serveutil.FinishContextWatcher(serveDone, watcherDone)
+		serveErr = errors.Join(serveErr, shutdownErr)
+	}()
 	if e.config.TLS {
 		return ignoreServerClosed(server.ServeTLS(listener, "", ""))
 	}
@@ -332,12 +339,41 @@ func (e *Endpoint) Shutdown(ctx context.Context) error {
 		}
 		return nil
 	}
-	shutdownErr := server.Shutdown(ctx)
+	shutdownErr := ignoreServerClosed(server.Shutdown(ctx))
 	var listenerErr error
 	if listener != nil {
 		listenerErr = ignoreServerClosed(listener.Close())
 	}
-	return errors.Join(shutdownErr, listenerErr)
+	gracefulErr := errors.Join(shutdownErr, listenerErr)
+	if gracefulErr == nil {
+		return nil
+	}
+	return errors.Join(gracefulErr, e.forceClose())
+}
+
+// forceClose immediately closes the listener and active non-hijacked HTTP
+// connections after a graceful shutdown failure. Hijacked connections are
+// caller-owned under net/http and remain outside Endpoint shutdown. This is
+// intentionally separate from the successful path so a completed drain is
+// never converted into a hard stop.
+func (e *Endpoint) forceClose() error {
+	e.forceCloseOnce.Do(func() {
+		e.mu.RLock()
+		server := e.server
+		listener := e.listener
+		e.mu.RUnlock()
+
+		var serverErr error
+		if server != nil {
+			serverErr = ignoreServerClosed(server.Close())
+		}
+		var listenerErr error
+		if listener != nil {
+			listenerErr = ignoreServerClosed(listener.Close())
+		}
+		e.forceCloseErr = errors.Join(serverErr, listenerErr)
+	})
+	return e.forceCloseErr
 }
 
 func (e *Endpoint) claimStart() error {

@@ -20,10 +20,11 @@ type MessageModule interface {
 }
 
 func RegisterRoutes(app *server.Server, cfg Config) {
-	endpoint := app.UDP(cfg.Addr, udp.Config{
+	endpoint := app.Mount(udp.New(udp.Config{
+		Addr:          cfg.Addr,
 		Codec:         codec.KProV1(),
 		MaxPacketSize: 2048,
-	}).Use(middleware.Recover(), middleware.MaxPayload(1500))
+	})).Use(middleware.Recover(), middleware.MaxPayload(1500))
 
 	registerMessages(endpoint, echo.Module{})
 }

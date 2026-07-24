@@ -19,7 +19,8 @@ type SSEModule interface {
 }
 
 func RegisterRoutes(app *server.Server, cfg Config) {
-	endpoint := app.SSE(cfg.Addr, cfg.Path)
+	endpoint := sse.New(sse.Config{Addr: cfg.Addr, Path: cfg.Path})
+	app.MountRunner(endpoint)
 	registerSSE(endpoint, events.Module{})
 }
 

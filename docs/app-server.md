@@ -17,8 +17,12 @@ kpro/transport/udp     UDP transport
 kpro/transport/grpcx   gRPC server wrapper and service bindings
 kpro/transport/http3   HTTP/3 transport over QUIC
 kpro/middleware        reusable middleware
-kpro/server            app server assembly layer
+kpro/server            dependency-neutral app lifecycle and mounting layer
 ```
+
+`server` imports only `core` and the shared `transport` contracts. Applications
+construct the concrete protocols they use and mount them explicitly. This keeps
+an HTTP-only service from compiling KCP, QUIC, HTTP/3, or gRPC transitively.
 
 The core message-transport flow is:
 
@@ -46,9 +50,11 @@ const msgEcho uint32 = 100
 
 app := server.New(server.Config{Name: "gateway"})
 
-app.TCP(":8088", tcp.Config{
+tcpEndpoint := app.Mount(tcp.New(tcp.Config{
+	Addr:  ":8088",
 	Codec: codec.KProV1(),
-}).
+}))
+tcpEndpoint.
 	Use(middleware.Recover()).
 	Handle(msgEcho, echo)
 
@@ -69,9 +75,10 @@ if err := handle.Wait(); err != nil {
 KCP is still available as a reliable UDP stream transport.
 
 ```go
-app.KCP(":8090", kcp.Config{
+app.Mount(kcp.New(kcp.Config{
+	Addr:  ":8090",
 	Codec: codec.KProV1(),
-}).
+})).
 	Use(middleware.Recover()).
 	Handle(msgEcho, echo)
 ```
@@ -79,10 +86,11 @@ app.KCP(":8090", kcp.Config{
 ### UDP
 
 ```go
-app.UDP(":8089", udp.Config{
-	Codec:      codec.KProV1(),
+app.Mount(udp.New(udp.Config{
+	Addr:          ":8089",
+	Codec:         codec.KProV1(),
 	MaxPacketSize: 2048,
-}).
+})).
 	Use(middleware.Recover()).
 	Handle(msgEcho, echo)
 ```
@@ -98,11 +106,12 @@ stream. `quictransport.Config.MaxConnections` caps physical QUIC connections,
 while `MaxStreams` independently caps active stream sessions.
 
 ```go
-app.QUIC(":8444", quictransport.Config{
-	Codec: codec.KProV1(),
+app.Mount(quictransport.New(quictransport.Config{
+	Addr:     ":8444",
+	Codec:    codec.KProV1(),
 	CertFile: "server.crt",
 	KeyFile:  "server.key",
-}).
+})).
 	Use(middleware.Recover()).
 	Handle(msgEcho, echo)
 ```
@@ -112,10 +121,12 @@ app.QUIC(":8444", quictransport.Config{
 WebSocket uses one WebSocket message as one protocol packet.
 
 ```go
-app.WebSocket(":8091", "/ws", websocket.Config{
-	Codec:   codec.KProV1(),
+app.Mount(websocket.New(websocket.Config{
+	Addr:       ":8091",
+	Path:       "/ws",
+	Codec:      codec.KProV1(),
 	MaxMessage: 64 * 1024,
-}).
+})).
 	Use(middleware.Recover()).
 	Handle(msgEcho, echo)
 ```
@@ -127,7 +138,9 @@ intentionally differ, for example behind a gateway with an explicit origin
 allowlist:
 
 ```go
-app.WebSocket(":8091", "/ws", websocket.Config{
+app.Mount(websocket.New(websocket.Config{
+	Addr:  ":8091",
+	Path:  "/ws",
 	Codec: codec.KProV1(),
 	CheckOrigin: func(r *http.Request) bool {
 		origins := r.Header.Values("Origin")
@@ -138,7 +151,7 @@ app.WebSocket(":8091", "/ws", websocket.Config{
 		return err == nil && origin.Scheme == "https" &&
 			strings.EqualFold(origin.Host, "app.example.com")
 	},
-})
+}))
 ```
 
 The callback is the complete policy. Do not use an unconditional `true` for a
@@ -150,8 +163,8 @@ the proxy strips untrusted values and supplies its own.
 HTTP uses its own request context and path routing instead of msgID routing.
 
 ```go
-app.HTTP(":8080").
-	Get("/health", func(ctx *httpx.Context) error {
+httpEndpoint := server.MountNative(app, httpx.New(httpx.Config{Addr: ":8080"}))
+httpEndpoint.Get("/health", func(ctx *httpx.Context) error {
 		return ctx.Text(200, "ok\n")
 	}).
 	Post("/echo", func(ctx *httpx.Context) error {
@@ -162,19 +175,27 @@ app.HTTP(":8080").
 		return ctx.JSON(200, map[string]interface{}{
 			"echo": string(body),
 		})
-	})
+})
 ```
+
+HTTP and HTTPS attempt graceful request drain first. If the shutdown context
+expires or graceful shutdown otherwise fails, the endpoint closes remaining
+non-hijacked HTTP connections and returns the joined error. Handlers must still
+observe request cancellation; connections explicitly hijacked from `net/http`
+are owned by the hijacking component.
 
 ### HTTPS
 
 HTTPS is HTTP with TLS configuration.
 
 ```go
-app.HTTPS(":8443", httpx.Config{
+httpsEndpoint := server.MountNative(app, httpx.New(httpx.Config{
+	Addr:     ":8443",
+	TLS:      true,
 	CertFile: "server.crt",
 	KeyFile:  "server.key",
-}).
-	Get("/health", health)
+}))
+httpsEndpoint.Get("/health", health)
 ```
 
 ### HTTP/3
@@ -183,12 +204,13 @@ HTTP/3 uses the same path-routing handler model as HTTP/HTTPS, but listens on
 UDP through QUIC and always requires TLS certificates.
 
 ```go
-app.HTTP3(":8443", http3x.Config{
-	CertFile: "server.crt",
-	KeyFile:  "server.key",
+http3Endpoint := server.MountNative(app, http3x.New(http3x.Config{
+	Addr:            ":8443",
+	CertFile:        "server.crt",
+	KeyFile:         "server.key",
 	ShutdownTimeout: 10 * time.Second,
-}).
-	Get("/health", func(ctx *http3x.Context) error {
+}))
+http3Endpoint.Get("/health", func(ctx *http3x.Context) error {
 		return ctx.Text(200, "ok\n")
 	})
 ```
@@ -205,8 +227,8 @@ shutdown, which does not guarantee reply delivery.
 SSE is an HTTP streaming endpoint for server-to-client events.
 
 ```go
-app.SSE(":8081", "/events").
-	Handle(func(ctx *sse.Context) error {
+sseEndpoint := server.MountNative(app, sse.New(sse.Config{Addr: ":8081", Path: "/events"}))
+sseEndpoint.Handle(func(ctx *sse.Context) error {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 		for {
@@ -219,8 +241,12 @@ app.SSE(":8081", "/events").
 				}
 			}
 		}
-	})
+})
 ```
+
+SSE shutdown cancels stream request contexts before draining. If a slow client
+keeps a write blocked through the drain deadline, the endpoint force-closes the
+non-hijacked connection so the write can return.
 
 Handlers for message transports receive a transport-neutral context:
 
@@ -238,6 +264,14 @@ The default app server enables TCP, KCP, UDP, WebSocket, HTTP, and SSE:
 ```powershell
 go run .\cmd\app -tcp :8088 -kcp :8090 -udp :8089 -ws :8091 -http :8080 -sse :8081
 ```
+
+The reference app exposes `/livez`, `/readyz`, and a compatibility `/health`
+alias on HTTP and HTTP/3. Readiness succeeds without an external database; when
+GORM is enabled it performs a bounded SQL ping and returns a generic 503 on
+failure. SQLite defaults to one open/idle connection, while MySQL/PostgreSQL
+default to 16 open and 8 idle connections with 30-minute lifetime and 5-minute
+idle limits. The `-gorm-max-open-conns`, `-gorm-max-idle-conns`,
+`-gorm-conn-max-lifetime`, and `-gorm-conn-max-idle-time` flags override them.
 
 HTTP/3 is optional because it requires certificates:
 

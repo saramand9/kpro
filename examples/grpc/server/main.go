@@ -38,7 +38,8 @@ func main() {
 	flag.Parse()
 
 	app := server.New()
-	grpcEndpoint := app.GRPC(*addr)
+	grpcEndpoint := grpcx.NewServer(*addr)
+	app.MountRunner(grpcEndpoint)
 	grpcx.RegisterGreeter(grpcEndpoint, GreeterService{})
 
 	log.Printf("grpc server listening on %s", *addr)

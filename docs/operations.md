@@ -69,6 +69,15 @@ resource shutdown may be retried by a later call. If runner stop or waiting
 times out, resources remain open to avoid closing them underneath active
 handlers.
 
+HTTP and HTTPS attempt graceful `net/http` shutdown first. If that drain fails
+or reaches its deadline, the endpoint closes remaining non-hijacked HTTP
+connections and returns the joined graceful/force-close error; active request
+contexts are canceled and blocked network I/O is released by that hard close.
+SSE cancels stream request contexts before attempting the same bounded drain and
+force-close fallback. Go cannot terminate user code that permanently ignores
+its context. A connection explicitly hijacked through `net/http` is no longer
+owned by the server and must be tracked and closed by the hijacking component.
+
 Message transport shutdown is a bounded stop, not a reply-delivery barrier. It
 closes acceptance, session, and writer paths; outbound sends and replies are
 at-most-once, and shutdown does not confirm that queued or in-flight replies
@@ -136,12 +145,14 @@ TCP, KCP, QUIC, UDP, and WebSocket configs also expose
 affected session when the transport's supplied handler returns an error.
 `HandlerErrorContinue` keeps it open; choose that only when subsequent messages
 remain safe. With a transport mounted through `server.Server`, this boundary is
-Router dispatch/admission; errors returned later by registered Router handlers
-are logged and sent as a safe `MsgError` by the Router. The observer receives a
-stable snapshot containing transport, connection, remote address, message ID,
-sequence, and the original error. Observer panics are isolated, but observers
-must remain fast, concurrency-safe, non-blocking, and subject to peer-data
-redaction policy.
+Router dispatch/admission. Configure `core.RouterConfig.ErrorObserver` for
+errors returned later by registered Router handlers, recovered panics, and
+failures to send the safe `MsgError` response. Its payload-free event contains
+transport, connection, remote address, message ID, sequence, the original
+error, optional response error, and a panic stack. A nil observer preserves the
+standard-log compatibility behavior. Observer panics are isolated, but
+observers run synchronously and may run concurrently, so they must remain fast,
+concurrency-safe, non-blocking, and subject to diagnostic redaction policy.
 
 Transport limits stop different failure modes. Connection/session/stream caps bound peer state; frame, packet, message, header, and body limits bound parsing allocations; send queues bound slow consumers; read/write/idle timeouts bound resource residence. Set all applicable layers so an upstream permissive limit cannot defeat a downstream safety limit.
 

@@ -23,7 +23,7 @@ func main() {
 	flag.Parse()
 
 	app := server.New(server.Config{Name: "tcp-example"})
-	endpoint := app.TCP(*addr, tcp.Config{Codec: codec.KProV1()})
+	endpoint := app.Mount(tcp.New(tcp.Config{Addr: *addr, Codec: codec.KProV1()}))
 	endpoint.Use(middleware.Recover())
 	if *connRate > 0 {
 		endpoint.Use(middleware.ConnRateLimit(middleware.RateLimitConfig{

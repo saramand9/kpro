@@ -15,22 +15,22 @@ go run ./cmd/kpro new ../orders --module example.com/orders --name orders
 
 The target must be missing or empty. The source-mode generator auto-detects
 this checkout and records it as a quoted local replacement; pass
-`--kpro-replace <checkout>` when running the tool elsewhere. For a shared build,
-install `github.com/saramand9/kpro/cmd/kpro@v0.1.0`; the released generator pins
-that exact KPro version without a local replacement. The generated service
-already includes checked construction and explicit example HTTP limits. Review
-those values for the workload, then add real health checks and follow the
-production checklist.
+`--kpro-replace <checkout>` when running the tool elsewhere. Current `main`
+contains a source-incompatible dependency-boundary change planned for the next
+minor release; its examples must not be mixed with the tagged `v0.1.0` module or
+CLI. The generated service already includes checked construction and explicit
+example HTTP limits. Review those values for the workload, then add real health
+checks and follow the production checklist.
 
 ## 2. Start with the protocol your contract requires
 
 | Need | Recommended starting point |
 | --- | --- |
-| Browser, REST-style, webhook, or ordinary request/response API | HTTP/HTTPS with `server.HTTP` or `server.HTTPS` |
-| Protobuf service contract and gRPC ecosystem interoperability | `server.GRPC` |
-| One-way server event stream to an HTTP client | `server.SSE` |
+| Browser, REST-style, webhook, or ordinary request/response API | `httpx.New` mounted with `server.MountNative` |
+| Protobuf service contract and gRPC ecosystem interoperability | `grpcx.NewServer` mounted with `server.MountNative` |
+| One-way server event stream to an HTTP client | `sse.New` mounted with `server.MountNative` |
 | Persistent binary sessions, application message IDs, or custom framing | TCP, KCP, QUIC, UDP, or WebSocket message endpoints |
-| HTTP semantics over QUIC | `server.HTTP3` |
+| HTTP semantics over QUIC | `http3.New` mounted with `server.MountNative` |
 
 Do not add a second protocol only to make the deployment look more general. Add it when a client contract or measured workload requires it.
 
@@ -68,13 +68,17 @@ app.Use(
 	middleware.MaxPayload(1<<20),
 )
 
-httpAPI := app.HTTP(":8080", httpx.Config{
+httpAPI, err := server.MountNativeChecked(app, httpx.New(httpx.Config{
+	Addr:            ":8080",
 	ReadTimeout:     5 * time.Second,
 	WriteTimeout:    10 * time.Second,
 	IdleTimeout:     60 * time.Second,
 	ShutdownTimeout: 10 * time.Second,
 	MaxBodyBytes:    1 << 20,
-})
+}))
+if err != nil {
+	return err
+}
 registerOrderRoutes(httpAPI, orderService)
 ```
 
@@ -84,6 +88,12 @@ collects errors from every mounted component implementing
 side effects and return all independently useful problems with `errors.Join`.
 `server.New` remains the compatibility constructor and applies the same runtime
 defaults without the checked-construction error return.
+
+Concrete protocols are constructed in their own packages and mounted through
+the dependency-neutral `server` lifecycle. Importing `server` alone therefore
+does not compile every built-in transport. Message transports use `Mount`;
+native HTTP-style and RPC transports use the type-preserving
+`server.MountNativeChecked` helper during checked assembly.
 
 Here `logger`, the Prometheus `registry`, and `tracerProvider` are constructed
 and owned by the application. Recovery is outermost; OTel installs the span

@@ -12,15 +12,15 @@ UDP 和 WebSocket 的网络输入形式不同，但它们复用同一套 `core.M
 
 ## 流程图
 
-![KPro TCP internal flow](assets/kpro-tcp-flow.png)
+![KPro TCP internal flow](assets/kpro-tcp-flow.svg)
 
-SVG 源文件在 [kpro-tcp-flow.svg](assets/kpro-tcp-flow.svg)。
+该图直接使用可缩放的 [SVG 文件](assets/kpro-tcp-flow.svg)。
 
 ## 关键文件
 
 | 模块 | 文件 | 职责 |
 | --- | --- | --- |
-| 组装层 | `server/server.go` | 挂载 TCP transport，创建 endpoint router，启动 runner |
+| 组装层 | `server/server.go` | 挂载抽象 message transport，创建 endpoint router，启动 runner |
 | TCP transport | `transport/tcp/server.go` | 监听、accept、创建 session、读循环、写循环 |
 | 协议层 | `codec/kpro.go` | KProV1 frame 的解码和编码 |
 | 上下文 | `core/context.go` | 把 `Session + Message` 包装成 handler 可用的 context |
@@ -29,11 +29,11 @@ SVG 源文件在 [kpro-tcp-flow.svg](assets/kpro-tcp-flow.svg)。
 
 ## 启动阶段
 
-业务通常从 `server.New()` 和 `app.TCP(...)` 开始：
+业务通常从 `server.New()`、`tcp.New(...)` 和 `app.Mount(...)` 开始：
 
 ```go
 app := server.New()
-tcpEndpoint := app.TCP(":8088")
+tcpEndpoint := app.Mount(tcp.New(tcp.Config{Addr: ":8088"}))
 tcpEndpoint.HandleSync(100, func(ctx core.Context) error {
 	return ctx.Reply(ctx.Message().ID, ctx.Message().Data)
 })
@@ -44,13 +44,16 @@ err := app.ListenAndServe()
 
 ```text
 server.New()
-  -> app.TCP(addr, cfg)
   -> tcp.New(cfg)
-  -> server.Mount(tcpServer)
+  -> app.Mount(tcpServer)
   -> Endpoint{transport: tcpServer, router: core.NewRouter(...)}
   -> Endpoint.HandleSync(...)
   -> router.HandleSync(msgID, handler)
 ```
+
+`server` only knows the shared `transport.MessageServer` contract. The
+application imports TCP explicitly, so applications that do not use TCP do not
+inherit that implementation as a compile dependency.
 
 这一步还没有网络流量。endpoint 主要持有两个对象：
 

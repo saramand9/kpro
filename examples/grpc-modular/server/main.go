@@ -9,6 +9,7 @@ import (
 
 	routeapp "github.com/saramand9/kpro/examples/grpc-modular/server/internal/app"
 	"github.com/saramand9/kpro/server"
+	"github.com/saramand9/kpro/transport/grpcx"
 )
 
 func main() {
@@ -16,7 +17,9 @@ func main() {
 	flag.Parse()
 
 	app := server.New()
-	routeapp.RegisterServices(app.GRPC(*addr))
+	grpcEndpoint := grpcx.NewServer(*addr)
+	app.MountRunner(grpcEndpoint)
+	routeapp.RegisterServices(grpcEndpoint)
 
 	log.Printf("grpc modular example listening on %s", *addr)
 	if err := app.ListenAndServe(); err != nil {

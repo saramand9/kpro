@@ -56,41 +56,53 @@ func RegisterRoutes(app *server.Server, cfg Config) {
 	}
 
 	if cfg.HTTPAddr != "" {
-		registerHTTP(app.HTTP(cfg.HTTPAddr), httpModules...)
+		httpEndpoint := httpx.New(httpx.Config{Addr: cfg.HTTPAddr})
+		app.MountRunner(httpEndpoint)
+		registerHTTP(httpEndpoint, httpModules...)
 	}
 	if cfg.HTTPSAddr != "" {
-		registerHTTP(app.HTTPS(cfg.HTTPSAddr, httpx.Config{
+		httpsEndpoint := httpx.New(httpx.Config{
+			Addr:     cfg.HTTPSAddr,
+			TLS:      true,
 			CertFile: cfg.HTTPSCertFile,
 			KeyFile:  cfg.HTTPSKeyFile,
-		}), httpModules...)
+		})
+		app.MountRunner(httpsEndpoint)
+		registerHTTP(httpsEndpoint, httpModules...)
 	}
 
 	registerMessages(mountMessageEndpoints(app, cfg), messageModules...)
 
 	if cfg.SSEAddr != "" {
-		registerSSE(app.SSE(cfg.SSEAddr, cfg.SSEPath), events.Module{})
+		sseEndpoint := sse.New(sse.Config{Addr: cfg.SSEAddr, Path: cfg.SSEPath})
+		app.MountRunner(sseEndpoint)
+		registerSSE(sseEndpoint, events.Module{})
 	}
 }
 
 func mountMessageEndpoints(app *server.Server, cfg Config) []*server.Endpoint {
 	endpoints := make([]*server.Endpoint, 0, 3)
 	if cfg.TCPAddr != "" {
-		endpoints = append(endpoints, app.TCP(cfg.TCPAddr, tcp.Config{
+		endpoints = append(endpoints, app.Mount(tcp.New(tcp.Config{
+			Addr:         cfg.TCPAddr,
 			Codec:        codec.KProV1(),
 			MaxFrameSize: 64 * 1024,
-		}).Use(middleware.Recover(), middleware.MaxPayload(64*1024)))
+		})).Use(middleware.Recover(), middleware.MaxPayload(64*1024)))
 	}
 	if cfg.UDPAddr != "" {
-		endpoints = append(endpoints, app.UDP(cfg.UDPAddr, udp.Config{
+		endpoints = append(endpoints, app.Mount(udp.New(udp.Config{
+			Addr:          cfg.UDPAddr,
 			Codec:         codec.KProV1(),
 			MaxPacketSize: 2048,
-		}).Use(middleware.Recover(), middleware.MaxPayload(1500)))
+		})).Use(middleware.Recover(), middleware.MaxPayload(1500)))
 	}
 	if cfg.WSAddr != "" {
-		endpoints = append(endpoints, app.WebSocket(cfg.WSAddr, cfg.WSPath, websocket.Config{
+		endpoints = append(endpoints, app.Mount(websocket.New(websocket.Config{
+			Addr:       cfg.WSAddr,
+			Path:       cfg.WSPath,
 			Codec:      codec.KProV1(),
 			MaxMessage: 64 * 1024,
-		}).Use(middleware.Recover(), middleware.MaxPayload(64*1024)))
+		})).Use(middleware.Recover(), middleware.MaxPayload(64*1024)))
 	}
 	return endpoints
 }

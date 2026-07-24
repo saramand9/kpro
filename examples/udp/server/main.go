@@ -20,10 +20,11 @@ func main() {
 	flag.Parse()
 
 	app := server.New(server.Config{Name: "udp-example"})
-	app.UDP(*addr, udp.Config{
+	app.Mount(udp.New(udp.Config{
+		Addr:          *addr,
 		Codec:         codec.KProV1(),
 		MaxPacketSize: 2048,
-	}).
+	})).
 		Use(middleware.Recover()).
 		Handle(msgid.Echo, echo)
 

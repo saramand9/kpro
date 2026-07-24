@@ -21,10 +21,12 @@ type MessageModule interface {
 }
 
 func RegisterRoutes(app *server.Server, cfg Config) {
-	endpoint := app.WebSocket(cfg.Addr, cfg.Path, websocket.Config{
+	endpoint := app.Mount(websocket.New(websocket.Config{
+		Addr:       cfg.Addr,
+		Path:       cfg.Path,
 		Codec:      codec.KProV1(),
 		MaxMessage: 64 * 1024,
-	}).Use(middleware.Recover(), middleware.MaxPayload(64*1024))
+	})).Use(middleware.Recover(), middleware.MaxPayload(64*1024))
 
 	registerMessages(endpoint, echo.Module{})
 }

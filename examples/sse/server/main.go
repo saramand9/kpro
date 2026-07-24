@@ -18,7 +18,9 @@ func main() {
 	flag.Parse()
 
 	app := server.New(server.Config{Name: "sse-example"})
-	app.SSE(*addr, *path).
+	endpoint := sse.New(sse.Config{Addr: *addr, Path: *path})
+	app.MountRunner(endpoint)
+	endpoint.
 		Handle(func(ctx *sse.Context) error {
 			ticker := time.NewTicker(time.Second)
 			defer ticker.Stop()

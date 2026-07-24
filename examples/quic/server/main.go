@@ -25,7 +25,8 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	endpoint := app.QUIC(*addr, quictransport.Config{
+	endpoint := app.Mount(quictransport.New(quictransport.Config{
+		Addr:                 *addr,
 		TLSConfig:            tlsConfig,
 		MaxStreams:           1024,
 		SendQueueSize:        64,
@@ -33,7 +34,7 @@ func main() {
 		WriteTimeout:         5 * time.Second,
 		HandshakeIdleTimeout: 5 * time.Second,
 		IdleTimeout:          30 * time.Second,
-	})
+	}))
 	endpoint.Use(middleware.Recover())
 	endpoint.HandleSync(msgid.Echo, echo)
 

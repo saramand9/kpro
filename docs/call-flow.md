@@ -9,12 +9,12 @@ flowchart TD
     Main[cmd/app/main.go] --> New[server.New]
     New --> App[server.Server]
 
-    Main --> TCP[app.TCP]
-    Main --> UDP[app.UDP]
-    Main --> WS[app.WebSocket]
-    Main --> HTTP[app.HTTP]
-    Main --> SSE[app.SSE]
-    Main --> GRPC[app.GRPC]
+    Main --> TCP[tcp.New]
+    Main --> UDP[udp.New]
+    Main --> WS[websocket.New]
+    Main --> HTTP[httpx.New]
+    Main --> SSE[sse.New]
+    Main --> GRPC[grpcx.NewServer]
 
     TCP --> MountTCP[server.Mount]
     UDP --> MountUDP[server.Mount]
@@ -156,7 +156,7 @@ flowchart TD
     Invocation --> Middleware[core.Middleware]
     Middleware --> Handler[HTTP Handler]
     Handler --> Response[ctx.Text / ctx.JSON / ctx.Bytes / ctx.Stream]
-    Handler -->|error| ServerError[500 err.Error]
+    Handler -->|error| ServerError[classified status + safe public message]
     Response --> Client
 ```
 
