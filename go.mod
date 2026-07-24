@@ -9,7 +9,7 @@ require (
 	github.com/influxdata/influxdb-client-go/v2 v2.14.0
 	github.com/neo4j/neo4j-go-driver/v5 v5.28.4
 	github.com/prometheus/client_golang v1.19.1
-	github.com/quic-go/quic-go v0.59.1
+	github.com/quic-go/quic-go v0.60.0
 	github.com/redis/go-redis/v9 v9.6.3
 	github.com/xtaci/kcp-go v5.4.20+incompatible
 	go.mongodb.org/mongo-driver v1.17.9
