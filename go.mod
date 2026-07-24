@@ -5,7 +5,7 @@ go 1.25.12
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.32.0
 	github.com/alicebob/miniredis/v2 v2.33.0
-	github.com/elastic/go-elasticsearch/v8 v8.14.0
+	github.com/elastic/go-elasticsearch/v8 v8.19.6
 	github.com/influxdata/influxdb-client-go/v2 v2.14.0
 	github.com/neo4j/neo4j-go-driver/v5 v5.28.4
 	github.com/prometheus/client_golang v1.19.1
@@ -39,7 +39,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/elastic/elastic-transport-go/v8 v8.6.0 // indirect
+	github.com/elastic/elastic-transport-go/v8 v8.9.0 // indirect
 	github.com/go-faster/city v1.0.1 // indirect
 	github.com/go-faster/errors v0.7.1 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
