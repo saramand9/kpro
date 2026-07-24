@@ -38,7 +38,8 @@ func TestServerGRPCRunsWithAppLifecycle(t *testing.T) {
 			return next(ctx)
 		}
 	})
-	endpoint := app.GRPC("127.0.0.1:0")
+	endpoint := grpcx.NewServer("127.0.0.1:0")
+	app.MountRunner(endpoint)
 	grpcx.RegisterGreeter(endpoint, grpcTestGreeter{})
 
 	errCh := make(chan error, 1)

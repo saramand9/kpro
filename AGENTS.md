@@ -27,9 +27,11 @@ the task explicitly changes that boundary.
    route, important files, and current evidence.
 3. [docs/project-map.md](docs/project-map.md) for package ownership and runtime
    flow.
-4. [docs/golden-path.md](docs/golden-path.md) for the recommended application
+4. [docs/dependency-boundaries.md](docs/dependency-boundaries.md) before changing
+   server/transport imports or module boundaries.
+5. [docs/golden-path.md](docs/golden-path.md) for the recommended application
    shape.
-5. [docs/production-readiness.md](docs/production-readiness.md) for production
+6. [docs/production-readiness.md](docs/production-readiness.md) for production
    boundaries and required external validation.
 
 ## Package Map
@@ -37,7 +39,7 @@ the task explicitly changes that boundary.
 | Path | Responsibility |
 | --- | --- |
 | `core/` | Message, Context, Session, Router, middleware invocation, lifecycle state, backpressure. |
-| `server/` | Process-level assembly, checked construction, endpoint mounting, runner ownership, shutdown. |
+| `server/` | Dependency-neutral process assembly, checked construction, endpoint mounting, runner ownership, shutdown. |
 | `transport/` | Common transport contracts, descriptors, validation, and protocol implementations. |
 | `codec/` | KPro binary message codecs for stream and packet transports. |
 | `middleware/` | Shared invocation middleware such as recovery, limits, metrics, and rate limiting. |

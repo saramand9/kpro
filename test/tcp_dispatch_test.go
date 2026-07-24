@@ -45,7 +45,7 @@ func TestTCPAsyncHandlerCanReturnBeforeBlockedSyncHandler(t *testing.T) {
 		})
 	}
 
-	app.TCP(addr, tcp.Config{Codec: codec.KProV1()}).
+	app.Mount(tcp.New(tcp.Config{Addr: addr, Codec: codec.KProV1()})).
 		HandleSync(msgBlock, func(ctx core.Context) error {
 			close(syncStarted)
 			<-releaseSync

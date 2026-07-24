@@ -47,8 +47,8 @@
   <text class="text" x="96" y="246">保存 RouterConfig</text>
 
   <rect class="box setup" x="380" y="190" width="270" height="78" rx="8" />
-  <text class="boxTitle" x="430" y="222">app.TCP(addr, cfg)</text>
-  <text class="text" x="416" y="246">cfg.Addr = addr</text>
+  <text class="boxTitle" x="430" y="222">tcp.New(cfg)</text>
+  <text class="text" x="416" y="246">cfg.Addr set explicitly</text>
 
   <rect class="box setup" x="710" y="190" width="286" height="78" rx="8" />
   <text class="boxTitle" x="768" y="222">server.Mount</text>

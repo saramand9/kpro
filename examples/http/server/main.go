@@ -16,7 +16,9 @@ func main() {
 	flag.Parse()
 
 	app := server.New(server.Config{Name: "http-example"})
-	app.HTTP(*addr).
+	httpEndpoint := httpx.New(httpx.Config{Addr: *addr})
+	app.MountRunner(httpEndpoint)
+	httpEndpoint.
 		Get("/health", func(ctx *httpx.Context) error {
 			return ctx.Text(200, "ok\n")
 		}).

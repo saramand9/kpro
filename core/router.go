@@ -40,6 +40,45 @@ const (
 	DispatchAsync
 )
 
+// RouterErrorStage identifies the Router operation that produced an observed
+// error.
+type RouterErrorStage string
+
+const (
+	// RouterErrorStageHandler reports an error returned by an accepted handler.
+	RouterErrorStageHandler RouterErrorStage = "handler"
+	// RouterErrorStagePanic reports a panic recovered while executing an
+	// accepted handler.
+	RouterErrorStagePanic RouterErrorStage = "panic"
+	// RouterErrorStageResponse reports a standalone failure to deliver a
+	// public error response. Handler and panic response failures remain on
+	// their owning event through ResponseErr.
+	RouterErrorStageResponse RouterErrorStage = "response"
+)
+
+// RouterErrorEvent is a stable, payload-free snapshot of one Router error.
+// Err is the original handler error, a recovered-panic error, or the dispatch
+// error that required a response. ResponseErr reports a failure from
+// Context.Error and retains its errors.Is/errors.As chain. Stack is populated
+// only for a recovered panic and is safe for the observer to retain.
+type RouterErrorEvent struct {
+	Stage       RouterErrorStage
+	Transport   Transport
+	ConnID      uint64
+	RemoteAddr  string
+	MessageID   uint32
+	Sequence    uint64
+	Err         error
+	ResponseErr error
+	Stack       []byte
+}
+
+// RouterErrorObserver observes Router handler, panic, and error-response
+// failures. It is called synchronously on the dispatch caller or Router worker,
+// and calls may run concurrently for different messages. Implementations must
+// return promptly and be concurrency-safe. Observer panics are isolated.
+type RouterErrorObserver func(RouterErrorEvent)
+
 // RouterConfig tunes message dispatch queues, worker counts, and shutdown behavior.
 type RouterConfig struct {
 	// SyncQueueSize is the per-session queue length for sync handlers.
@@ -62,6 +101,10 @@ type RouterConfig struct {
 	SessionIdleTimeout time.Duration
 	// ShutdownTimeout is used when Shutdown receives a context without deadline.
 	ShutdownTimeout time.Duration
+	// ErrorObserver receives structured Router failures. Nil preserves the
+	// compatibility default of logging handler errors and recovered panics and
+	// additionally logs error-response delivery failures.
+	ErrorObserver RouterErrorObserver
 }
 
 type route struct {
@@ -78,11 +121,12 @@ type dispatchTask struct {
 
 // Router maps message ids to handlers and owns dispatch scheduling.
 type Router struct {
-	mu          sync.RWMutex
-	routes      map[uint32]route
-	middlewares []Middleware
-	revision    uint64
-	config      RouterConfig
+	mu            sync.RWMutex
+	routes        map[uint32]route
+	middlewares   []Middleware
+	revision      uint64
+	config        RouterConfig
+	errorObserver RouterErrorObserver
 
 	done      chan struct{}
 	closeOnce sync.Once
@@ -113,14 +157,19 @@ type Router struct {
 // NewRouter creates a Router with normalized defaults.
 func NewRouter(config ...RouterConfig) *Router {
 	cfg := normalizeRouterConfig(firstRouterConfig(config))
+	errorObserver := cfg.ErrorObserver
+	if errorObserver == nil {
+		errorObserver = logRouterError
+	}
 	r := &Router{
-		routes:      make(map[uint32]route),
-		config:      cfg,
-		done:        make(chan struct{}),
-		drained:     make(chan struct{}),
-		asyncQueue:  make(chan dispatchTask, cfg.AsyncQueueSize),
-		asyncSlots:  newCapacity(cfg.AsyncQueueSize),
-		globalSlots: newCapacity(cfg.MaxInflight),
+		routes:        make(map[uint32]route),
+		config:        cfg,
+		errorObserver: errorObserver,
+		done:          make(chan struct{}),
+		drained:       make(chan struct{}),
+		asyncQueue:    make(chan dispatchTask, cfg.AsyncQueueSize),
+		asyncSlots:    newCapacity(cfg.AsyncQueueSize),
+		globalSlots:   newCapacity(cfg.MaxInflight),
 	}
 	return r
 }
@@ -250,8 +299,14 @@ func (r *Router) rejectDispatch(ctx Context, err error, waited bool) error {
 		r.waited.Add(1)
 	}
 	r.rejected.Add(1)
-	_ = ctx.Error(PublicErrorMessage(err))
+	event := newRouterErrorEvent(RouterErrorStageResponse, ctx, err)
+	responseErr := sendRouterErrorResponse(ctx, err)
 	releaseContext(ctx)
+	if responseErr != nil {
+		event.ResponseErr = responseErr
+		r.notifyError(event)
+		return errors.Join(err, fmt.Errorf("send message error response: %w", responseErr))
+	}
 	return err
 }
 
@@ -547,15 +602,86 @@ func (r *Router) execute(task dispatchTask) {
 	defer task.session.release()
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			log.Printf("message handler panic: %v\n%s", recovered, debug.Stack())
-			_ = task.ctx.Error(PublicErrorMessage(ErrRecovered))
+			handlerErr := recoveredHandlerError(recovered)
+			event := newRouterErrorEvent(RouterErrorStagePanic, task.ctx, handlerErr)
+			event.Stack = debug.Stack()
+			event.ResponseErr = sendRouterErrorResponse(task.ctx, handlerErr)
+			r.notifyError(event)
 		}
 	}()
 	inv := NewMessageInvocation(context.Background(), task.ctx)
 	defer inv.Release()
 	if err := task.handler(inv); err != nil {
-		log.Printf("message handler error: %v", err)
-		_ = task.ctx.Error(PublicErrorMessage(err))
+		event := newRouterErrorEvent(RouterErrorStageHandler, task.ctx, err)
+		event.ResponseErr = sendRouterErrorResponse(task.ctx, err)
+		r.notifyError(event)
+	}
+}
+
+func newRouterErrorEvent(stage RouterErrorStage, ctx Context, err error) RouterErrorEvent {
+	event := RouterErrorEvent{
+		Stage: stage,
+		Err:   err,
+	}
+	if ctx == nil {
+		return event
+	}
+	message := ctx.Message()
+	event.Transport = ctx.Transport()
+	event.ConnID = ctx.ConnID()
+	event.RemoteAddr = ctx.RemoteAddr()
+	event.MessageID = message.ID
+	event.Sequence = message.Seq
+	return event
+}
+
+func recoveredHandlerError(recovered any) error {
+	if recoveredErr, ok := recovered.(error); ok {
+		return fmt.Errorf("%w: %w", ErrRecovered, recoveredErr)
+	}
+	return fmt.Errorf("%w: %v", ErrRecovered, recovered)
+}
+
+func sendRouterErrorResponse(ctx Context, cause error) (responseErr error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if recoveredErr, ok := recovered.(error); ok {
+				responseErr = fmt.Errorf("message error response panic: %w", recoveredErr)
+				return
+			}
+			responseErr = fmt.Errorf("message error response panic: %v", recovered)
+		}
+	}()
+	return ctx.Error(PublicErrorMessage(cause))
+}
+
+func (r *Router) notifyError(event RouterErrorEvent) {
+	if r == nil || r.errorObserver == nil {
+		return
+	}
+	defer func() {
+		_ = recover()
+	}()
+	r.errorObserver(event)
+}
+
+func logRouterError(event RouterErrorEvent) {
+	switch event.Stage {
+	case RouterErrorStageHandler:
+		log.Printf("message handler error: %v", event.Err)
+	case RouterErrorStagePanic:
+		log.Printf("message handler panic: %v\n%s", event.Err, event.Stack)
+	}
+	if event.ResponseErr != nil {
+		log.Printf(
+			"message error response failed: transport=%s conn=%d message=%d sequence=%d cause=%v: %v",
+			event.Transport,
+			event.ConnID,
+			event.MessageID,
+			event.Sequence,
+			event.Err,
+			event.ResponseErr,
+		)
 	}
 }
 
@@ -822,8 +948,12 @@ func (s *sessionExecutor) close() {
 			for _, task := range drained {
 				s.router.releaseGlobal()
 				s.router.dropped.Add(1)
-				_ = task.ctx.Error(PublicErrorMessage(ErrRouterClosed))
+				event := newRouterErrorEvent(RouterErrorStageResponse, task.ctx, ErrRouterClosed)
+				event.ResponseErr = sendRouterErrorResponse(task.ctx, ErrRouterClosed)
 				releaseContext(task.ctx)
+				if event.ResponseErr != nil {
+					s.router.notifyError(event)
+				}
 			}
 			return
 		}

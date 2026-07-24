@@ -81,13 +81,16 @@ func main() {
 		middleware.MaxPayload(maxBodyBytes),
 	)
 
-	app.HTTP(*apiAddr, httpx.Config{
+	apiEndpoint := httpx.New(httpx.Config{
+		Addr:            *apiAddr,
 		ReadTimeout:     5 * time.Second,
 		WriteTimeout:    10 * time.Second,
 		IdleTimeout:     60 * time.Second,
 		ShutdownTimeout: shutdownWindow,
 		MaxBodyBytes:    maxBodyBytes,
-	}).Get("/hello", func(ctx *httpx.Context) error {
+	})
+	app.MountRunner(apiEndpoint)
+	apiEndpoint.Get("/hello", func(ctx *httpx.Context) error {
 		return ctx.JSON(http.StatusOK, map[string]string{"message": "hello"})
 	})
 

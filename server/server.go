@@ -14,15 +14,6 @@ import (
 
 	"github.com/saramand9/kpro/core"
 	"github.com/saramand9/kpro/transport"
-	"github.com/saramand9/kpro/transport/grpcx"
-	http3x "github.com/saramand9/kpro/transport/http3"
-	"github.com/saramand9/kpro/transport/httpx"
-	"github.com/saramand9/kpro/transport/kcp"
-	quictransport "github.com/saramand9/kpro/transport/quic"
-	"github.com/saramand9/kpro/transport/sse"
-	"github.com/saramand9/kpro/transport/tcp"
-	"github.com/saramand9/kpro/transport/udp"
-	"github.com/saramand9/kpro/transport/websocket"
 )
 
 var (
@@ -55,10 +46,6 @@ var (
 	_ MiddlewareTarget             = (*Endpoint)(nil)
 	_ transport.Validator          = (*Endpoint)(nil)
 	_ transport.CapabilityProvider = (*Endpoint)(nil)
-	_ MiddlewareTarget             = (*httpx.Endpoint)(nil)
-	_ MiddlewareTarget             = (*http3x.Endpoint)(nil)
-	_ MiddlewareTarget             = (*sse.Endpoint)(nil)
-	_ MiddlewareTarget             = (*grpcx.Server)(nil)
 )
 
 // Config controls the high-level server and the router used by message transports.
@@ -425,102 +412,6 @@ func isNilComponent(component any) bool {
 	default:
 		return false
 	}
-}
-
-// TCP mounts a TCP message endpoint at addr.
-func (s *Server) TCP(addr string, config ...tcp.Config) *Endpoint {
-	cfg := tcp.Config{}
-	if len(config) > 0 {
-		cfg = config[0]
-	}
-	cfg.Addr = addr
-	return s.Mount(tcp.New(cfg))
-}
-
-// KCP mounts a KCP message endpoint at addr.
-func (s *Server) KCP(addr string, config ...kcp.Config) *Endpoint {
-	cfg := kcp.Config{}
-	if len(config) > 0 {
-		cfg = config[0]
-	}
-	cfg.Addr = addr
-	return s.Mount(kcp.New(cfg))
-}
-
-// QUIC mounts a QUIC message endpoint at addr.
-func (s *Server) QUIC(addr string, config quictransport.Config) *Endpoint {
-	config.Addr = addr
-	return s.Mount(quictransport.New(config))
-}
-
-// UDP mounts a UDP packet endpoint at addr.
-func (s *Server) UDP(addr string, config ...udp.Config) *Endpoint {
-	cfg := udp.Config{}
-	if len(config) > 0 {
-		cfg = config[0]
-	}
-	cfg.Addr = addr
-	return s.Mount(udp.New(cfg))
-}
-
-// WebSocket mounts a WebSocket message endpoint at addr and path.
-func (s *Server) WebSocket(addr, path string, config ...websocket.Config) *Endpoint {
-	cfg := websocket.Config{}
-	if len(config) > 0 {
-		cfg = config[0]
-	}
-	cfg.Addr = addr
-	cfg.Path = path
-	return s.Mount(websocket.New(cfg))
-}
-
-// HTTP mounts a native HTTP endpoint at addr.
-func (s *Server) HTTP(addr string, config ...httpx.Config) *httpx.Endpoint {
-	cfg := httpx.Config{}
-	if len(config) > 0 {
-		cfg = config[0]
-	}
-	cfg.Addr = addr
-	endpoint := httpx.New(cfg)
-	s.MountRunner(endpoint)
-	return endpoint
-}
-
-// HTTPS mounts a native HTTPS endpoint at addr using config TLS files.
-func (s *Server) HTTPS(addr string, config httpx.Config) *httpx.Endpoint {
-	config.Addr = addr
-	config.TLS = true
-	endpoint := httpx.New(config)
-	s.MountRunner(endpoint)
-	return endpoint
-}
-
-// GRPC mounts a gRPC server at addr.
-func (s *Server) GRPC(addr string, options ...grpcx.Option) *grpcx.Server {
-	endpoint := grpcx.NewServer(addr, options...)
-	s.MountRunner(endpoint)
-	return endpoint
-}
-
-// HTTP3 mounts a native HTTP/3 endpoint at addr.
-func (s *Server) HTTP3(addr string, config http3x.Config) *http3x.Endpoint {
-	config.Addr = addr
-	endpoint := http3x.New(config)
-	s.MountRunner(endpoint)
-	return endpoint
-}
-
-// SSE mounts a Server-Sent Events endpoint at addr and path.
-func (s *Server) SSE(addr, path string, config ...sse.Config) *sse.Endpoint {
-	cfg := sse.Config{}
-	if len(config) > 0 {
-		cfg = config[0]
-	}
-	cfg.Addr = addr
-	cfg.Path = path
-	endpoint := sse.New(cfg)
-	s.MountRunner(endpoint)
-	return endpoint
 }
 
 // ListenAndServe starts all mounted runners and stops the rest when one exits.

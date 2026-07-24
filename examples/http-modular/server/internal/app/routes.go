@@ -20,7 +20,8 @@ type HTTPModule interface {
 }
 
 func RegisterRoutes(app *server.Server, cfg Config) {
-	httpEndpoint := app.HTTP(cfg.HTTPAddr)
+	httpEndpoint := httpx.New(httpx.Config{Addr: cfg.HTTPAddr})
+	app.MountRunner(httpEndpoint)
 
 	registerHTTP(httpEndpoint,
 		health.Module{},

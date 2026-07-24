@@ -22,10 +22,13 @@ type HTTPModule interface {
 }
 
 func RegisterRoutes(app *server.Server, cfg Config) {
-	endpoint := app.HTTPS(cfg.Addr, httpx.Config{
+	endpoint := httpx.New(httpx.Config{
+		Addr:     cfg.Addr,
+		TLS:      true,
 		CertFile: cfg.CertFile,
 		KeyFile:  cfg.KeyFile,
 	})
+	app.MountRunner(endpoint)
 	registerHTTP(endpoint,
 		health.Module{},
 		echo.Module{},

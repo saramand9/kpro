@@ -174,7 +174,8 @@ Rate limiting can be scoped by the middleware users choose:
 Endpoint-level `Use` scopes middleware to one endpoint:
 
 ```go
-app.TCP(":8088").Use(middleware.MaxPayload(64 * 1024))
+app.Mount(tcp.New(tcp.Config{Addr: ":8088"})).
+	Use(middleware.MaxPayload(64 * 1024))
 ```
 
 All universal-server endpoints use `core.Middleware`; native protocols keep native business handlers, not native middleware APIs.

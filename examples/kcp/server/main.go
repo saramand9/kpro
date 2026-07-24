@@ -20,12 +20,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	endpoint := app.KCP(*addr, kcp.Config{
+	endpoint := app.Mount(kcp.New(kcp.Config{
+		Addr:           *addr,
 		MaxConnections: 1024,
 		SendQueueSize:  64,
 		ReadTimeout:    30 * time.Second,
 		WriteTimeout:   5 * time.Second,
-	})
+	}))
 	endpoint.Use(middleware.Recover())
 	endpoint.HandleSync(msgid.Echo, echo)
 

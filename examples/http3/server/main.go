@@ -29,10 +29,13 @@ func main() {
 	defer cleanup()
 
 	app := server.New(server.Config{Name: "http3-example"})
-	app.HTTP3(*addr, http3x.Config{
+	httpEndpoint := http3x.New(http3x.Config{
+		Addr:     *addr,
 		CertFile: certFile,
 		KeyFile:  keyFile,
-	}).
+	})
+	app.MountRunner(httpEndpoint)
+	httpEndpoint.
 		Get("/health", func(ctx *http3x.Context) error {
 			return ctx.Text(200, "ok\n")
 		}).

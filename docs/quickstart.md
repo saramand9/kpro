@@ -15,7 +15,9 @@ without changing this startup shape.
   unreleased source.
 - Port `8080` available, or another port supplied with `-addr`.
 
-`v0.1.0` is the initial pre-1.0 developer release. Pin that exact version and
+`v0.1.0` is the initial pre-1.0 developer release. This guide tracks current
+`main`, whose dependency-neutral mounting API is planned for the next minor
+release. Pin one revision and use the documentation from the same revision;
 review the [API stability policy](api-stability.md) before upgrading.
 
 ## 2. Start the service
@@ -35,25 +37,8 @@ quickstart ready on :8080
 
 The complete source is [examples/quickstart/main.go](../examples/quickstart/main.go).
 
-To scaffold a separate service with the released CLI, install the exact version
-and run it outside the KPro checkout. The generated `go.mod` pins the same KPro
-release and contains no local `replace`:
-
-```sh
-go install github.com/saramand9/kpro/cmd/kpro@v0.1.0
-kpro doctor
-kpro version
-kpro new ../hello-kpro --module example.com/hello-kpro --name hello-kpro
-cd ../hello-kpro
-go mod tidy
-go run .
-```
-
-Private-module installations also need the organization's normal Git
-credentials and `GOPRIVATE` configuration. The target must be missing or empty;
-the command refuses to overwrite a non-empty directory.
-
-For unreleased development, run the tool from a KPro checkout instead:
+To scaffold a separate service using the API described here, run the tool from
+the same KPro checkout:
 
 ```sh
 go run ./cmd/kpro doctor
@@ -64,6 +49,13 @@ go mod tidy
 go run .
 ```
 
+The tagged `v0.1.0` CLI generates a service for the `v0.1.0` API and remains
+usable with the documentation at that tag. It predates `server.MountNative`;
+do not combine that binary with current `main` examples. Private-module use also
+requires the organization's normal Git credentials and `GOPRIVATE`
+configuration. The target must be missing or empty; the command refuses to
+overwrite a non-empty directory.
+
 `doctor` prints the Go runtime, platform, main module, and available VCS
 revision. `version` prints build metadata; a checkout run reports development
 values, while release artifacts receive version, commit, and build time from
@@ -72,12 +64,16 @@ the release pipeline.
 The source-mode tool detects the current KPro checkout and writes a quoted local
 `replace` into the generated `go.mod`; `--kpro-replace <checkout>` selects one
 explicitly. The generated service includes checked construction, explicit HTTP
-timeouts/body limits, Zap logging, recovery middleware, two starter routes,
-process signals, and graceful shutdown. Review those example limits against the
-workload, then add real readiness checks, metrics/tracing, and dependency
-ownership before deployment.
+timeouts/body limits, Zap logging, recovery middleware, separate liveness and
+readiness probes, a hello route, process signals, and graceful shutdown. The
+starter has no external dependency, so readiness succeeds while the process is
+serving. Add dependency checks, metrics/tracing, and resource ownership when the
+service begins using them.
 
 ## 3. Call the routes
+
+For `examples/quickstart`, which was started at the beginning of this guide,
+use:
 
 With `curl`:
 
@@ -107,6 +103,10 @@ Invoke-RestMethod http://127.0.0.1:8080/metrics
 The metrics endpoint exposes the built-in in-process `middleware.Metrics`
 snapshot. It is not a Prometheus exporter or a replacement for an external
 observability backend.
+
+If you instead started the generated `hello-kpro` service, call `/livez`,
+`/readyz`, and `/hello`; `/healthz` is a compatibility alias for `/readyz`.
+`GET /hello` returns `{"message":"hello from hello-kpro"}`.
 
 ## 4. Stop gracefully
 
@@ -206,13 +206,14 @@ headers, and 4 MiB for request bodies. Explicit values make the service contract
 reviewable:
 
 ```go
-app.HTTP(":8080", httpx.Config{
+httpEndpoint := server.MountNative(app, httpx.New(httpx.Config{
+	Addr:            ":8080",
 	ReadTimeout:     5 * time.Second,
 	WriteTimeout:    10 * time.Second,
 	IdleTimeout:     60 * time.Second,
 	ShutdownTimeout: 5 * time.Second,
 	MaxBodyBytes:    1 << 20,
-})
+}))
 ```
 
 These values are examples, not universal production recommendations. Select
