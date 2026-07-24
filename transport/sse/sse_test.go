@@ -40,7 +40,7 @@ func TestEndpointServeWritesHandlerErrorEvent(t *testing.T) {
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
 	}
-	wantBody := "event: error\ndata: boom\n\n"
+	wantBody := "event: error\ndata: internal error\n\n"
 	if !strings.Contains(resp.Body.String(), wantBody) {
 		t.Fatalf("body = %q, want to contain %q", resp.Body.String(), wantBody)
 	}

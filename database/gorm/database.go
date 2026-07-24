@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/database/common/lifecycle"
+	"github.com/saramand9/kpro/database/common/lifecycle"
 	"gorm.io/gorm"
 )
 
@@ -20,7 +20,8 @@ type Config struct {
 	Dialector gorm.Dialector
 	// GORMConfig is passed to gorm.Open when Dialector is used.
 	GORMConfig *gorm.Config
-	// DB reuses an already opened GORM database.
+	// DB reuses an already opened GORM database. Its database/sql pool remains
+	// caller-owned and is never closed by Database.Close.
 	DB              *gorm.DB
 	MaxOpenConns    int
 	MaxIdleConns    int
@@ -33,6 +34,7 @@ type Config struct {
 type Database struct {
 	name string
 	db   *gorm.DB
+	owns bool
 }
 
 var _ lifecycle.Resource = (*Database)(nil)
@@ -43,6 +45,7 @@ func Open(ctx context.Context, config Config) (*Database, error) {
 		return nil, fmt.Errorf("%w: use DB or Dialector, not both", ErrInvalidConfig)
 	}
 	db := config.DB
+	owns := db == nil
 	if db == nil {
 		if config.Dialector == nil {
 			return nil, fmt.Errorf("%w: dialector or DB is required", ErrInvalidConfig)
@@ -57,9 +60,10 @@ func Open(ctx context.Context, config Config) (*Database, error) {
 			return nil, err
 		}
 	}
-	database := Wrap(config.Name, db)
+	database := wrap(config.Name, db, owns)
 	sqlDB, err := database.SQLDB()
 	if err != nil {
+		_ = database.Close()
 		return nil, err
 	}
 	applyPoolConfig(sqlDB, config)
@@ -77,12 +81,16 @@ func Open(ctx context.Context, config Config) (*Database, error) {
 	return database, nil
 }
 
-// Wrap exposes an existing GORM database as a lifecycle resource.
+// Wrap exposes an existing caller-owned GORM database as a lifecycle resource.
 func Wrap(name string, db *gorm.DB) *Database {
+	return wrap(name, db, false)
+}
+
+func wrap(name string, db *gorm.DB, owns bool) *Database {
 	if name == "" {
 		name = "main"
 	}
-	return &Database{name: name, db: db}
+	return &Database{name: name, db: db, owns: owns}
 }
 
 func applyPoolConfig(db *sql.DB, config Config) {
@@ -164,14 +172,18 @@ func (d *Database) Health(ctx context.Context) lifecycle.Health {
 
 // Close implements lifecycle.Resource.
 func (d *Database) Close() error {
+	return d.Shutdown(context.Background())
+}
+
+// Shutdown closes the database/sql pool only when Open created it from a
+// Dialector. Pools supplied through Config.DB or Wrap remain caller-owned.
+func (d *Database) Shutdown(context.Context) error {
+	if d == nil || !d.owns {
+		return nil
+	}
 	sqlDB, err := d.SQLDB()
 	if err != nil {
 		return nil
 	}
 	return sqlDB.Close()
-}
-
-// Shutdown closes the underlying database/sql pool for server lifecycle hooks.
-func (d *Database) Shutdown(context.Context) error {
-	return d.Close()
 }

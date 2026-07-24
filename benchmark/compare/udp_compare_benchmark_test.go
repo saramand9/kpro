@@ -12,9 +12,9 @@ import (
 	"time"
 
 	"github.com/panjf2000/gnet/v2"
-	"github.com/saramand9/bignet/kpro/codec"
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/transport/udp"
+	"github.com/saramand9/kpro/codec"
+	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/transport/udp"
 )
 
 func BenchmarkKProUDP_Echo(b *testing.B) {

@@ -6,7 +6,7 @@ package service
 import (
 	"context"
 
-	"github.com/saramand9/bignet/kpro/internal/modules/commerce"
+	"github.com/saramand9/kpro/internal/modules/commerce"
 )
 
 type Store interface {

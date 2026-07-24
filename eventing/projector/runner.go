@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/eventing/delivery"
+	"github.com/saramand9/kpro/eventing/delivery"
+	"github.com/saramand9/kpro/eventing/events"
 )
 
 // RetryPolicy chooses the delay after a failed runner pass. ConsecutiveErrors
@@ -162,25 +164,30 @@ func (r *Runner) Run(ctx context.Context) error {
 			if contextErr := context.Cause(ctx); contextErr != nil {
 				return contextErr
 			}
-		}
-		r.recordPass(processed, err)
-		if err != nil {
-			if r.onError != nil {
-				r.onError(err)
-			}
 			consecutiveErrors++
+			passErr := err
+			if handlerErr := callErrorHandler(r.onError, err); handlerErr != nil {
+				passErr = errors.Join(passErr, handlerErr)
+			}
 			delay := r.errorDelay
 			if r.retryPolicy != nil {
-				delay = r.retryPolicy.RetryDelay(consecutiveErrors, err)
+				policyDelay, policyErr := callRetryPolicy(r.retryPolicy, consecutiveErrors, passErr)
+				if policyErr != nil {
+					passErr = errors.Join(passErr, policyErr)
+				} else {
+					delay = policyDelay
+				}
 				if delay < 0 {
 					delay = 0
 				}
 			}
+			r.recordPass(processed, passErr)
 			if err := wait(ctx, delay); err != nil {
 				return err
 			}
 			continue
 		}
+		r.recordPass(processed, nil)
 		consecutiveErrors = 0
 		if processed == 0 {
 			if err := wait(ctx, r.idleDelay); err != nil {
@@ -205,7 +212,7 @@ func (r *Runner) runOnce(ctx context.Context) (int, error) {
 		if projector == nil {
 			continue
 		}
-		name := projector.Name()
+		name := strings.TrimSpace(projector.Name())
 		records, err := r.store.Fetch(ctx, name, r.batchSize)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("fetch projector %q: %w", name, err))
@@ -227,7 +234,7 @@ func (r *Runner) runOnce(ctx context.Context) (int, error) {
 					batchLeaseDeadline = deadline
 				}
 			} else {
-				handleErr = projector.Handle(ctx, record.Envelope)
+				handleErr = callProjector(projector, ctx, record.Envelope)
 			}
 			if handleErr != nil {
 				errs = append(errs, fmt.Errorf("handle projector %q event %q: %w", name, record.Envelope.ID, handleErr))
@@ -304,8 +311,46 @@ func handleWithLeaseRenewal(
 		renewErr = result.err
 		nextLeaseDeadline = result.deadline
 	}()
-	handleErr = projector.Handle(handleCtx, record.Envelope)
+	handleErr = callProjector(projector, handleCtx, record.Envelope)
 	return handleErr, nil, nextLeaseDeadline
+}
+
+func callProjector(projector Projector, ctx context.Context, envelope events.Envelope) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = recoveredError("projector handler", recovered)
+		}
+	}()
+	return projector.Handle(ctx, envelope)
+}
+
+func callErrorHandler(handler func(error), err error) (panicErr error) {
+	if handler == nil {
+		return nil
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			panicErr = recoveredError("projector error handler", recovered)
+		}
+	}()
+	handler(err)
+	return nil
+}
+
+func callRetryPolicy(policy RetryPolicy, consecutiveErrors int, err error) (delay time.Duration, panicErr error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			panicErr = recoveredError("projector retry policy", recovered)
+		}
+	}()
+	return policy.RetryDelay(consecutiveErrors, err), nil
+}
+
+func recoveredError(component string, recovered any) error {
+	if err, ok := recovered.(error); ok {
+		return fmt.Errorf("%s panicked: %w", component, err)
+	}
+	return fmt.Errorf("%s panicked: %v", component, recovered)
 }
 
 func maintainLease(
@@ -454,6 +499,23 @@ func (r *Runner) recordPass(processed int, err error) {
 func (r *Runner) validate() error {
 	if r == nil || r.store == nil {
 		return fmt.Errorf("projector runner requires a delivery store")
+	}
+	if len(r.projectors) == 0 {
+		return fmt.Errorf("projector runner requires at least one projector")
+	}
+	names := make(map[string]struct{}, len(r.projectors))
+	for i, projector := range r.projectors {
+		if projector == nil {
+			return fmt.Errorf("projector %d is nil", i)
+		}
+		name := strings.TrimSpace(projector.Name())
+		if name == "" {
+			return fmt.Errorf("projector %d name is required", i)
+		}
+		if _, exists := names[name]; exists {
+			return fmt.Errorf("projector %q is duplicated", name)
+		}
+		names[name] = struct{}{}
 	}
 	return nil
 }

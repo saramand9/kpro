@@ -13,13 +13,14 @@ separate application from this checkout:
 go run ./cmd/kpro new ../orders --module example.com/orders --name orders
 ```
 
-The target must be missing or empty. The generator auto-detects this checkout
-and records it as a quoted local replacement; pass `--kpro-replace <checkout>`
-when running the tool elsewhere. The generated service already includes
-checked construction and explicit example HTTP limits. Review those values for
-the workload, then add real health checks and follow the production checklist.
-Until KPro has release tags, use the local replacement while developing and a
-reviewed commit for shared builds.
+The target must be missing or empty. The source-mode generator auto-detects
+this checkout and records it as a quoted local replacement; pass
+`--kpro-replace <checkout>` when running the tool elsewhere. For a shared build,
+install `github.com/saramand9/kpro/cmd/kpro@v0.1.0`; the released generator pins
+that exact KPro version without a local replacement. The generated service
+already includes checked construction and explicit example HTTP limits. Review
+those values for the workload, then add real health checks and follow the
+production checklist.
 
 ## 2. Start with the protocol your contract requires
 
@@ -32,6 +33,12 @@ reviewed commit for shared builds.
 | HTTP semantics over QUIC | `server.HTTP3` |
 
 Do not add a second protocol only to make the deployment look more general. Add it when a client contract or measured workload requires it.
+
+HTTP/3 early data is deliberately disabled by default. Set
+`http3.Config.Allow0RTT` only when every accepted route is idempotent or the
+application provides replay protection. Configure `MaxConnections`,
+`MaxBodyBytes`, header limits, and timeouts explicitly rather than treating the
+QUIC stream limit as a physical connection limit.
 
 ## 3. Assemble one application server
 
@@ -71,7 +78,7 @@ httpAPI := app.HTTP(":8080", httpx.Config{
 registerOrderRoutes(httpAPI, orderService)
 ```
 
-`NewChecked` rejects an invalid server config. On `ListenAndServe`, KPro also
+`NewChecked` rejects an invalid server config. On `Run`, KPro also
 collects errors from every mounted component implementing
 `transport.Validator` before it starts serving. Keep custom validation free of
 side effects and return all independently useful problems with `errors.Join`.
@@ -83,6 +90,14 @@ and owned by the application. Recovery is outermost; OTel installs the span
 context before Zap reads trace IDs; Prometheus records the completed invocation;
 payload limiting remains close to the handler. Choose the exact order from the
 failure semantics you want and test panic/error paths.
+
+Cross-protocol middleware should return an error carrying a `core.ErrorKind`
+when clients need a stable outcome. Use `core.WithErrorKind(kind, err)` to
+retain the original cause for logs and `errors.Is`/`errors.As`. HTTP and SSE
+before stream start map rate limit, payload, and overload kinds to 429, 413, and
+503; an active SSE stream sends a safe `error` event. gRPC maps those kinds to
+`ResourceExhausted`. Unknown and recovered failures are emitted as a generic
+internal error, never as raw error or panic text.
 
 The `prometheusx` invocation middleware labels metrics only by transport,
 stable operation, and result. Its lifecycle, Router, backlog, and projector
@@ -113,7 +128,19 @@ Expose `app.Name()` and `app.Descriptors()` in diagnostics when operators need
 to verify the assembled process. Descriptor data reports protocol mode and
 capabilities; it is not authorization or live protocol negotiation.
 
-The HTTP router currently matches an exact method and path. It does not provide path parameters, route groups, or route-local middleware. Keep module registration functions small, or place a third-party HTTP router behind a custom native runner when those features are required.
+HTTP and HTTP/3 routes accept Go `ServeMux` path patterns. Use groups to keep
+module assembly compact, `Context.Param` to read wildcards, and variadic route
+middleware for policy that should not wrap the whole endpoint:
+
+```go
+api := endpoint.Group("/api", tenantMiddleware)
+api.Get("/users/{id}", getUser, auditMiddleware)
+```
+
+Endpoint middleware runs first, then group middleware, then route middleware.
+Use `HandleChecked` and `GroupChecked` when patterns or prefixes come from
+configuration or plugins; fluent registration panics on invalid or conflicting
+patterns so startup cannot silently publish an incomplete route table.
 
 For a minimal application that does not need Prometheus, `middleware.Metrics`
 remains an in-process JSON snapshot. The optional
@@ -134,13 +161,29 @@ internal/platform/          concrete adapters and process utilities
 
 Handlers should call module services rather than reach directly into unrelated transports or global database clients. This keeps protocol decisions at the edge and makes unit tests independent of a listener.
 
+Message handlers should pass `core.ContextOf(ctx)` into module and dependency
+calls. It reads middleware-provided tracing, deadlines, values, and session
+cancellation through the optional `core.ContextProvider` capability.
+`core.BaseContext` implements that capability; legacy custom `core.Context`
+implementations fall back to `context.Background()`. A custom context that
+needs request propagation should implement `core.ContextProvider`.
+
 For relational source-of-truth data, prefer a module-owned storage interface backed by the GORM adapter. Put Redis, search, vector, document, or analytical stores behind module ports or projector/read-model boundaries. See [Database Architecture](database-architecture.md).
 
 ## 5. Make lifecycle and health ownership explicit
 
-Open and validate required resources before accepting traffic. Run schema migrations as a separate deployment step when possible; if startup migrations are intentional, finish them before `ListenAndServe`.
+Open and validate required resources before accepting traffic. Run schema migrations as a separate deployment step when possible; if startup migrations are intentional, finish them before `Run`.
 
-Resources that implement `Shutdown(context.Context)` can be registered with `app.Manage(...)`. They are stopped after protocol runners drain, in reverse registration order. If an adapter exposes only `Close()`, use a small application-owned wrapper that adds a context-aware shutdown contract.
+Resources that implement `Shutdown(context.Context)` can be registered with
+`app.Manage(...)`. They are stopped in reverse registration order only after
+the mounted runners complete their bounded stop sequence. If an adapter exposes
+only `Close()`, use a small application-owned wrapper that adds a context-aware
+shutdown contract.
+
+For message transports, shutdown is a bounded stop, not a reply-delivery
+barrier. Sessions and writer paths are closed, and outbound replies are
+at-most-once; shutdown does not confirm that queued or in-flight replies reached
+the peer.
 
 Expose liveness and readiness separately. `healthx` executes named checks
 concurrently under a bounded request context and returns HTTP 503 when a check
@@ -149,7 +192,34 @@ dependency and return when it is canceled; otherwise the response is bounded
 but the check's goroutine may continue. Keep `ExposeErrors` disabled unless the
 admin endpoint's access model makes diagnostic disclosure acceptable.
 
-Handle `SIGINT` and `SIGTERM`, give `Server.Shutdown` a deadline, and report both serving and shutdown errors. The complete pattern is in [the quickstart](quickstart.md).
+Pass a `signal.NotifyContext` to `Server.Start`, then call
+`RunHandle.WaitReady` with a startup deadline before publishing application
+readiness. Canceling the run context starts the same bounded stop sequence used
+after a runner failure. `RunHandle.Ready()` can be selected on directly, while
+`WaitReady` also returns a startup failure and the handle remains pinned to one
+start generation. Custom transports should implement
+`transport.ReadinessProvider` so readiness means the listener was bound;
+legacy runners otherwise become ready when their serving method is entered.
+
+Serving and shutdown errors retain their original causes and are wrapped in
+`*server.ComponentError` with the component name and lifecycle phase (`serve`
+or `shutdown`). Use `errors.As` for structured logging and `errors.Is` for the
+underlying cause:
+
+```go
+var componentErr *server.ComponentError
+if errors.As(err, &componentErr) {
+	logger.Error("component failed",
+		zap.String("component", componentErr.Component),
+		zap.String("phase", componentErr.Phase),
+		zap.Error(componentErr.Err),
+	)
+}
+```
+
+Call `Server.Shutdown(ctx)` explicitly only when an event other than run-context
+cancellation initiates shutdown. The complete lifecycle pattern is in
+[the quickstart](quickstart.md).
 
 ## 6. Choose message dispatch deliberately
 
@@ -182,6 +252,13 @@ Those thresholds detect regressions on the CI workload; they are not service
 capacity or latency objectives. Reproduce the CI command from
 [Operations and Capacity Planning](operations.md), then add application-level
 benchmarks and load tests.
+
+CI additionally verifies module checksums, runs `govulncheck` on reachable
+code, enforces a 55% aggregate coverage floor over framework packages, tests
+the supported Go-version matrix, and compiles the generated scaffold on Linux
+and Windows. These repository gates are a baseline; the application must scan
+its complete dependency graph and built image and retain its own coverage and
+test evidence.
 
 ## 8. Add production integrations at application boundaries
 

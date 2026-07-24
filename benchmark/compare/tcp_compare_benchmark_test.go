@@ -17,9 +17,9 @@ import (
 
 	"github.com/panjf2000/gnet/v2"
 	"github.com/panjf2000/gnet/v2/pkg/logging"
-	"github.com/saramand9/bignet/kpro/codec"
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/transport/tcp"
+	"github.com/saramand9/kpro/codec"
+	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/transport/tcp"
 )
 
 var tcpCompareConnections = []int{1, 16, 64}

@@ -9,9 +9,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/saramand9/bignet/kpro/core"
-	userservice "github.com/saramand9/bignet/kpro/internal/modules/users/service"
-	"github.com/saramand9/bignet/kpro/server"
+	"github.com/saramand9/kpro/core"
+	userservice "github.com/saramand9/kpro/internal/modules/users/service"
+	"github.com/saramand9/kpro/server"
 )
 
 const (

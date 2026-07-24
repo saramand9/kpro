@@ -6,7 +6,7 @@ package middleware
 import (
 	"fmt"
 
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/core"
 )
 
 // MaxPayload rejects invocations whose payload size exceeds size.
@@ -17,11 +17,11 @@ func MaxPayload(size int) core.Middleware {
 			if size >= 0 {
 				if limiter, ok := payload.(payloadLimiter); ok {
 					if err := limiter.LimitPayload(size); err != nil {
-						return err
+						return core.WithErrorKind(core.ErrorKindPayloadTooLarge, err)
 					}
 				}
 				if payloadSize, ok := payloadSize(payload); ok && payloadSize > size {
-					return fmt.Errorf("payload too large: %d > %d", payloadSize, size)
+					return fmt.Errorf("%w: %d > %d", core.ErrPayloadTooLarge, payloadSize, size)
 				}
 			}
 			return next(ctx)

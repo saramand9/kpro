@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/core"
 )
 
 type Metrics struct {

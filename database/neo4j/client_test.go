@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
-	"github.com/saramand9/bignet/kpro/database/common/lifecycle"
-	"github.com/saramand9/bignet/kpro/database/common/readmodels"
+	"github.com/saramand9/kpro/database/common/lifecycle"
+	"github.com/saramand9/kpro/database/common/readmodels"
 )
 
 func TestOpenValidatesConfig(t *testing.T) {

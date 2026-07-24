@@ -1,8 +1,10 @@
 module {{.Module}}
 
-go 1.21
+go 1.25.12
 
-require github.com/saramand9/bignet/kpro v0.0.0
+require {{.KProModule}} {{.KProVersion}}
 
+{{if .KProReplace}}
 // KPro is pre-release and currently consumed from a local checkout.
-replace github.com/saramand9/bignet/kpro => {{.KProReplace}}
+replace {{.KProModule}} => {{.KProReplace}}
+{{end}}

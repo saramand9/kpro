@@ -4,16 +4,20 @@
 package httpx
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/transport/internal/serveutil"
+	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/transport/internal/serveutil"
 )
 
 // Handler processes one native HTTP request.
@@ -41,7 +45,16 @@ func (e *BodyTooLargeError) Unwrap() error {
 	return ErrBodyTooLarge
 }
 
-type compiledRoutes map[string]map[string]Handler
+type routeDefinition struct {
+	handler     Handler
+	middlewares []core.Middleware
+}
+
+type compiledRoutes struct {
+	handlers map[string]map[string]Handler
+	exact    map[string]map[string]Handler
+	mux      *http.ServeMux
+}
 
 type connContextKey struct{}
 
@@ -77,17 +90,20 @@ type Endpoint struct {
 	rawConfig Config
 	transport core.Transport
 	server    *http.Server
+	listener  net.Listener
 
 	mu          sync.RWMutex
 	accepting   bool
 	started     bool
-	routes      map[string]map[string]Handler
+	routes      map[string]map[string]routeDefinition
 	middlewares []core.Middleware
 	compiled    atomic.Value
 
 	connMu     sync.Mutex
 	conns      map[net.Conn]*connState
 	nextConnID uint64
+	ready      chan struct{}
+	readyOnce  sync.Once
 }
 
 // New creates an HTTP endpoint with normalized defaults.
@@ -123,10 +139,15 @@ func NewWithTransport(config Config, transport core.Transport) *Endpoint {
 		rawConfig: rawConfig,
 		transport: transport,
 		accepting: true,
-		routes:    make(map[string]map[string]Handler),
+		routes:    make(map[string]map[string]routeDefinition),
 		conns:     make(map[net.Conn]*connState),
+		ready:     make(chan struct{}),
 	}
-	e.compiled.Store(compiledRoutes{})
+	e.compiled.Store(&compiledRoutes{
+		handlers: make(map[string]map[string]Handler),
+		exact:    make(map[string]map[string]Handler),
+		mux:      http.NewServeMux(),
+	})
 	return e
 }
 
@@ -140,6 +161,14 @@ func (e *Endpoint) Name() string {
 		return string(core.TransportHTTPS)
 	}
 	return string(core.TransportHTTP)
+}
+
+// Ready is closed once the listener is successfully bound and published.
+func (e *Endpoint) Ready() <-chan struct{} {
+	if e == nil {
+		return nil
+	}
+	return e.ready
 }
 
 // Use installs middleware on all registered HTTP routes and returns the endpoint.
@@ -159,36 +188,85 @@ func (e *Endpoint) ApplyMiddleware(middlewares ...core.Middleware) {
 	e.mu.Unlock()
 }
 
-// Get registers a GET route.
-func (e *Endpoint) Get(path string, h Handler) *Endpoint {
-	return e.Handle(http.MethodGet, path, h)
+// Get registers a GET route. Route middleware runs after endpoint middleware.
+func (e *Endpoint) Get(path string, h Handler, middlewares ...core.Middleware) *Endpoint {
+	return e.Handle(http.MethodGet, path, h, middlewares...)
 }
 
-// Post registers a POST route.
-func (e *Endpoint) Post(path string, h Handler) *Endpoint {
-	return e.Handle(http.MethodPost, path, h)
+// Post registers a POST route. Route middleware runs after endpoint middleware.
+func (e *Endpoint) Post(path string, h Handler, middlewares ...core.Middleware) *Endpoint {
+	return e.Handle(http.MethodPost, path, h, middlewares...)
 }
 
-// Put registers a PUT route.
-func (e *Endpoint) Put(path string, h Handler) *Endpoint {
-	return e.Handle(http.MethodPut, path, h)
+// Put registers a PUT route. Route middleware runs after endpoint middleware.
+func (e *Endpoint) Put(path string, h Handler, middlewares ...core.Middleware) *Endpoint {
+	return e.Handle(http.MethodPut, path, h, middlewares...)
 }
 
-// Delete registers a DELETE route.
-func (e *Endpoint) Delete(path string, h Handler) *Endpoint {
-	return e.Handle(http.MethodDelete, path, h)
+// Delete registers a DELETE route. Route middleware runs after endpoint middleware.
+func (e *Endpoint) Delete(path string, h Handler, middlewares ...core.Middleware) *Endpoint {
+	return e.Handle(http.MethodDelete, path, h, middlewares...)
 }
 
-// Handle registers a native HTTP route for method and path.
-func (e *Endpoint) Handle(method, path string, h Handler) *Endpoint {
-	e.mu.Lock()
-	if e.routes[path] == nil {
-		e.routes[path] = make(map[string]Handler)
+// Handle registers a native HTTP route for method and a Go 1.22 ServeMux path
+// pattern. Invalid or conflicting registrations panic; use HandleChecked when
+// route definitions come from configuration or plugins.
+func (e *Endpoint) Handle(method, path string, h Handler, middlewares ...core.Middleware) *Endpoint {
+	if err := e.HandleChecked(method, path, h, middlewares...); err != nil {
+		panic(err)
 	}
-	e.routes[path][method] = h
-	e.updateCompiledRouteLocked(method, path, h)
-	e.mu.Unlock()
 	return e
+}
+
+// HandleChecked registers a native HTTP route and reports invalid or
+// conflicting patterns without changing the current route table.
+func (e *Endpoint) HandleChecked(method, path string, h Handler, middlewares ...core.Middleware) error {
+	if e == nil {
+		return errors.New("http endpoint is nil")
+	}
+	method = strings.ToUpper(strings.TrimSpace(method))
+	if method == "" {
+		return errors.New("http route method is required")
+	}
+	if path == "" || !strings.HasPrefix(path, "/") {
+		return fmt.Errorf("http route path %q must start with /", path)
+	}
+	if h == nil {
+		return errors.New("http route handler is nil")
+	}
+	for index, middleware := range middlewares {
+		if middleware == nil {
+			return fmt.Errorf("http route middleware %d is nil", index)
+		}
+	}
+
+	definition := routeDefinition{
+		handler:     h,
+		middlewares: append([]core.Middleware(nil), middlewares...),
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if methods := e.routes[path]; methods != nil {
+		if _, exists := methods[method]; exists {
+			return fmt.Errorf("conflicting HTTP route %s %s is already registered", method, path)
+		}
+	}
+	current, _ := e.compiled.Load().(*compiledRoutes)
+	handlers := cloneCompiledHandlers(current)
+	if handlers[path] == nil {
+		handlers[path] = make(map[string]Handler)
+	}
+	handlers[path][method] = e.wrapRoute(method, path, h, definition.middlewares)
+	compiled, err := buildCompiledRoutes(handlers, e.config.MaxBodyBytes)
+	if err != nil {
+		return err
+	}
+	if e.routes[path] == nil {
+		e.routes[path] = make(map[string]routeDefinition)
+	}
+	e.routes[path][method] = definition
+	e.compiled.Store(compiled)
+	return nil
 }
 
 // ListenAndServe starts the HTTP server until ctx is cancelled or serving fails.
@@ -202,19 +280,28 @@ func (e *Endpoint) ListenAndServe(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if err := e.claimStart(); err != nil {
+		return err
+	}
 	server := e.buildServer()
-	e.mu.Lock()
-	if !e.accepting {
-		e.mu.Unlock()
+	if e.config.TLS {
+		certificate, err := tls.LoadX509KeyPair(e.config.CertFile, e.config.KeyFile)
+		if err != nil {
+			e.rollbackStart()
+			return err
+		}
+		server.TLSConfig = &tls.Config{Certificates: []tls.Certificate{certificate}}
+	}
+	listener, err := net.Listen("tcp", e.config.Addr)
+	if err != nil {
+		e.rollbackStart()
+		return err
+	}
+	if !e.publishServer(server, listener) {
+		_ = listener.Close()
 		return core.ErrClosed
 	}
-	if e.started {
-		e.mu.Unlock()
-		return core.ErrAlreadyStarted
-	}
-	e.started = true
-	e.server = server
-	e.mu.Unlock()
+	e.signalReady()
 
 	serveDone := make(chan struct{})
 	watcherDone := serveutil.ShutdownOnCancel(ctx, serveDone, func() {
@@ -224,9 +311,9 @@ func (e *Endpoint) ListenAndServe(ctx context.Context) error {
 	})
 	defer serveutil.FinishContextWatcher(serveDone, watcherDone)
 	if e.config.TLS {
-		return ignoreServerClosed(server.ListenAndServeTLS(e.config.CertFile, e.config.KeyFile))
+		return ignoreServerClosed(server.ServeTLS(listener, "", ""))
 	}
-	return ignoreServerClosed(server.ListenAndServe())
+	return ignoreServerClosed(server.Serve(listener))
 }
 
 // Shutdown gracefully stops the HTTP server.
@@ -237,23 +324,75 @@ func (e *Endpoint) Shutdown(ctx context.Context) error {
 	e.mu.Lock()
 	e.accepting = false
 	server := e.server
+	listener := e.listener
 	e.mu.Unlock()
 	if server == nil {
+		if listener != nil {
+			return ignoreServerClosed(listener.Close())
+		}
 		return nil
 	}
-	return server.Shutdown(ctx)
+	shutdownErr := server.Shutdown(ctx)
+	var listenerErr error
+	if listener != nil {
+		listenerErr = ignoreServerClosed(listener.Close())
+	}
+	return errors.Join(shutdownErr, listenerErr)
+}
+
+func (e *Endpoint) claimStart() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.accepting {
+		return core.ErrClosed
+	}
+	if e.started {
+		return core.ErrAlreadyStarted
+	}
+	e.started = true
+	return nil
+}
+
+func (e *Endpoint) rollbackStart() {
+	e.mu.Lock()
+	if e.accepting && e.listener == nil {
+		e.started = false
+	}
+	e.mu.Unlock()
+}
+
+func (e *Endpoint) publishServer(server *http.Server, listener net.Listener) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.accepting {
+		return false
+	}
+	e.server = server
+	e.listener = listener
+	return true
+}
+
+func (e *Endpoint) signalReady() {
+	if e == nil || e.ready == nil {
+		return
+	}
+	e.readyOnce.Do(func() {
+		close(e.ready)
+	})
 }
 
 func (e *Endpoint) buildServer() *http.Server {
 	return &http.Server{
-		Addr:         e.config.Addr,
-		Handler:      http.HandlerFunc(e.serve),
-		ReadTimeout:  e.config.ReadTimeout,
-		WriteTimeout: e.config.WriteTimeout,
-		IdleTimeout:  e.config.IdleTimeout,
-		ErrorLog:     errorLogger(e.config.Logger),
-		ConnContext:  e.connContext,
-		ConnState:    e.trackConnState,
+		Addr:              e.config.Addr,
+		Handler:           http.HandlerFunc(e.serve),
+		ReadHeaderTimeout: e.config.ReadHeaderTimeout,
+		ReadTimeout:       e.config.ReadTimeout,
+		WriteTimeout:      e.config.WriteTimeout,
+		IdleTimeout:       e.config.IdleTimeout,
+		MaxHeaderBytes:    e.config.MaxHeaderBytes,
+		ErrorLog:          errorLogger(e.config.Logger),
+		ConnContext:       e.connContext,
+		ConnState:         e.trackConnState,
 	}
 }
 
@@ -319,28 +458,88 @@ func remoteFromConn(conn net.Conn) string {
 func (e *Endpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	e.serve(w, r)
 }
+
 func (e *Endpoint) serve(w http.ResponseWriter, r *http.Request) {
-	routes, _ := e.compiled.Load().(compiledRoutes)
-	methods := routes[r.URL.Path]
-	if methods == nil {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte("not found"))
+	compiled, _ := e.compiled.Load().(*compiledRoutes)
+	if compiled == nil || compiled.mux == nil {
+		writeRoutingError(w, http.StatusNotFound)
 		return
 	}
-	h := methods[r.Method]
-	if h == nil {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		_, _ = w.Write([]byte("method not allowed"))
+	if r != nil && r.URL != nil {
+		if methods := compiled.exact[r.URL.Path]; methods != nil {
+			if h := methods[r.Method]; h != nil {
+				serveRoute(w, r, e.config.MaxBodyBytes, h)
+				return
+			}
+		}
+	}
+
+	h, pattern := compiled.mux.Handler(r)
+	if pattern != "" {
+		// ServeHTTP, unlike Handler, installs wildcard values on the request so
+		// Context.Param can read them with Request.PathValue.
+		compiled.mux.ServeHTTP(w, r)
 		return
 	}
-	ctx := &Context{w: w, r: r, maxBody: e.config.MaxBodyBytes}
+
+	probe := newRoutingResponse()
+	h.ServeHTTP(probe, r)
+	copyHTTPHeader(w.Header(), probe.header)
+	switch probe.status {
+	case http.StatusNotFound, http.StatusMethodNotAllowed:
+		writeRoutingError(w, probe.status)
+	default:
+		w.WriteHeader(probe.status)
+		_, _ = w.Write(probe.body.Bytes())
+	}
+}
+
+func serveRoute(w http.ResponseWriter, r *http.Request, maxBody int64, h Handler) {
+	ctx := &Context{w: w, r: r, maxBody: maxBody}
 	if err := h(ctx); err != nil {
 		if ctx.wroteHeader {
 			return
 		}
 		status := httpStatusForError(err)
 		w.WriteHeader(status)
-		_, _ = w.Write([]byte(err.Error()))
+		_, _ = w.Write([]byte(httpMessageForError(err)))
+	}
+}
+
+func writeRoutingError(w http.ResponseWriter, status int) {
+	w.WriteHeader(status)
+	message := "not found"
+	if status == http.StatusMethodNotAllowed {
+		message = "method not allowed"
+	}
+	_, _ = w.Write([]byte(message))
+}
+
+type routingResponse struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func newRoutingResponse() *routingResponse {
+	return &routingResponse{header: make(http.Header), status: http.StatusOK}
+}
+
+func (w *routingResponse) Header() http.Header {
+	return w.header
+}
+
+func (w *routingResponse) WriteHeader(status int) {
+	w.status = status
+}
+
+func (w *routingResponse) Write(body []byte) (int, error) {
+	return w.body.Write(body)
+}
+
+func copyHTTPHeader(destination, source http.Header) {
+	for key, values := range source {
+		destination[key] = append([]string(nil), values...)
 	}
 }
 
@@ -352,55 +551,122 @@ func httpStatusForError(err error) int {
 	if errors.As(err, &maxBytesErr) {
 		return http.StatusRequestEntityTooLarge
 	}
-	return http.StatusInternalServerError
+	switch core.ErrorKindOf(err) {
+	case core.ErrorKindRateLimited:
+		return http.StatusTooManyRequests
+	case core.ErrorKindPayloadTooLarge:
+		return http.StatusRequestEntityTooLarge
+	case core.ErrorKindOverloaded:
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
-func (e *Endpoint) lookupHandler(path, method string) Handler {
-	routes, _ := e.compiled.Load().(compiledRoutes)
-	if routes == nil {
-		return nil
+func httpMessageForError(err error) string {
+	if errors.Is(err, ErrBodyTooLarge) {
+		return core.ErrPayloadTooLarge.Error()
 	}
-	methods := routes[path]
-	if methods == nil {
-		return nil
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		return core.ErrPayloadTooLarge.Error()
 	}
-	return methods[method]
+	switch core.ErrorKindOf(err) {
+	case core.ErrorKindRateLimited:
+		return core.ErrRateLimited.Error()
+	case core.ErrorKindPayloadTooLarge:
+		return core.ErrPayloadTooLarge.Error()
+	case core.ErrorKindOverloaded:
+		return core.ErrOverloaded.Error()
+	default:
+		return core.ErrInternal.Error()
+	}
 }
 
 func (e *Endpoint) rebuildCompiledLocked() {
-	routes := make(compiledRoutes, len(e.routes))
+	handlers := make(map[string]map[string]Handler, len(e.routes))
 	for path, methodHandlers := range e.routes {
 		methods := make(map[string]Handler, len(methodHandlers))
-		for method, h := range methodHandlers {
-			methods[method] = e.wrapRoute(method, path, h)
+		for method, definition := range methodHandlers {
+			methods[method] = e.wrapRoute(method, path, definition.handler, definition.middlewares)
 		}
-		routes[path] = methods
+		handlers[path] = methods
 	}
-	e.compiled.Store(routes)
+	compiled, err := buildCompiledRoutes(handlers, e.config.MaxBodyBytes)
+	if err != nil {
+		panic(err)
+	}
+	e.compiled.Store(compiled)
 }
 
-func (e *Endpoint) updateCompiledRouteLocked(method, path string, h Handler) {
-	current, _ := e.compiled.Load().(compiledRoutes)
-	routes := make(compiledRoutes, len(current)+1)
-	for currentPath, methods := range current {
-		routes[currentPath] = methods
+func cloneCompiledHandlers(current *compiledRoutes) map[string]map[string]Handler {
+	if current == nil {
+		return make(map[string]map[string]Handler)
 	}
-	currentMethods := current[path]
-	methods := make(map[string]Handler, len(currentMethods)+1)
-	for currentMethod, handler := range currentMethods {
-		methods[currentMethod] = handler
+	handlers := make(map[string]map[string]Handler, len(current.handlers))
+	for path, currentMethods := range current.handlers {
+		methods := make(map[string]Handler, len(currentMethods))
+		for method, handler := range currentMethods {
+			methods[method] = handler
+		}
+		handlers[path] = methods
 	}
-	methods[method] = e.wrapRoute(method, path, h)
-	routes[path] = methods
-	e.compiled.Store(routes)
+	return handlers
 }
 
-func (e *Endpoint) wrapRoute(method, path string, h Handler) Handler {
-	if h == nil || len(e.middlewares) == 0 {
+func buildCompiledRoutes(handlers map[string]map[string]Handler, maxBody int64) (compiled *compiledRoutes, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			compiled = nil
+			err = fmt.Errorf("invalid or conflicting HTTP route: %v", recovered)
+		}
+	}()
+
+	compiled = &compiledRoutes{
+		handlers: handlers,
+		exact:    make(map[string]map[string]Handler),
+		mux:      http.NewServeMux(),
+	}
+	paths := make([]string, 0, len(handlers))
+	for path := range handlers {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		methods := handlers[path]
+		methodNames := make([]string, 0, len(methods))
+		for method := range methods {
+			methodNames = append(methodNames, method)
+		}
+		sort.Strings(methodNames)
+		for _, method := range methodNames {
+			handler := methods[method]
+			compiled.mux.Handle(method+" "+path, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				serveRoute(w, r, maxBody, handler)
+			}))
+			if isLiteralRoutePath(path) {
+				if compiled.exact[path] == nil {
+					compiled.exact[path] = make(map[string]Handler)
+				}
+				compiled.exact[path][method] = handler
+			}
+		}
+	}
+	return compiled, nil
+}
+
+func isLiteralRoutePath(path string) bool {
+	return strings.HasPrefix(path, "/") && !strings.ContainsAny(path, "{}")
+}
+
+func (e *Endpoint) wrapRoute(method, path string, h Handler, routeMiddlewares []core.Middleware) Handler {
+	if h == nil || len(e.middlewares)+len(routeMiddlewares) == 0 {
 		return h
 	}
 	operation := httpOperation(method, path)
-	middlewares := append([]core.Middleware(nil), e.middlewares...)
+	middlewares := make([]core.Middleware, 0, len(e.middlewares)+len(routeMiddlewares))
+	middlewares = append(middlewares, e.middlewares...)
+	middlewares = append(middlewares, routeMiddlewares...)
 	var once sync.Once
 	var handler core.InvocationHandler
 	return func(ctx *Context) error {

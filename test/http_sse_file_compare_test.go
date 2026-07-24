@@ -25,8 +25,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/transport/httpx"
-	"github.com/saramand9/bignet/kpro/transport/sse"
+	"github.com/saramand9/kpro/transport/httpx"
+	"github.com/saramand9/kpro/transport/sse"
 )
 
 func TestHTTPFileTrace(t *testing.T) {

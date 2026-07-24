@@ -1,17 +1,22 @@
 # API Stability, Versioning, and Deprecation
 
-This document defines how KPro intends to communicate compatibility. It does not turn the current repository state into a stable release.
+This document defines how KPro communicates compatibility. A pre-1.0 tag is a
+reviewed release, but it is not a v1 stability guarantee.
 
 ## Current maturity
 
-The repository currently has no Git release tags and no published `v1` compatibility guarantee. Treat the module as pre-1.0 software:
+`v0.1.0` is the initial developer release. Treat the module as pre-1.0
+software:
 
-- pin a reviewed commit when consuming it outside this checkout;
-- read the diff before updating that pin;
+- pin an exact release (or a reviewed commit for unreleased fixes);
+- read the changelog and diff before updating that pin;
 - expect exported APIs to change while the architecture is refined;
 - keep KPro-specific construction and adapter details at your application's platform boundary.
 
-Commands such as `go get github.com/saramand9/bignet/kpro@latest` are therefore not the recommended reproducible path today. The [Quick Start](quickstart.md) runs from a checkout for this reason.
+Use an exact version such as
+`go get github.com/saramand9/kpro@v0.1.0`; `@latest` is not the
+recommended reproducible path during v0. The [Quick Start](quickstart.md)
+covers both a release install and checkout-based development.
 
 ## Versioning policy
 
@@ -23,9 +28,14 @@ Tagged releases will follow Semantic Versioning:
 
 A tag, release notes, and an upgrade note are the release contract. A branch name or arbitrary commit is not a compatibility promise.
 
+The supported toolchain follows maintained Go release lines. The current
+repository baseline is Go 1.25+, and CI verifies Go 1.25.12 and 1.26.5. Dropping
+a supported Go line is a compatibility change and must be called out in release
+notes.
+
 ## Compatibility surface
 
-After `v1`, the compatibility commitment covers documented exported identifiers in packages intended for application use, including `core`, `server`, `transport`, `middleware`, `codec`, `observability`, `database`, and `eventing` subpackages.
+After `v1`, the compatibility commitment covers documented exported identifiers in packages intended for application use, including `core`, `server`, `transport` (including `transport/transportkit`), `middleware`, `codec`, `observability`, `database`, and `eventing` subpackages.
 
 The following are not stable API:
 
@@ -37,12 +47,21 @@ The following are not stable API:
 
 Examples and documentation are compatibility signals: CI should continue to compile them, but copying an example's private application structure does not make that structure framework API.
 
-After `v1`, documented `cmd/kpro` subcommands/flags and the versioned
+After `v1`, documented `cmd/kpro` subcommands/flags, including `new`, `doctor`,
+and `version`, and the versioned
 `cmd/benchguard` budget-file schema are supported tooling interfaces. The exact
 layout and implementation inside newly generated source may evolve; review and
 commit generated files rather than regenerating over an existing service.
 
-Behavioral compatibility matters alongside compilation. Changes to routing order, cancellation, middleware order, lifecycle ownership, default limits, wire encoding, or error classification must be called out even when function signatures do not change.
+Behavioral compatibility matters alongside compilation. Changes to routing
+order, cancellation, middleware order, lifecycle ownership, readiness timing,
+`ComponentError` provenance, default limits, HTTP/3 0-RTT policy, message
+handler-error policy, wire encoding, safe response text, or error classification
+must be called out even when function signatures do not change.
+
+`transport/internal/...` remains private. Third-party transports should use the
+narrow public contracts in `transport` and helpers in `transport/transportkit`;
+the existence or behavior of an internal helper is not a compatibility signal.
 
 ## Deprecation policy
 
@@ -63,14 +82,28 @@ Security and correctness exceptions must be explicit in release notes and should
 Before creating a tag, maintainers should:
 
 - run formatting, unit, race-sensitive, protocol, database integration, and example compilation checks applicable to the change;
+- run `go mod verify` and pinned `govulncheck` against the complete module, and resolve or explicitly block release on every reachable finding;
+- generate the repository coverage profile, enforce the configured aggregate floor, and inspect important package/scenario gaps rather than relying on the total alone;
 - inspect the exported API diff and wire/storage compatibility impact;
 - move the applicable [CHANGELOG](../CHANGELOG.md) entries from `Unreleased` and document additions, deprecations, default changes, and breaking changes;
 - provide migration guidance for every intentional incompatibility;
 - identify production validations that remain external to repository tests;
-- tag the exact reviewed commit and publish checksums or provenance through the chosen release process.
+- tag the exact reviewed commit and verify `kpro version` reports the expected tag, commit, build time, platform, and Go version;
+- let the tag-triggered release workflow repeat module verification, tests,
+  vet, and `govulncheck`; construct a draft with cross-platform archives,
+  checksums, and SBOMs; verify its artifact matrix and embedded binary metadata;
+  and publish only after those checks pass.
+
+The checked-in workflow and GoReleaser configuration automate draft artifact
+construction, verification, and conversion to a published release; they do not
+make an arbitrary `v*` tag a supported release. Release notes, upgrade
+guidance, provenance review, and the explicit decision to push the release tag
+remain required.
 
 ## Guidance for application authors
 
 Reduce upgrade risk by depending on narrow application-owned ports rather than passing concrete database or transport types through business modules. Keep server assembly in `cmd/...` or an internal platform package, keep message IDs and wire schemas versioned as application contracts, and never import a KPro `internal` package.
 
-If you need a stronger compatibility guarantee before a tagged KPro release exists, vendor or fork a reviewed commit, publish your own change policy, and run compatibility tests against the surface your services actually use.
+If you need a stronger compatibility guarantee than v0 provides, vendor or
+fork the exact release, publish your own change policy, and run compatibility
+tests against the surface your services actually use.

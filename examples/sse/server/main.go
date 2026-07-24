@@ -8,8 +8,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/server"
-	"github.com/saramand9/bignet/kpro/transport/sse"
+	"github.com/saramand9/kpro/server"
+	"github.com/saramand9/kpro/transport/sse"
 )
 
 func main() {

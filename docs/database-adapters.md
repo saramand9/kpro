@@ -31,6 +31,10 @@ The database layer contains concrete storage adapters. It does not own business 
 - Register each adapter as a `lifecycle.Resource` so health checks and shutdown are consistent.
 - Keep concrete projectors in business modules, for example `internal/modules/orders/projectors/search.go`.
 - Prefer raw official-client access for engine-specific advanced queries instead of growing a lowest-common-denominator abstraction.
+- Treat each Redis `Lock` as a single-acquisition TTL lease. Its ownership token
+  prevents stale release/refresh, but is not a fencing token; protect strict
+  non-idempotent work with a monotonic fence or storage-native concurrency
+  control.
 
 ## Test Coverage
 

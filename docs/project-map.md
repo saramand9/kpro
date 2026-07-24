@@ -27,14 +27,14 @@ for application code.
 | Path | Primary role | Key files |
 | --- | --- | --- |
 | `core/` | Transport-neutral runtime primitives and message dispatch. | `router.go`, `router_config.go`, `context.go`, `session_lifecycle.go`, `invocation.go`, `backpressure.go`, `lifecycle.go` |
-| `server/` | Process-level owner for transports, middleware, runners, and managed resources. | `server.go`, `lifecycle.go` |
-| `transport/` | Shared transport contracts, capability descriptors, validation, and built-in protocol packages. | `transport.go`, `capability.go`, `validation.go` |
+| `server/` | Process-level owner for transports, middleware, runners, readiness, component error provenance, and managed resources. | `server.go`, `component_error.go`, `lifecycle.go` |
+| `transport/` | Shared transport contracts, readiness, handler-error policy, public extension helpers, capability descriptors, validation, and built-in protocol packages. | `transport.go`, `handler_error.go`, `transportkit/`, `capability.go`, `validation.go` |
 | `codec/` | Binary protocol implementation for KPro message traffic. | `kpro.go`, `codec.go` |
 | `middleware/` | Reusable invocation middleware. | `recover.go`, `ratelimit.go`, `limit.go`, `metrics.go` |
 | `observability/` | Optional integrations for health, Prometheus, OTel, and Zap. | `healthx/`, `prometheusx/`, `otelx/`, `zapx/` |
 | `eventing/` | Event envelopes, delivery store contracts, GORM outbox, projector runner. | `events/`, `delivery/`, `projector/` |
 | `database/` | Database adapters and lifecycle/resource helpers. | `gorm/`, `redis/`, `es/`, `qdrant/`, `mongo/`, `clickhouse/`, `influx/`, `neo4j/`, `common/` |
-| `cmd/kpro/` | CLI for scaffolding a checked starter service. | `main.go`, `templates/service/` |
+| `cmd/kpro/` | CLI for scaffolding a checked starter service and reporting version/environment diagnostics. | `main.go`, `templates/service/` |
 | `cmd/benchguard/` | Benchmark budget checker used by CI. | `main.go` |
 | `examples/` | Protocol and modular application examples. | `quickstart/`, protocol-specific directories |
 | `benchmark/` | Microbenchmarks, budget config, and comparison fixtures. | `budgets.json`, `protocol_benchmark_test.go`, `compare/` |
@@ -48,23 +48,29 @@ Server startup follows this path:
 application main
   -> server.NewChecked
   -> app.Use / app.HTTP / app.Mount / app.Manage
-  -> app.ListenAndServe
-  -> validate mounted components
+  -> app.Start(parent context)
   -> claim one-shot lifecycle
+  -> validate mounted components
   -> start mounted runners
+  -> await transport.ReadinessProvider signals
+  -> RunHandle.WaitReady returns success or startup failure
 ```
 
 Shutdown follows this path:
 
 ```text
-signal or runner failure
-  -> app.Shutdown(ctx)
+run-context cancellation, explicit Shutdown, or runner failure
+  -> request bounded runner shutdown
   -> stop accepting new sessions/listeners
   -> cancel endpoint contexts
-  -> drain bounded in-flight work
-  -> stop mounted runners
-  -> close managed resources
+  -> perform protocol-specific graceful work where supported
+  -> wait boundedly for serving goroutines to stop
+  -> close managed resources after successful runner stop
 ```
+
+Message transports do not promise reply drain. They stop or close sessions and
+writer paths; outbound sends and replies are at-most-once, and shutdown does not
+confirm queued or in-flight delivery.
 
 Message transport dispatch follows this path:
 
@@ -76,6 +82,7 @@ client bytes/datagram/frame
   -> queue and in-flight admission
   -> core.Invocation middleware chain
   -> registered message handler
+  -> core.ContextOf(ctx) reads the optional core.ContextProvider capability
   -> ctx.Reply or session.Send
   -> codec encode
   -> transport write
@@ -89,6 +96,7 @@ HTTP client
   -> method/path route lookup
   -> core.Invocation middleware bridge
   -> httpx.Context handler
+  -> core.ErrorKind to safe HTTP status/message
   -> response writer
 ```
 
@@ -99,19 +107,30 @@ gRPC client
   -> grpcx server
   -> unary or stream interceptor bridge
   -> core.Invocation middleware chain
+  -> core.ErrorKind to safe gRPC status/message
   -> registered gRPC service handler
 ```
 
 ## Lifecycle And Backpressure Controls
 
-Use `server.NewChecked` for construction-time validation and let
-`ListenAndServe` aggregate transport `Validate` failures before any serving
-goroutine starts. Built-in servers and transports are one-shot: repeated starts
-return `core.ErrAlreadyStarted`.
+Use `server.NewChecked` for construction-time validation and `Server.Start` to
+claim one lifecycle generation and aggregate transport `Validate` failures
+before any serving goroutine starts. Use the returned
+`RunHandle.WaitReady` before publishing application readiness; `Run` remains the
+blocking form. Built-in listeners expose `transport.ReadinessProvider`; legacy
+custom runners fall back to serving-method entry. Built-in servers and
+transports are one-shot: repeated starts return `core.ErrAlreadyStarted`.
+
+Serving and shutdown failures use `server.ComponentError` to preserve component
+and phase alongside the original error chain. Protocol-facing handler failures
+use `core.ErrorKind`; internal causes remain available to logs and traces while
+HTTP, gRPC, and message responses use stable non-sensitive text.
 
 Use `core.RouterConfig` when message traffic needs explicit worker, queue,
 per-session in-flight, global in-flight, idle, and shutdown behavior. Treat
-Router and transport limits as admission controls, not business validation.
+Router shutdown as bounded handler completion rather than wire-level reply
+delivery, and treat Router and transport limits as admission controls, not
+business validation.
 
 HTTP-style endpoints require explicit timeout and body-size decisions. The
 production checklist records which limits are built in and which remain
@@ -120,9 +139,11 @@ application or platform work.
 ## Extension Points
 
 Add a transport by implementing the common contracts in `transport/`, including
-descriptors and validation. Follow [extending-kpro.md](extending-kpro.md) and
+descriptors, validation, and listener readiness. Reuse bounded public helpers
+from `transport/transportkit` rather than importing `transport/internal`.
+Follow [extending-kpro.md](extending-kpro.md) and
 mirror existing package tests for lifecycle, capacity, closed-session sends,
-and cancellation.
+handler-error policy, readiness ordering, and cancellation.
 
 Add middleware through `core.Middleware` and `core.Invocation`; protocol bridges
 should preserve stable operation names and bounded metadata.
@@ -142,3 +163,9 @@ should avoid depending directly on concrete storage types.
 - [benchmark/budgets.json](../benchmark/budgets.json) defines hot-path
   regression budgets.
 - [CHANGELOG.md](../CHANGELOG.md) records repository-level changes.
+- [.github/workflows/ci.yml](../.github/workflows/ci.yml) defines checksum,
+  test, race, vulnerability, coverage, benchmark, database, Windows, and Go
+  compatibility gates.
+- [.github/workflows/release.yml](../.github/workflows/release.yml) and
+  [.goreleaser.yml](../.goreleaser.yml) define tag-triggered artifacts,
+  checksums, per-archive SBOM generation, verification, and publication.

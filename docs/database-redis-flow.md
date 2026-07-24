@@ -244,6 +244,26 @@ CacheView.Get -> zero UserCache, false, err
 | ZSet | `database/redis/zset.go` | `Add`, `Increment`, `Score`, `Range`, `RevRange`, `Remove` | member string 加 score | 排行榜、优先级视图、排名查询。 |
 | Lifecycle | `database/redis/client.go` | `Ping`, `Health`, `Close` | resource health state | 启动检查和关闭流程。 |
 
+### Lock 的正确边界
+
+`Lock` 是一个单次获取对象。第一次 `Acquire` 成功后，即使随后已经
+`Release` 或 TTL 已过期，也不能用同一个对象再次获取；下一次 lease 必须通过
+`NewLock` 或 `Client.Lock` 创建新对象。获取失败时可以在同一个对象上按业务的
+有界退避策略重试。`Release` 和 `Refresh` 使用随机 ownership token 的 Lua
+compare-and-delete/expire，旧对象因此不能释放或续期后来持有者的 lease。
+
+这个 token 不是 fencing token，当前实现也不是多节点 quorum/Redlock 算法。
+进程暂停、网络分区或处理时间超过 TTL 时，旧持有者可能在 lease 过期后继续执行，
+同时新持有者已经开始工作。因此它只适合允许短暂重复执行、且操作幂等或可补偿的
+短期协调。对支付、库存扣减、外部不可逆写入等要求严格互斥的路径，应在真正被保护
+的存储上使用单调 fencing version、事务/唯一约束或该存储原生的并发控制；不能只靠
+Redis TTL lock 保证正确性。TTL、续期频率、失败重试和进程暂停场景都需要在目标
+Redis 拓扑上验证。
+
+`Acquire` 的传输错误还可能表示结果未知：`SET NX` 已到达 Redis，但回复在返回
+客户端前丢失。此时不能把错误当作“锁肯定不存在”，也不应立即让另一个 owner
+执行非幂等工作；应先核对受保护状态，或至少等待本次配置的 TTL 到期后再恢复。
+
 ## 最小模块侧 Projector 示例
 
 目的：说明业务模块如何把通用 `events.Envelope` 转成自己需要的 Redis 数据结构。`database/redis` 只提供 Redis 能力，真正理解 `user.created` 代表什么、应该写哪个 key、TTL 多久的是业务模块 projector。

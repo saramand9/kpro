@@ -4,21 +4,26 @@
 package middleware
 
 import (
-	"errors"
 	"net"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/core"
 	"golang.org/x/time/rate"
 )
 
-// DefaultIPRateLimitIdleTimeout removes idle IP buckets after this duration.
-const DefaultIPRateLimitIdleTimeout = time.Minute
+const (
+	// DefaultRateLimitIdleTimeout removes idle key-based buckets after this duration.
+	DefaultRateLimitIdleTimeout = time.Minute
+	// DefaultIPRateLimitIdleTimeout is retained for compatibility.
+	DefaultIPRateLimitIdleTimeout = DefaultRateLimitIdleTimeout
+	// DefaultRateLimitMaxBuckets bounds key-based limiter memory by default.
+	DefaultRateLimitMaxBuckets = 65536
+)
 
 // ErrRateLimited is returned when a rate limiter rejects an invocation.
-var ErrRateLimited = errors.New("rate limit exceeded")
+var ErrRateLimited = core.ErrRateLimited
 
 // RateLimitConfig configures token-bucket middleware limits.
 type RateLimitConfig struct {
@@ -28,6 +33,10 @@ type RateLimitConfig struct {
 	Burst int
 	// IdleTimeout removes idle key-based buckets. Values <= 0 use the default.
 	IdleTimeout time.Duration
+	// MaxBuckets bounds key-based limiter state. Values <= 0 use the default.
+	// Existing buckets continue to work when the bound is reached; new keys are
+	// rejected with core.ErrOverloaded until capacity becomes available.
+	MaxBuckets int
 }
 
 // RateLimit applies one shared token bucket across all invocations.
@@ -45,35 +54,62 @@ func RateLimit(config RateLimitConfig) core.Middleware {
 	}
 }
 
-// ConnRateLimit applies one token bucket per invocation connection id.
+// ConnRateLimit applies one token bucket per physical or virtual connection.
+// Transport, local connection id, peer, and connection lifetime form the key,
+// so independently numbered endpoints and transports do not share buckets.
 func ConnRateLimit(config RateLimitConfig) core.Middleware {
-	config = normalizeRateLimitConfig(config)
-
-	type limiterEntry struct {
-		limiter *rate.Limiter
-	}
+	config = normalizeKeyRateLimitConfig(config)
 
 	var mu sync.Mutex
-	limiters := make(map[uint64]*limiterEntry)
+	limiters := make(map[connLimiterKey]*connLimiterEntry)
+	var lastCleanup time.Time
 
-	limiterFor := func(ctx core.Invocation) *rate.Limiter {
-		id := ctx.ConnID()
+	limiterFor := func(ctx core.Invocation) (*rate.Limiter, error) {
+		key := connectionLimiterKey(ctx)
+		now := time.Now()
 
 		mu.Lock()
-		entry := limiters[id]
-		if entry == nil {
-			entry = &limiterEntry{
-				limiter: rate.NewLimiter(config.Rate, config.Burst),
+		entry := limiters[key]
+		if entry != nil && entry.done == nil && now.Sub(entry.lastSeen) >= config.IdleTimeout {
+			delete(limiters, key)
+			entry = nil
+		}
+		if entry != nil {
+			entry.lastSeen = now
+			limiter := entry.limiter
+			mu.Unlock()
+			return limiter, nil
+		}
+		if lastCleanup.IsZero() || now.Sub(lastCleanup) >= config.IdleTimeout {
+			pruneConnLimiters(limiters, now, config.IdleTimeout)
+			lastCleanup = now
+		}
+		if len(limiters) >= config.MaxBuckets {
+			// A capacity check also performs an immediate prune so closed or idle
+			// connections do not wait for the periodic cleanup interval.
+			pruneConnLimiters(limiters, now, config.IdleTimeout)
+			if len(limiters) >= config.MaxBuckets {
+				mu.Unlock()
+				return nil, core.ErrOverloaded
 			}
-			limiters[id] = entry
+		}
 
-			done := invocationDone(ctx)
+		entry = limiters[key]
+		if entry == nil {
+			entry = &connLimiterEntry{
+				limiter:  rate.NewLimiter(config.Rate, config.Burst),
+				lastSeen: now,
+				done:     key.done,
+			}
+			limiters[key] = entry
+
+			done := key.done
 			if done != nil {
 				go func() {
 					<-done
 					mu.Lock()
-					if limiters[id] == entry {
-						delete(limiters, id)
+					if limiters[key] == entry {
+						delete(limiters, key)
 					}
 					mu.Unlock()
 				}()
@@ -82,12 +118,15 @@ func ConnRateLimit(config RateLimitConfig) core.Middleware {
 		limiter := entry.limiter
 		mu.Unlock()
 
-		return limiter
+		return limiter, nil
 	}
 
 	return func(next core.InvocationHandler) core.InvocationHandler {
 		return func(ctx core.Invocation) error {
-			limiter := limiterFor(ctx)
+			limiter, err := limiterFor(ctx)
+			if err != nil {
+				return err
+			}
 			appendPacketLimiter(ctx, packetLimiter(limiter))
 			if !limiter.Allow() {
 				return ErrRateLimited
@@ -102,13 +141,13 @@ func ConnRateLimit(config RateLimitConfig) core.Middleware {
 // Remote ports are ignored, so 127.0.0.1:1000 and 127.0.0.1:2000 share
 // one bucket. Empty or unparsable remote addresses share a single fallback key.
 func IPRateLimit(config RateLimitConfig) core.Middleware {
-	config = normalizeIPRateLimitConfig(config)
+	config = normalizeKeyRateLimitConfig(config)
 
 	var mu sync.Mutex
 	limiters := make(map[string]*ipLimiterEntry)
 	var lastCleanup time.Time
 
-	limiterFor := func(ctx core.Invocation) *rate.Limiter {
+	limiterFor := func(ctx core.Invocation) (*rate.Limiter, error) {
 		key := remoteIPKey(ctx.RemoteAddr())
 		now := time.Now()
 
@@ -119,6 +158,13 @@ func IPRateLimit(config RateLimitConfig) core.Middleware {
 		}
 		entry := limiters[key]
 		if entry == nil {
+			if len(limiters) >= config.MaxBuckets {
+				pruneIdleIPLimiters(limiters, now, config.IdleTimeout)
+				if len(limiters) >= config.MaxBuckets {
+					mu.Unlock()
+					return nil, core.ErrOverloaded
+				}
+			}
 			entry = &ipLimiterEntry{
 				limiter: rate.NewLimiter(config.Rate, config.Burst),
 			}
@@ -128,12 +174,15 @@ func IPRateLimit(config RateLimitConfig) core.Middleware {
 		limiter := entry.limiter
 		mu.Unlock()
 
-		return limiter
+		return limiter, nil
 	}
 
 	return func(next core.InvocationHandler) core.InvocationHandler {
 		return func(ctx core.Invocation) error {
-			limiter := limiterFor(ctx)
+			limiter, err := limiterFor(ctx)
+			if err != nil {
+				return err
+			}
 			appendPacketLimiter(ctx, packetLimiter(limiter))
 			if !limiter.Allow() {
 				return ErrRateLimited
@@ -146,6 +195,44 @@ func IPRateLimit(config RateLimitConfig) core.Middleware {
 type ipLimiterEntry struct {
 	limiter  *rate.Limiter
 	lastSeen time.Time
+}
+
+type connLimiterKey struct {
+	transport core.Transport
+	id        uint64
+	remote    string
+	done      <-chan struct{}
+}
+
+type connLimiterEntry struct {
+	limiter  *rate.Limiter
+	lastSeen time.Time
+	done     <-chan struct{}
+}
+
+func connectionLimiterKey(invocation core.Invocation) connLimiterKey {
+	return connLimiterKey{
+		transport: invocation.Transport(),
+		id:        invocation.ConnID(),
+		remote:    invocation.RemoteAddr(),
+		done:      core.InvocationConnDone(invocation),
+	}
+}
+
+func pruneConnLimiters(limiters map[connLimiterKey]*connLimiterEntry, now time.Time, idleTimeout time.Duration) {
+	for key, entry := range limiters {
+		if entry.done != nil {
+			select {
+			case <-entry.done:
+				delete(limiters, key)
+			default:
+			}
+			continue
+		}
+		if now.Sub(entry.lastSeen) >= idleTimeout {
+			delete(limiters, key)
+		}
+	}
 }
 
 func pruneIdleIPLimiters(limiters map[string]*ipLimiterEntry, now time.Time, idleTimeout time.Duration) {
@@ -169,10 +256,13 @@ func normalizeRateLimitConfig(config RateLimitConfig) RateLimitConfig {
 	return config
 }
 
-func normalizeIPRateLimitConfig(config RateLimitConfig) RateLimitConfig {
+func normalizeKeyRateLimitConfig(config RateLimitConfig) RateLimitConfig {
 	config = normalizeRateLimitConfig(config)
 	if config.IdleTimeout <= 0 {
-		config.IdleTimeout = DefaultIPRateLimitIdleTimeout
+		config.IdleTimeout = DefaultRateLimitIdleTimeout
+	}
+	if config.MaxBuckets <= 0 {
+		config.MaxBuckets = DefaultRateLimitMaxBuckets
 	}
 	return config
 }
@@ -223,21 +313,4 @@ func normalizeIP(host string) string {
 		return ip.String()
 	}
 	return host
-}
-
-func invocationDone(ctx core.Invocation) <-chan struct{} {
-	if connDoneCtx, ok := ctx.(interface{ ConnDone() <-chan struct{} }); ok {
-		if done := connDoneCtx.ConnDone(); done != nil {
-			return done
-		}
-	}
-	if doneCtx, ok := ctx.(interface{ Done() <-chan struct{} }); ok {
-		if done := doneCtx.Done(); done != nil {
-			return done
-		}
-	}
-	if ctx.Context() == nil {
-		return nil
-	}
-	return ctx.Context().Done()
 }

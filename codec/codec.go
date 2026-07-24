@@ -6,7 +6,7 @@ package codec
 import (
 	"io"
 
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/core"
 )
 
 // ReadResult contains a decoded message and its wire size.

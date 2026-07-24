@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/eventing/delivery"
-	"github.com/saramand9/bignet/kpro/eventing/events"
+	"github.com/saramand9/kpro/eventing/delivery"
+	"github.com/saramand9/kpro/eventing/events"
 )
 
 type fakeDeliveryStore struct {
@@ -79,6 +80,96 @@ func TestRunnerFailsUnhandledEvents(t *testing.T) {
 	if len(store.failed) != 1 || store.failed[0] != "f1" {
 		t.Fatalf("expected f1 failed, got %#v", store.failed)
 	}
+}
+
+func TestRunnerConvertsHandlerPanicToDeliveryFailure(t *testing.T) {
+	panicErr := errors.New("handler panic")
+	store := &fakeDeliveryStore{
+		records: []delivery.Record{{Envelope: events.Envelope{ID: "panic-1"}}},
+	}
+	runner := NewRunner(store, projectionFunc{name: "cache", handle: func(context.Context, events.Envelope) error {
+		panic(panicErr)
+	}})
+
+	err := runner.RunOnce(context.Background())
+	if !errors.Is(err, panicErr) {
+		t.Fatalf("RunOnce error=%v, want wrapped panic", err)
+	}
+	if len(store.failed) != 1 || store.failed[0] != "panic-1" || len(store.acked) != 0 {
+		t.Fatalf("failed=%#v acked=%#v", store.failed, store.acked)
+	}
+}
+
+func TestRunnerContainsErrorHookPanics(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	store := &fetchErrorDeliveryStore{err: errors.New("fetch failed")}
+	runner := NewRunner(store, testProjection{name: "cache"}).
+		WithBackoff(time.Millisecond, time.Hour).
+		WithErrorHandler(func(error) {
+			defer cancel()
+			panic("observer failed")
+		}).
+		WithRetryPolicy(RetryPolicyFunc(func(int, error) time.Duration {
+			panic("policy failed")
+		}))
+
+	if err := runner.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error=%v, want context.Canceled", err)
+	}
+	snapshot := runner.Snapshot()
+	for _, want := range []string{"fetch failed", "observer failed", "policy failed"} {
+		if !strings.Contains(snapshot.LastError, want) {
+			t.Fatalf("last error %q missing %q", snapshot.LastError, want)
+		}
+	}
+	if snapshot.TotalPasses != 1 || snapshot.TotalErrors != 1 {
+		t.Fatalf("snapshot=%#v", snapshot)
+	}
+}
+
+func TestRunnerRejectsInvalidProjectorSets(t *testing.T) {
+	store := &fakeDeliveryStore{}
+	tests := []struct {
+		name       string
+		projectors []Projector
+	}{
+		{name: "empty"},
+		{name: "nil", projectors: []Projector{nil}},
+		{name: "empty name", projectors: []Projector{testProjection{name: "  "}}},
+		{name: "duplicate name", projectors: []Projector{testProjection{name: "cache"}, testProjection{name: " cache "}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := NewRunner(store, test.projectors...).RunOnce(context.Background()); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+}
+
+func TestRegistryRegistrationIsValidatedAtomically(t *testing.T) {
+	registry := NewRegistry()
+	if err := registry.Register(testProjection{name: "cache"}, testProjection{name: " cache "}); err == nil {
+		t.Fatal("expected duplicate validation error")
+	}
+	if got := registry.All(); len(got) != 0 {
+		t.Fatalf("partially registered projectors=%#v", got)
+	}
+	if err := registry.Register(nil); err == nil {
+		t.Fatal("expected nil projector validation error")
+	}
+	if err := registry.Register(testProjection{name: "  "}); err == nil {
+		t.Fatal("expected empty name validation error")
+	}
+}
+
+type fetchErrorDeliveryStore struct {
+	fakeDeliveryStore
+	err error
+}
+
+func (s *fetchErrorDeliveryStore) Fetch(context.Context, string, int) ([]delivery.Record, error) {
+	return nil, s.err
 }
 
 type fencedDeliveryStore struct {

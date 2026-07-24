@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/middleware"
+	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/middleware"
 	"golang.org/x/time/rate"
 )
 

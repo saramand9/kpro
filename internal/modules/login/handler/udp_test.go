@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/core"
-	loginservice "github.com/saramand9/bignet/kpro/internal/modules/login/service"
+	"github.com/saramand9/kpro/core"
+	loginservice "github.com/saramand9/kpro/internal/modules/login/service"
 )
 
 func TestUDPLoginHandlerReturnsSession(t *testing.T) {

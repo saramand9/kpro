@@ -6,8 +6,8 @@ package wire
 import (
 	"io"
 
-	"github.com/saramand9/bignet/kpro/codec"
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/codec"
+	"github.com/saramand9/kpro/core"
 )
 
 // MaxFrameSize is the example wire helper frame limit.

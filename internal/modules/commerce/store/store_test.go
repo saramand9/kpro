@@ -8,9 +8,9 @@ import (
 	"errors"
 	"testing"
 
-	gormstore "github.com/saramand9/bignet/kpro/database/gorm"
-	"github.com/saramand9/bignet/kpro/internal/modules/commerce"
-	commerceservice "github.com/saramand9/bignet/kpro/internal/modules/commerce/service"
+	gormstore "github.com/saramand9/kpro/database/gorm"
+	"github.com/saramand9/kpro/internal/modules/commerce"
+	commerceservice "github.com/saramand9/kpro/internal/modules/commerce/service"
 	"gorm.io/driver/sqlite"
 
 	_ "modernc.org/sqlite"

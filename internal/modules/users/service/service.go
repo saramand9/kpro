@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/saramand9/bignet/kpro/internal/modules/users"
+	"github.com/saramand9/kpro/internal/modules/users"
 )
 
 // ErrInvalidInput reports invalid user service input.

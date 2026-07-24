@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/database/common/readmodels"
+	"github.com/saramand9/kpro/database/common/readmodels"
 )
 
 func TestNeo4jIntegrationGraphUpsert(t *testing.T) {

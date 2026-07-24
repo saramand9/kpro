@@ -4,20 +4,20 @@
 package app
 
 import (
-	"github.com/saramand9/bignet/kpro/codec"
-	loginhandler "github.com/saramand9/bignet/kpro/internal/modules/login/handler"
-	loginservice "github.com/saramand9/bignet/kpro/internal/modules/login/service"
-	projecthandler "github.com/saramand9/bignet/kpro/internal/modules/projects/handler"
-	projectservice "github.com/saramand9/bignet/kpro/internal/modules/projects/service"
-	reporthandler "github.com/saramand9/bignet/kpro/internal/modules/reports/handler"
-	reportservice "github.com/saramand9/bignet/kpro/internal/modules/reports/service"
-	userhandler "github.com/saramand9/bignet/kpro/internal/modules/users/handler"
-	userservice "github.com/saramand9/bignet/kpro/internal/modules/users/service"
-	"github.com/saramand9/bignet/kpro/middleware"
-	"github.com/saramand9/bignet/kpro/server"
-	"github.com/saramand9/bignet/kpro/transport/grpcx"
-	"github.com/saramand9/bignet/kpro/transport/httpx"
-	"github.com/saramand9/bignet/kpro/transport/udp"
+	"github.com/saramand9/kpro/codec"
+	loginhandler "github.com/saramand9/kpro/internal/modules/login/handler"
+	loginservice "github.com/saramand9/kpro/internal/modules/login/service"
+	projecthandler "github.com/saramand9/kpro/internal/modules/projects/handler"
+	projectservice "github.com/saramand9/kpro/internal/modules/projects/service"
+	reporthandler "github.com/saramand9/kpro/internal/modules/reports/handler"
+	reportservice "github.com/saramand9/kpro/internal/modules/reports/service"
+	userhandler "github.com/saramand9/kpro/internal/modules/users/handler"
+	userservice "github.com/saramand9/kpro/internal/modules/users/service"
+	"github.com/saramand9/kpro/middleware"
+	"github.com/saramand9/kpro/server"
+	"github.com/saramand9/kpro/transport/grpcx"
+	"github.com/saramand9/kpro/transport/httpx"
+	"github.com/saramand9/kpro/transport/udp"
 )
 
 // RegisterHTTPModules wires HTTP modules from composed persistence ports.

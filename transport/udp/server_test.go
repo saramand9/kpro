@@ -10,26 +10,24 @@ import (
 	"testing"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/codec"
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/codec"
+	"github.com/saramand9/kpro/core"
 )
 
 func TestListenAndServeRejectsSecondStartAndStopsWithNilContext(t *testing.T) {
 	server := New(Config{Addr: "127.0.0.1:0"})
 	errCh := make(chan error, 1)
-	go func() { errCh <- server.ListenAndServe(nil, nil) }()
-	deadline := time.Now().Add(time.Second)
-	for {
-		server.mu.Lock()
-		started := server.conn != nil
-		server.mu.Unlock()
-		if started {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("UDP server did not start")
-		}
-		time.Sleep(time.Millisecond)
+	go func() { errCh <- server.ListenAndServe(nil, func(core.Context) error { return nil }) }()
+	select {
+	case <-server.Ready():
+	case <-time.After(time.Second):
+		t.Fatal("UDP Ready() did not close")
+	}
+	server.mu.Lock()
+	started := server.conn != nil
+	server.mu.Unlock()
+	if !started {
+		t.Fatal("UDP Ready() closed without a published socket")
 	}
 	if err := server.ListenAndServe(context.Background(), nil); !errors.Is(err, core.ErrAlreadyStarted) {
 		t.Fatalf("second ListenAndServe() error = %v, want %v", err, core.ErrAlreadyStarted)
@@ -44,6 +42,25 @@ func TestListenAndServeRejectsSecondStartAndStopsWithNilContext(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("UDP server did not stop")
+	}
+}
+
+func TestUDPRejectsNilHandlerWithoutBinding(t *testing.T) {
+	server := New(Config{Addr: "127.0.0.1:0"})
+	err := server.ListenAndServe(context.Background(), nil)
+	if !errors.Is(err, core.ErrNoHandler) {
+		t.Fatalf("ListenAndServe() error = %v, want %v", err, core.ErrNoHandler)
+	}
+	select {
+	case <-server.Ready():
+		t.Fatal("Ready() closed after nil handler startup failure")
+	default:
+	}
+	server.mu.Lock()
+	conn := server.conn
+	server.mu.Unlock()
+	if conn != nil {
+		t.Fatal("nil handler startup published a UDP socket")
 	}
 }
 
@@ -220,6 +237,88 @@ func TestPacketSessionSendAfterCloseReturnsErrClosed(t *testing.T) {
 	err := session.Send(core.Message{ID: 1, Seq: 1})
 	if !errors.Is(err, core.ErrClosed) {
 		t.Fatalf("send after close = %v, want %v", err, core.ErrClosed)
+	}
+}
+
+func TestServerRejectsDatagramLargerThanMaxPacketSize(t *testing.T) {
+	packetCodec := codec.KProV1()
+	oversizedPrefix, err := packetCodec.EncodePacket(core.Message{ID: 101, Seq: 1, Data: []byte("x")})
+	if err != nil {
+		t.Fatalf("encode oversized prefix: %v", err)
+	}
+	validPacket, err := packetCodec.EncodePacket(core.Message{ID: 102, Seq: 2, Data: []byte("y")})
+	if err != nil {
+		t.Fatalf("encode boundary packet: %v", err)
+	}
+	if len(validPacket) != len(oversizedPrefix) {
+		t.Fatalf("test packet lengths differ: valid=%d oversized-prefix=%d", len(validPacket), len(oversizedPrefix))
+	}
+
+	server := New(Config{
+		Addr:          "127.0.0.1:0",
+		Codec:         packetCodec,
+		MaxPacketSize: len(validPacket),
+	})
+	received := make(chan uint32, 2)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.ListenAndServe(context.Background(), func(ctx core.Context) error {
+			received <- ctx.Message().ID
+			return nil
+		})
+	}()
+	select {
+	case <-server.Ready():
+	case err := <-errCh:
+		t.Fatalf("UDP server stopped before readiness: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("UDP server did not become ready")
+	}
+	t.Cleanup(func() {
+		if err := server.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown UDP server: %v", err)
+		}
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Errorf("UDP server exit: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Error("UDP server did not stop")
+		}
+	})
+
+	server.mu.Lock()
+	remote := *server.conn.LocalAddr().(*net.UDPAddr)
+	server.mu.Unlock()
+	client := listenUDPTestConn(t)
+	defer client.Close()
+
+	oversized := append(append([]byte(nil), oversizedPrefix...), 0)
+	if _, err := client.WriteToUDP(oversized, &remote); err != nil {
+		t.Fatalf("write oversized datagram: %v", err)
+	}
+	if _, err := client.WriteToUDP(validPacket, &remote); err != nil {
+		t.Fatalf("write boundary datagram: %v", err)
+	}
+
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	for {
+		select {
+		case id := <-received:
+			if id == 101 {
+				t.Fatal("handler received truncated oversized datagram")
+			}
+			if id == 102 {
+				return
+			}
+			t.Fatalf("handler received unexpected message id %d", id)
+		case err := <-errCh:
+			t.Fatalf("UDP server stopped while reading datagrams: %v", err)
+		case <-deadline.C:
+			t.Fatal("boundary-sized datagram was not handled")
+		}
 	}
 }
 

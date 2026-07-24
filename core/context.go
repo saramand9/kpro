@@ -3,7 +3,11 @@
 
 package core
 
-import "sync"
+import (
+	"context"
+	"sync"
+	"sync/atomic"
+)
 
 // Handler processes one decoded KPro message context.
 type Handler func(Context) error
@@ -33,12 +37,30 @@ type Context interface {
 	Get(key string) (interface{}, bool)
 }
 
+// ContextProvider is the optional request-context capability implemented by
+// BaseContext and middleware-decorated message contexts. Keeping it separate
+// preserves compatibility with third-party Context implementations.
+type ContextProvider interface {
+	Context() context.Context
+}
+
+// ContextOf returns the middleware-updated request context when available and
+// falls back to context.Background for legacy Context implementations.
+func ContextOf(messageCtx Context) context.Context {
+	if provider, ok := messageCtx.(ContextProvider); ok {
+		return normalizeContext(provider.Context())
+	}
+	return context.Background()
+}
+
 // BaseContext is the default Context implementation used by message transports.
 type BaseContext struct {
-	session Session
-	message Message
-	values  map[string]interface{}
-	pooled  bool
+	ctx              context.Context
+	session          Session
+	message          Message
+	values           map[string]interface{}
+	refs             atomic.Int32
+	transportManaged bool
 }
 
 var baseContextPool = sync.Pool{
@@ -50,21 +72,46 @@ var baseContextPool = sync.Pool{
 // NewContext creates a message context for the supplied session and message.
 func NewContext(session Session, message Message) *BaseContext {
 	return &BaseContext{
+		ctx:     context.Background(),
 		session: session,
 		message: message,
 	}
 }
 
-// AcquireContext creates a context for transport dispatch.
-// The returned context may be reused after its handler finishes. Call
-// CloneContext before retaining it in background work.
+// AcquireContext creates a Router-owned pooled context. Existing custom
+// transports may keep using it when their handler is always Router.Dispatch.
+// New transports that also support direct handlers should use
+// AcquireTransportContext and ReleaseTransportContext.
 func AcquireContext(session Session, message Message) *BaseContext {
+	return acquireContext(session, message, false)
+}
+
+// AcquireTransportContext creates a pooled context whose caller lifetime can
+// overlap a Router task. Message transports must pair it with
+// ReleaseTransportContext after the supplied handler returns.
+func AcquireTransportContext(session Session, message Message) *BaseContext {
+	return acquireContext(session, message, true)
+}
+
+func acquireContext(session Session, message Message, transportManaged bool) *BaseContext {
 	ctx := baseContextPool.Get().(*BaseContext)
+	ctx.ctx = context.Background()
 	ctx.session = session
 	ctx.message = message
 	ctx.values = nil
-	ctx.pooled = true
+	ctx.transportManaged = transportManaged
+	ctx.refs.Store(1)
 	return ctx
+}
+
+// ReleaseTransportContext releases the transport caller's ownership. If a
+// Router accepted the context, pooling is delayed until that task completes.
+func ReleaseTransportContext(ctx Context) {
+	base, ok := ctx.(*BaseContext)
+	if !ok || !base.transportManaged {
+		return
+	}
+	releaseContext(base)
 }
 
 // CloneContext returns a context snapshot. Message data and map containers are
@@ -74,12 +121,15 @@ func CloneContext(ctx Context) *BaseContext {
 	if base, ok := ctx.(*BaseContext); ok {
 		return base.Clone()
 	}
-	return NewContext(ctx.Session(), cloneMessage(ctx.Message()))
+	cloned := NewContext(ctx.Session(), cloneMessage(ctx.Message()))
+	cloned.ctx = ContextOf(ctx)
+	return cloned
 }
 
 // Clone returns a snapshot of the current context.
 func (c *BaseContext) Clone() *BaseContext {
 	cloned := NewContext(c.session, cloneMessage(c.message))
+	cloned.ctx = normalizeContext(c.ctx)
 	if len(c.values) > 0 {
 		cloned.values = make(map[string]interface{}, len(c.values))
 		for key, value := range c.values {
@@ -91,14 +141,67 @@ func (c *BaseContext) Clone() *BaseContext {
 
 func releaseContext(ctx Context) {
 	base, ok := ctx.(*BaseContext)
-	if !ok || !base.pooled {
+	if !ok || base.refs.Load() <= 0 {
 		return
 	}
-	base.pooled = false
+	if base.refs.Add(-1) != 0 {
+		return
+	}
+	base.ctx = nil
 	base.session = nil
 	base.message = Message{}
 	base.values = nil
+	base.transportManaged = false
 	baseContextPool.Put(base)
+}
+
+func retainRouterContext(ctx Context) {
+	base, ok := ctx.(*BaseContext)
+	if !ok || !base.transportManaged || base.refs.Load() <= 0 {
+		return
+	}
+	base.refs.Add(1)
+}
+
+func normalizeContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
+// Context returns the middleware-updated context for the current dispatch.
+func (c *BaseContext) Context() context.Context {
+	return normalizeContext(c.ctx)
+}
+
+func (c *BaseContext) setContext(ctx context.Context) {
+	c.ctx = normalizeContext(ctx)
+}
+
+type messageContextDelegate interface {
+	Context
+}
+
+type contextualMessageContext struct {
+	messageContextDelegate
+	ctx context.Context
+}
+
+func (c *contextualMessageContext) Context() context.Context {
+	return c.ctx
+}
+
+func withMessageContext(messageCtx Context, ctx context.Context) Context {
+	ctx = normalizeContext(ctx)
+	if base, ok := messageCtx.(*BaseContext); ok {
+		base.setContext(ctx)
+		return base
+	}
+	return &contextualMessageContext{
+		messageContextDelegate: messageCtx,
+		ctx:                    ctx,
+	}
 }
 
 func cloneMessage(msg Message) Message {

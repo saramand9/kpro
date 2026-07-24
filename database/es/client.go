@@ -3,6 +3,8 @@ package elasticstore
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,7 +13,7 @@ import (
 
 	"github.com/elastic/go-elasticsearch/v8"
 	"github.com/elastic/go-elasticsearch/v8/esapi"
-	"github.com/saramand9/bignet/kpro/database/common/lifecycle"
+	"github.com/saramand9/kpro/database/common/lifecycle"
 )
 
 type closeIdleTransport interface {
@@ -20,10 +22,10 @@ type closeIdleTransport interface {
 
 // Client owns an Elasticsearch client and exposes search helpers.
 type Client struct {
-	name      string
-	elastic   *elasticsearch.Client
-	owns      bool
-	transport http.RoundTripper
+	name          string
+	elastic       *elasticsearch.Client
+	ownsTransport bool
+	transport     http.RoundTripper
 }
 
 var _ lifecycle.Resource = (*Client)(nil)
@@ -38,21 +40,27 @@ func Open(ctx context.Context, config Config) (*Client, error) {
 		return nil, err
 	}
 	elasticClient := config.Client
-	owns := false
-	transport := config.Transport
-	if config.ClientConfig != nil {
-		transport = config.ClientConfig.Transport
-	}
+	var ownedTransport http.RoundTripper
 	if elasticClient == nil {
 		clientConfig := elasticConfig(config)
-		elasticClient, err = elasticsearch.NewClient(clientConfig)
+		ownedTransport, err = prepareOwnedTransport(&clientConfig)
 		if err != nil {
 			return nil, err
 		}
-		owns = true
-		transport = clientConfig.Transport
+		elasticClient, err = elasticsearch.NewClient(clientConfig)
+		if err != nil {
+			if closer, ok := ownedTransport.(closeIdleTransport); ok {
+				closer.CloseIdleConnections()
+			}
+			return nil, err
+		}
 	}
-	client := &Client{name: config.Name, elastic: elasticClient, owns: owns, transport: transport}
+	client := &Client{
+		name:          config.Name,
+		elastic:       elasticClient,
+		ownsTransport: ownedTransport != nil,
+		transport:     ownedTransport,
+	}
 	if !config.SkipHealthCheck {
 		healthCtx, cancel := context.WithTimeout(ctx, config.HealthTimeout)
 		defer cancel()
@@ -128,13 +136,43 @@ func (c *Client) Close() error {
 
 // Shutdown releases transport resources when this adapter opened the client.
 func (c *Client) Shutdown(ctx context.Context) error {
-	if c == nil || !c.owns || c.transport == nil {
+	if c == nil || !c.ownsTransport || c.transport == nil {
 		return nil
 	}
 	if closer, ok := c.transport.(closeIdleTransport); ok {
 		closer.CloseIdleConnections()
 	}
 	return nil
+}
+
+// prepareOwnedTransport installs a private clone when the caller did not
+// provide a transport. This makes idle-connection ownership explicit instead
+// of closing transports supplied through Config or ClientConfig.
+func prepareOwnedTransport(config *elasticsearch.Config) (http.RoundTripper, error) {
+	if config == nil || config.Transport != nil {
+		return nil, nil
+	}
+	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return nil, fmt.Errorf("%w: default HTTP transport is not cloneable", ErrInvalidConfig)
+	}
+	transport := defaultTransport.Clone()
+	if len(config.CACert) > 0 {
+		tlsConfig := transport.TLSClientConfig
+		if tlsConfig == nil {
+			tlsConfig = &tls.Config{}
+		} else {
+			tlsConfig = tlsConfig.Clone()
+		}
+		tlsConfig.RootCAs = x509.NewCertPool()
+		if ok := tlsConfig.RootCAs.AppendCertsFromPEM(config.CACert); !ok {
+			return nil, fmt.Errorf("%w: cannot parse CA certificate", ErrInvalidConfig)
+		}
+		transport.TLSClientConfig = tlsConfig
+		config.CACert = nil
+	}
+	config.Transport = transport
+	return transport, nil
 }
 
 func encodeBody(body any) (io.Reader, error) {

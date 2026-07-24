@@ -5,8 +5,8 @@ import (
 	"fmt"
 
 	quicgo "github.com/quic-go/quic-go"
-	transportapi "github.com/saramand9/bignet/kpro/transport"
-	"github.com/saramand9/bignet/kpro/transport/internal/configcheck"
+	transportapi "github.com/saramand9/kpro/transport"
+	"github.com/saramand9/kpro/transport/internal/configcheck"
 )
 
 var _ transportapi.Validator = (*Server)(nil)
@@ -27,6 +27,7 @@ func (s *Server) Validate() error {
 		configcheck.NonNegativeDuration("WriteTimeout", s.rawConfig.WriteTimeout),
 		configcheck.NonNegativeDuration("HandshakeIdleTimeout", s.rawConfig.HandshakeIdleTimeout),
 		configcheck.NonNegativeDuration("IdleTimeout", s.rawConfig.IdleTimeout),
+		s.rawConfig.HandlerErrorPolicy.Validate(),
 		validateQUICVersions(s.config.QUICConfig),
 	)
 	if s.config.TLSConfig == nil {

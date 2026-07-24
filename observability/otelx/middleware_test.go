@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/core"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"

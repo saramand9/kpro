@@ -4,8 +4,8 @@
 package echo
 
 import (
-	"github.com/saramand9/bignet/kpro/examples/internal/msgid"
-	"github.com/saramand9/bignet/kpro/server"
+	"github.com/saramand9/kpro/examples/internal/msgid"
+	"github.com/saramand9/kpro/server"
 )
 
 type Module struct{}

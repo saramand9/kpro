@@ -4,9 +4,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/saramand9/bignet/kpro/core"
-	transportapi "github.com/saramand9/bignet/kpro/transport"
-	"github.com/saramand9/bignet/kpro/transport/internal/configcheck"
+	"github.com/saramand9/kpro/core"
+	transportapi "github.com/saramand9/kpro/transport"
+	"github.com/saramand9/kpro/transport/internal/configcheck"
 )
 
 var _ transportapi.Validator = (*Endpoint)(nil)
@@ -20,10 +20,12 @@ func (e *Endpoint) Validate() error {
 		e.Descriptor().Validate(),
 		configcheck.ListenAddress("HTTP listen address", e.config.Addr),
 		configcheck.TypedNil("Logger", e.rawConfig.Logger),
+		configcheck.NonNegativeDuration("ReadHeaderTimeout", e.rawConfig.ReadHeaderTimeout),
 		configcheck.NonNegativeDuration("ReadTimeout", e.rawConfig.ReadTimeout),
 		configcheck.NonNegativeDuration("WriteTimeout", e.rawConfig.WriteTimeout),
 		configcheck.NonNegativeDuration("IdleTimeout", e.rawConfig.IdleTimeout),
 		configcheck.NonNegativeDuration("ShutdownTimeout", e.rawConfig.ShutdownTimeout),
+		configcheck.NonNegativeInt("MaxHeaderBytes", e.rawConfig.MaxHeaderBytes),
 		configcheck.NonNegativeInt64("MaxBodyBytes", e.rawConfig.MaxBodyBytes),
 	)
 	switch e.transport {

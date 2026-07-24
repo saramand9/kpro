@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	gormstore "github.com/saramand9/bignet/kpro/database/gorm"
-	"github.com/saramand9/bignet/kpro/eventing/events"
+	gormstore "github.com/saramand9/kpro/database/gorm"
+	"github.com/saramand9/kpro/eventing/events"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"

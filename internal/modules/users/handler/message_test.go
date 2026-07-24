@@ -9,9 +9,9 @@ import (
 	"net"
 	"testing"
 
-	"github.com/saramand9/bignet/kpro/core"
-	userservice "github.com/saramand9/bignet/kpro/internal/modules/users/service"
-	userstore "github.com/saramand9/bignet/kpro/internal/modules/users/store"
+	"github.com/saramand9/kpro/core"
+	userservice "github.com/saramand9/kpro/internal/modules/users/service"
+	userstore "github.com/saramand9/kpro/internal/modules/users/store"
 )
 
 func TestMessageCreateUserPersistsWithGORM(t *testing.T) {

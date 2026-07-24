@@ -1,24 +1,35 @@
 name: CI
 
 on:
+  workflow_call:
   pull_request:
   push:
     branches:
       - main
       - master
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version-file: go.mod
+          go-version: 1.26.5
           cache: true
+
+      - name: Verify module checksums
+        run: |
+          go mod verify
+          go mod tidy -diff
 
       - name: Check formatting
         run: |
@@ -29,10 +40,29 @@ jobs:
           fi
 
       - name: Test root module
-        run: go test ./...
+        run: go test -count=1 ./...
 
       - name: Vet root module
         run: go vet ./...
+
+      - name: Check reachable vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
+      - name: Enforce coverage floor
+        run: |
+          go test -count=1 -coverprofile=coverage.out ./core ./server ./middleware ./codec ./transport/... ./observability/... ./eventing/... ./database/... ./cmd/kpro ./cmd/benchguard
+          go tool cover -func=coverage.out | tee coverage-summary.txt
+          awk '/total:/ { gsub("%", "", $3); if ($3 + 0 < 55) { print "coverage below 55%: " $3 "%"; exit 1 } }' coverage-summary.txt
+
+      - name: Upload coverage evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage
+          path: |
+            coverage.out
+            coverage-summary.txt
+          if-no-files-found: ignore
 
       - name: Generate a service scaffold
         run: go run ./cmd/kpro new "${RUNNER_TEMP}/kpro-scaffold-smoke" --module example.com/kpro-scaffold-smoke --name scaffold-smoke
@@ -41,10 +71,10 @@ jobs:
         working-directory: ${{ runner.temp }}/kpro-scaffold-smoke
         run: |
           go mod tidy
-          go test ./...
+          go test -count=1 ./...
 
       - name: Race test root module
-        run: go test -race ./...
+        run: go test -race -count=1 ./...
 
       - name: Guard hot-path performance budgets
         run: |
@@ -54,7 +84,7 @@ jobs:
 
       - name: Upload benchmark evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: hot-path-benchmarks
           path: benchmark-current.txt
@@ -62,7 +92,7 @@ jobs:
 
       - name: Test benchmark compare module
         working-directory: benchmark/compare
-        run: go test ./...
+        run: go test -count=1 ./...
 
       - name: Vet benchmark compare module
         working-directory: benchmark/compare
@@ -100,12 +130,14 @@ jobs:
           --health-retries=10
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version-file: go.mod
+          go-version: 1.26.5
           cache: true
 
       - name: Test SQL database integrations
@@ -113,22 +145,24 @@ jobs:
           KPRO_REQUIRE_EXTERNAL_DB: "1"
           KPRO_TEST_MYSQL_DSN: kpro:kpro@tcp(127.0.0.1:3306)/kpro?parseTime=true
           KPRO_TEST_POSTGRES_DSN: postgres://kpro:kpro@127.0.0.1:5432/kpro?sslmode=disable
-        run: go test -tags dbintegration ./database/... ./eventing/delivery
+        run: go test -count=1 -tags dbintegration ./database/... ./eventing/delivery
 
   windows-smoke:
     runs-on: windows-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version-file: go.mod
+          go-version: 1.26.5
           cache: true
 
       - name: Test Windows core and developer tooling
-        run: go test ./core ./server ./transport/... ./cmd/kpro ./examples/...
+        run: go test -count=1 ./core ./server ./transport/... ./cmd/kpro ./examples/...
 
       - name: Generate and compile a service
         shell: pwsh
@@ -137,5 +171,29 @@ jobs:
           go run ./cmd/kpro new $target --module example.com/kpro-scaffold-smoke --name scaffold-smoke
           Push-Location $target
           go mod tidy
-          go test ./...
+          go test -count=1 ./...
           Pop-Location
+
+  go-compatibility:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: ["1.25.12", "1.26.5"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: true
+
+      - name: Verify supported Go version
+        run: |
+          go version
+          go mod verify
+          go test -count=1 ./core ./server ./middleware ./codec ./transport/...

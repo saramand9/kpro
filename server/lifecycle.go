@@ -6,7 +6,7 @@ package server
 import (
 	"errors"
 
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/core"
 )
 
 // State is the observable one-shot Server lifecycle state.

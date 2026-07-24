@@ -3,9 +3,10 @@ package clickhousestore
 import (
 	"context"
 	"database/sql"
+	"fmt"
 
 	_ "github.com/ClickHouse/clickhouse-go/v2"
-	"github.com/saramand9/bignet/kpro/database/common/lifecycle"
+	"github.com/saramand9/kpro/database/common/lifecycle"
 )
 
 // Database owns a ClickHouse database/sql pool.
@@ -117,6 +118,9 @@ func (d *Database) Tx(ctx context.Context, fn func(*sql.Tx) error, opts ...*sql.
 	if d == nil || d.db == nil {
 		return sql.ErrConnDone
 	}
+	if fn == nil {
+		return fmt.Errorf("%w: transaction function is required", ErrInvalidConfig)
+	}
 	var txOptions *sql.TxOptions
 	if len(opts) > 0 {
 		txOptions = opts[0]
@@ -125,8 +129,8 @@ func (d *Database) Tx(ctx context.Context, fn func(*sql.Tx) error, opts ...*sql.
 	if err != nil {
 		return err
 	}
+	defer func() { _ = tx.Rollback() }()
 	if err := fn(tx); err != nil {
-		_ = tx.Rollback()
 		return err
 	}
 	return tx.Commit()

@@ -1,8 +1,8 @@
 package kcp
 
 import (
-	"github.com/saramand9/bignet/kpro/core"
-	transportapi "github.com/saramand9/bignet/kpro/transport"
+	"github.com/saramand9/kpro/core"
+	transportapi "github.com/saramand9/kpro/transport"
 )
 
 // Descriptor advertises the reliable stream exposed by KCP.

@@ -290,7 +290,9 @@ func TestRouterDoesNotReuseExecutorForDifferentSessionWithSameID(t *testing.T) {
 func TestRouterDoesNotStartAsyncWorkersAfterClose(t *testing.T) {
 	router := NewRouter(RouterConfig{AsyncWorkers: 1})
 	router.Close()
-	router.HandleAsync(10, func(Context) error { return nil })
+	if err := router.HandleAsyncChecked(10, func(Context) error { return nil }); err != ErrRouterClosed {
+		t.Fatalf("late async registration error = %v, want ErrRouterClosed", err)
+	}
 
 	router.mu.RLock()
 	registered := router.routes[10].handler != nil
@@ -355,7 +357,7 @@ func (s *fakeSession) waitForMessage(t *testing.T) Message {
 	select {
 	case msg := <-s.sent:
 		return msg
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for session message")
 	}
 	return Message{}

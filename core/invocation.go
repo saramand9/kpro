@@ -79,9 +79,11 @@ type InvocationOptions struct {
 	Payload any
 	// Native is the underlying protocol context or request object.
 	Native any
-	// Done optionally carries the transport/session cancellation signal.
+	// Done optionally carries the request, stream, or message cancellation signal.
 	Done <-chan struct{}
 	// ConnDone optionally carries the underlying connection cancellation signal.
+	// All invocations on one connection must reuse the same channel, while
+	// distinct connections must not share it.
 	ConnDone <-chan struct{}
 }
 
@@ -141,6 +143,7 @@ func NewMessageInvocation(ctx context.Context, msgCtx Context) *BaseInvocation {
 		Payload:   msg.Data,
 		Native:    msgCtx,
 		Done:      done,
+		ConnDone:  done,
 	})
 	invocation.cleanup = cleanup
 	return invocation
@@ -178,6 +181,44 @@ type invocationContext struct {
 }
 
 func (i invocationContext) Context() context.Context { return i.ctx }
+
+// Done returns the cancellation signal of the replacement invocation context.
+func (i invocationContext) Done() <-chan struct{} { return i.ctx.Done() }
+
+// ConnDone preserves the underlying connection lifetime across context wrappers.
+func (i invocationContext) ConnDone() <-chan struct{} {
+	return InvocationConnDone(i.Invocation)
+}
+
+// InvocationDone returns the request or stream cancellation signal exposed by
+// an invocation, falling back to Invocation.Context().Done().
+func InvocationDone(invocation Invocation) <-chan struct{} {
+	if invocation == nil {
+		return nil
+	}
+	if doneInvocation, ok := invocation.(interface{ Done() <-chan struct{} }); ok {
+		if done := doneInvocation.Done(); done != nil {
+			return done
+		}
+	}
+	if invocation.Context() == nil {
+		return nil
+	}
+	return invocation.Context().Done()
+}
+
+// InvocationConnDone returns the underlying connection lifetime signal when
+// one is available. Unlike InvocationDone, it never falls back to a request
+// context because request cancellation must not end connection-scoped state.
+func InvocationConnDone(invocation Invocation) <-chan struct{} {
+	if invocation == nil {
+		return nil
+	}
+	if connInvocation, ok := invocation.(interface{ ConnDone() <-chan struct{} }); ok {
+		return connInvocation.ConnDone()
+	}
+	return nil
+}
 
 // Context returns the request or stream context associated with the invocation.
 func (c *BaseInvocation) Context() context.Context {

@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
-	"github.com/saramand9/bignet/kpro/database/common/lifecycle"
+	"github.com/saramand9/kpro/database/common/lifecycle"
 )
 
 // Client owns an InfluxDB client and exposes time-series helpers.

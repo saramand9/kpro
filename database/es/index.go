@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/saramand9/bignet/kpro/database/common/readmodels"
+	"github.com/saramand9/kpro/database/common/readmodels"
 )
 
 // Index implements a typed Elasticsearch search index.

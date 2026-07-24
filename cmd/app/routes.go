@@ -4,12 +4,12 @@
 package main
 
 import (
-	commercehandler "github.com/saramand9/bignet/kpro/internal/modules/commerce/handler"
-	projecthandler "github.com/saramand9/bignet/kpro/internal/modules/projects/handler"
-	userhandler "github.com/saramand9/bignet/kpro/internal/modules/users/handler"
-	"github.com/saramand9/bignet/kpro/middleware"
-	"github.com/saramand9/bignet/kpro/server"
-	"github.com/saramand9/bignet/kpro/transport/httpx"
+	commercehandler "github.com/saramand9/kpro/internal/modules/commerce/handler"
+	projecthandler "github.com/saramand9/kpro/internal/modules/projects/handler"
+	userhandler "github.com/saramand9/kpro/internal/modules/users/handler"
+	"github.com/saramand9/kpro/middleware"
+	"github.com/saramand9/kpro/server"
+	"github.com/saramand9/kpro/transport/httpx"
 )
 
 func registerMessageRoutes(endpoint *server.Endpoint, services appServices) {

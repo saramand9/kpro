@@ -3,7 +3,7 @@
 
 package events
 
-import "github.com/saramand9/bignet/kpro/transport/sse"
+import "github.com/saramand9/kpro/transport/sse"
 
 type Module struct{}
 

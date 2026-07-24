@@ -4,15 +4,17 @@
 package httpx
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/middleware"
+	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/middleware"
 )
 
 func TestContextBytes(t *testing.T) {
@@ -35,6 +37,36 @@ func TestContextBytes(t *testing.T) {
 	}
 	if got := resp.Body.String(); got != "hello" {
 		t.Fatalf("body = %q", got)
+	}
+}
+
+func TestHTTPConfigUsesSafeZeroValueDefaults(t *testing.T) {
+	endpoint := New(Config{})
+	server := endpoint.buildServer()
+	if server.ReadHeaderTimeout != DefaultReadHeaderTimeout {
+		t.Fatalf("ReadHeaderTimeout = %v, want %v", server.ReadHeaderTimeout, DefaultReadHeaderTimeout)
+	}
+	if server.ReadTimeout != DefaultReadTimeout {
+		t.Fatalf("ReadTimeout = %v, want %v", server.ReadTimeout, DefaultReadTimeout)
+	}
+	if server.WriteTimeout != DefaultWriteTimeout {
+		t.Fatalf("WriteTimeout = %v, want %v", server.WriteTimeout, DefaultWriteTimeout)
+	}
+	if server.IdleTimeout != DefaultIdleTimeout {
+		t.Fatalf("IdleTimeout = %v, want %v", server.IdleTimeout, DefaultIdleTimeout)
+	}
+	if server.MaxHeaderBytes != DefaultMaxHeaderBytes {
+		t.Fatalf("MaxHeaderBytes = %d, want %d", server.MaxHeaderBytes, DefaultMaxHeaderBytes)
+	}
+	if endpoint.config.MaxBodyBytes != DefaultMaxBodyBytes {
+		t.Fatalf("MaxBodyBytes = %d, want %d", endpoint.config.MaxBodyBytes, DefaultMaxBodyBytes)
+	}
+}
+
+func TestHTTPConfigRejectsNegativeHeaderLimits(t *testing.T) {
+	err := New(Config{ReadHeaderTimeout: -1, MaxHeaderBytes: -1}).Validate()
+	if err == nil || !strings.Contains(err.Error(), "ReadHeaderTimeout") || !strings.Contains(err.Error(), "MaxHeaderBytes") {
+		t.Fatalf("Validate() error = %v, want both header limit errors", err)
 	}
 }
 
@@ -103,6 +135,89 @@ func TestContextBodyRejectsOversizedRequest(t *testing.T) {
 	}
 }
 
+func TestContextBodyCachesChunkedOversizeErrorAcrossLengthAndBodyCalls(t *testing.T) {
+	endpoint := New(Config{MaxBodyBytes: 4})
+	var firstErr error
+	endpoint.Post("/echo", func(ctx *Context) error {
+		if length := ctx.ContentLength(); length != 0 {
+			t.Fatalf("content length = %d, want 0 after oversized chunked body", length)
+		}
+		_, firstErr = ctx.Body()
+		if firstErr == nil {
+			t.Fatal("first Body() error = nil, want oversized body error")
+		}
+		_, secondErr := ctx.Body()
+		if secondErr != firstErr {
+			t.Fatalf("second Body() error = %v, want cached %v", secondErr, firstErr)
+		}
+		return secondErr
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/echo", strings.NewReader("toolong"))
+	req.ContentLength = -1
+	resp := httptest.NewRecorder()
+	endpoint.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d; body=%q", resp.Code, http.StatusRequestEntityTooLarge, resp.Body.String())
+	}
+	var maxBytesErr *http.MaxBytesError
+	if !errors.As(firstErr, &maxBytesErr) {
+		t.Fatalf("Body() error = %T %v, want *http.MaxBytesError", firstErr, firstErr)
+	}
+}
+
+func TestReadyClosesAfterHTTPListenerBinds(t *testing.T) {
+	endpoint := New(Config{Addr: "127.0.0.1:0"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- endpoint.ListenAndServe(ctx) }()
+
+	select {
+	case <-endpoint.Ready():
+	case <-time.After(time.Second):
+		t.Fatal("Ready() did not close after listener bind")
+	}
+	endpoint.mu.RLock()
+	listener := endpoint.listener
+	endpoint.mu.RUnlock()
+	if listener == nil {
+		t.Fatal("Ready() closed without a published listener")
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("ListenAndServe() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("HTTP endpoint did not stop")
+	}
+}
+
+func TestReadyStaysOpenOnHTTPStartupFailureAndShutdownBeforeStart(t *testing.T) {
+	invalid := New(Config{Addr: "invalid"})
+	if err := invalid.ListenAndServe(context.Background()); err == nil {
+		t.Fatal("ListenAndServe() error = nil, want invalid address error")
+	}
+	select {
+	case <-invalid.Ready():
+		t.Fatal("Ready() closed after startup failure")
+	default:
+	}
+
+	closed := New(Config{})
+	if err := closed.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	select {
+	case <-closed.Ready():
+		t.Fatal("Ready() closed after shutdown-before-start")
+	default:
+	}
+}
+
 func TestContextJSONBody(t *testing.T) {
 	endpoint := New(Config{})
 	endpoint.Post("/json", func(ctx *Context) error {
@@ -161,6 +276,34 @@ func TestHandlerErrorAfterResponseStartedDoesNotAppendBody(t *testing.T) {
 	}
 	if got := resp.Body.String(); got != "accepted" {
 		t.Fatalf("body = %q, want response body without late error text", got)
+	}
+}
+
+func TestHandlerErrorsUseProtocolStatusAndSafeBodies(t *testing.T) {
+	tests := []struct {
+		name   string
+		err    error
+		status int
+		body   string
+	}{
+		{name: "rate limited", err: core.ErrRateLimited, status: http.StatusTooManyRequests, body: "rate limit exceeded"},
+		{name: "payload too large", err: core.ErrPayloadTooLarge, status: http.StatusRequestEntityTooLarge, body: "payload too large"},
+		{name: "overloaded", err: core.ErrOverloaded, status: http.StatusServiceUnavailable, body: "service overloaded"},
+		{name: "internal", err: core.ErrRecovered, status: http.StatusInternalServerError, body: "internal error"},
+		{name: "unknown", err: errors.New("database password leaked"), status: http.StatusInternalServerError, body: "internal error"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			endpoint := New(Config{})
+			endpoint.Get("/failure", func(*Context) error { return test.err })
+			response := executeTestRequest(endpoint, http.MethodGet, "/failure", "")
+			if response.Code != test.status {
+				t.Fatalf("status = %d, want %d", response.Code, test.status)
+			}
+			if body := response.Body.String(); body != test.body {
+				t.Fatalf("body = %q, want %q", body, test.body)
+			}
+		})
 	}
 }
 

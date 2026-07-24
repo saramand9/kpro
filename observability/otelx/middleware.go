@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/core"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -16,7 +16,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-const defaultInstrumentationName = "github.com/saramand9/bignet/kpro"
+const defaultInstrumentationName = "github.com/saramand9/kpro"
 
 // Config controls generic invocation tracing. Exporters and sampling remain an
 // application concern and are configured on the supplied TracerProvider.

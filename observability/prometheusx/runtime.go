@@ -4,7 +4,7 @@ import (
 	"errors"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/core"
 )
 
 // LifecycleSource is implemented by server.Server, core.Router, and custom

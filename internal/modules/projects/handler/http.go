@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/internal/modules/projects"
-	projectservice "github.com/saramand9/bignet/kpro/internal/modules/projects/service"
-	"github.com/saramand9/bignet/kpro/transport/httpx"
+	"github.com/saramand9/kpro/internal/modules/projects"
+	projectservice "github.com/saramand9/kpro/internal/modules/projects/service"
+	"github.com/saramand9/kpro/transport/httpx"
 )
 
 // CreateRequest is the public HTTP input for creating a project.

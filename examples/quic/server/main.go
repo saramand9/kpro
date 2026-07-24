@@ -5,12 +5,12 @@ import (
 	"log"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/examples/internal/examplecert"
-	"github.com/saramand9/bignet/kpro/examples/internal/msgid"
-	"github.com/saramand9/bignet/kpro/middleware"
-	"github.com/saramand9/bignet/kpro/server"
-	quictransport "github.com/saramand9/bignet/kpro/transport/quic"
+	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/examples/internal/examplecert"
+	"github.com/saramand9/kpro/examples/internal/msgid"
+	"github.com/saramand9/kpro/middleware"
+	"github.com/saramand9/kpro/server"
+	quictransport "github.com/saramand9/kpro/transport/quic"
 )
 
 func main() {

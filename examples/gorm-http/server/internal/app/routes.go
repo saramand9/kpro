@@ -6,8 +6,8 @@ package app
 import (
 	"context"
 
-	gormstore "github.com/saramand9/bignet/kpro/database/gorm"
-	"github.com/saramand9/bignet/kpro/server"
+	gormstore "github.com/saramand9/kpro/database/gorm"
+	"github.com/saramand9/kpro/server"
 )
 
 // Config controls mounted routes for the GORM HTTP example.

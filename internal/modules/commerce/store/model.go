@@ -7,8 +7,8 @@ import (
 	"context"
 	"time"
 
-	gormstore "github.com/saramand9/bignet/kpro/database/gorm"
-	"github.com/saramand9/bignet/kpro/internal/modules/commerce"
+	gormstore "github.com/saramand9/kpro/database/gorm"
+	"github.com/saramand9/kpro/internal/modules/commerce"
 )
 
 type productRow struct {

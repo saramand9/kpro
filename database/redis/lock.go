@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -22,17 +23,32 @@ if redis.call("GET", KEYS[1]) == ARGV[1] then
 end
 return 0`
 
-// Lock represents a Redis lock identified by key and token.
+// Lock represents a single-acquisition Redis lease identified by key and token.
+//
+// The token protects Release and Refresh from changing a lease now owned by a
+// different Lock. It is not a fencing token: a holder paused past the TTL can
+// still resume while a newer holder is active. Use this helper only when that
+// overlap is safe, or add an application-level monotonic fence at the protected
+// resource.
 type Lock struct {
 	client *Client
 	key    string
-	token  string
-	ttl    time.Duration
+
+	mu       sync.RWMutex
+	token    string
+	ttl      time.Duration
+	acquired bool
 }
 
-// NewLock creates a Redis lock helper.
+// NewLock creates a single-acquisition Redis lock helper.
+//
+// A Lock may retry after an unsuccessful Acquire, but it cannot acquire again
+// after its first successful acquisition. Create a new Lock for each lease.
 func NewLock(client *Client, key string, ttl time.Duration) *Lock {
-	return &Lock{client: client, key: key, token: randomToken(), ttl: ttl}
+	if client != nil {
+		key = client.key(key, "")
+	}
+	return &Lock{client: client, key: key, ttl: ttl}
 }
 
 // Key returns the Redis lock key.
@@ -48,25 +64,48 @@ func (l *Lock) Token() string {
 	if l == nil {
 		return ""
 	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	return l.token
 }
 
-// Acquire attempts to acquire the lock.
+// Acquire attempts to acquire the lock. After the first successful call, this
+// Lock cannot acquire another lease, even after Release or expiry; construct a
+// new Lock for the next acquisition.
+//
+// A transport error can leave the SET NX outcome unknown: Redis might hold the
+// generated token even though the caller did not receive the reply. Callers
+// must not treat the error as proof that no lease exists or start
+// non-idempotent work through another owner; reconcile or wait for the
+// configured TTL.
 func (l *Lock) Acquire(ctx context.Context) (bool, error) {
 	redisClient := l.redis()
 	if redisClient == nil {
 		return false, sql.ErrConnDone
 	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.acquired {
+		return false, ErrLockAlreadyAcquired
+	}
 	if l.ttl <= 0 {
 		return false, ErrInvalidConfig
 	}
-	ok, err := redisClient.SetNX(contextOrBackground(ctx), l.key, l.token, l.ttl).Result()
+
+	token, err := randomToken()
+	if err != nil {
+		return false, err
+	}
+	ok, err := redisClient.SetNX(contextOrBackground(ctx), l.key, token, l.ttl).Result()
 	if err != nil {
 		return false, err
 	}
 	if !ok {
 		return false, ErrLockNotAcquired
 	}
+	l.token = token
+	l.acquired = true
 	return true, nil
 }
 
@@ -76,7 +115,11 @@ func (l *Lock) Release(ctx context.Context) (bool, error) {
 	if redisClient == nil {
 		return false, sql.ErrConnDone
 	}
-	result, err := redisClient.Eval(contextOrBackground(ctx), releaseLockScript, []string{l.key}, l.token).Int()
+	token, acquired := l.acquisition()
+	if !acquired {
+		return false, ErrLockTokenMismatch
+	}
+	result, err := redisClient.Eval(contextOrBackground(ctx), releaseLockScript, []string{l.key}, token).Int()
 	if err != nil {
 		return false, err
 	}
@@ -95,15 +138,27 @@ func (l *Lock) Refresh(ctx context.Context, ttl time.Duration) (bool, error) {
 	if ttl <= 0 {
 		return false, ErrInvalidConfig
 	}
-	result, err := redisClient.Eval(contextOrBackground(ctx), refreshLockScript, []string{l.key}, l.token, ttl.Milliseconds()).Int()
+	token, acquired := l.acquisition()
+	if !acquired {
+		return false, ErrLockTokenMismatch
+	}
+	result, err := redisClient.Eval(contextOrBackground(ctx), refreshLockScript, []string{l.key}, token, ttl.Milliseconds()).Int()
 	if err != nil {
 		return false, err
 	}
 	if result == 0 {
 		return false, ErrLockTokenMismatch
 	}
+	l.mu.Lock()
 	l.ttl = ttl
+	l.mu.Unlock()
 	return true, nil
+}
+
+func (l *Lock) acquisition() (string, bool) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.token, l.acquired
 }
 
 func (l *Lock) redis() *redis.Client {
@@ -113,10 +168,10 @@ func (l *Lock) redis() *redis.Client {
 	return l.client.Redis()
 }
 
-func randomToken() string {
+func randomToken() (string, error) {
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
-		return hex.EncodeToString([]byte(time.Now().Format(time.RFC3339Nano)))
+		return "", err
 	}
-	return hex.EncodeToString(buf)
+	return hex.EncodeToString(buf), nil
 }

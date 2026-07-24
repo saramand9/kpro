@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/codec"
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/middleware"
-	"github.com/saramand9/bignet/kpro/transport"
-	"github.com/saramand9/bignet/kpro/transport/tcp"
-	"github.com/saramand9/bignet/kpro/transport/udp"
-	wstransport "github.com/saramand9/bignet/kpro/transport/websocket"
+	"github.com/saramand9/kpro/codec"
+	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/middleware"
+	"github.com/saramand9/kpro/transport"
+	"github.com/saramand9/kpro/transport/tcp"
+	"github.com/saramand9/kpro/transport/udp"
+	wstransport "github.com/saramand9/kpro/transport/websocket"
 	"golang.org/x/time/rate"
 )
 
