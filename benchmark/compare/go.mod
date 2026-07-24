@@ -3,7 +3,7 @@ module github.com/saramand9/kpro/benchmark/compare
 go 1.25.12
 
 require (
-	github.com/gofiber/fiber/v2 v2.52.13
+	github.com/gofiber/fiber/v2 v2.52.14
 	github.com/panjf2000/gnet/v2 v2.9.8
 	github.com/saramand9/kpro v0.0.0
 )
