@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/core"
 )
 
 func TestMetricsRecordBoundedInvocationLabels(t *testing.T) {

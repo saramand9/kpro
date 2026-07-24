@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -11,10 +12,11 @@ import (
 	"time"
 
 	quicgo "github.com/quic-go/quic-go"
-	"github.com/saramand9/bignet/kpro/codec"
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/transport/internal/serveutil"
-	"github.com/saramand9/bignet/kpro/transport/internal/streamutil"
+	"github.com/saramand9/kpro/codec"
+	"github.com/saramand9/kpro/core"
+	transportapi "github.com/saramand9/kpro/transport"
+	"github.com/saramand9/kpro/transport/internal/serveutil"
+	"github.com/saramand9/kpro/transport/internal/streamutil"
 )
 
 const (
@@ -31,11 +33,13 @@ const (
 )
 
 type Config struct {
-	Addr                 string
-	Codec                codec.StreamCodec
-	MaxFrameSize         uint32
-	MaxStreams           int
-	MaxConnections       int // Deprecated: use MaxStreams. QUIC sessions are bidirectional streams.
+	Addr         string
+	Codec        codec.StreamCodec
+	MaxFrameSize uint32
+	MaxStreams   int
+	// MaxConnections caps active physical QUIC connections. MaxStreams caps
+	// active bidirectional message streams across those connections.
+	MaxConnections       int
 	SendQueueSize        int
 	ReadTimeout          time.Duration
 	WriteTimeout         time.Duration
@@ -46,6 +50,10 @@ type Config struct {
 	TLSConfig            *tls.Config
 	QUICConfig           *quicgo.Config
 	NextProtos           []string
+	// HandlerErrorPolicy defaults to closing the affected stream session.
+	HandlerErrorPolicy transportapi.HandlerErrorPolicy
+	// OnHandlerError observes handler failures before the policy is applied.
+	OnHandlerError transportapi.HandlerErrorObserver
 }
 
 type Server struct {
@@ -58,14 +66,22 @@ type Server struct {
 
 	nextID      uint64
 	active      int64
+	activeConns int64
 	connections sync.Map
 	sessions    sync.Map
+	ready       chan struct{}
+	readyOnce   sync.Once
 }
 
 func New(config Config) *Server {
 	rawConfig := config
 	config = cloneOwnedConfig(config)
-	return &Server{config: normalizeConfig(config), rawConfig: rawConfig, accepting: true}
+	return &Server{
+		config:    normalizeConfig(config),
+		rawConfig: rawConfig,
+		accepting: true,
+		ready:     make(chan struct{}),
+	}
 }
 
 func NewServer(config Config) *Server {
@@ -74,6 +90,14 @@ func NewServer(config Config) *Server {
 
 func (s *Server) Name() string {
 	return "quic"
+}
+
+// Ready is closed once the QUIC listener is successfully bound and published.
+func (s *Server) Ready() <-chan struct{} {
+	if s == nil {
+		return nil
+	}
+	return s.ready
 }
 
 func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error {
@@ -85,6 +109,10 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 	}
 	if err := s.claimStart(); err != nil {
 		return err
+	}
+	if handler == nil {
+		s.rollbackStart()
+		return fmt.Errorf("quic: %w", core.ErrNoHandler)
 	}
 	tlsConfig, err := buildTLSConfig(s.config)
 	if err != nil {
@@ -100,6 +128,7 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 		_ = ln.Close()
 		return core.ErrClosed
 	}
+	s.signalReady()
 
 	serveDone := make(chan struct{})
 	watcherDone := serveutil.ShutdownOnCancel(ctx, serveDone, func() {
@@ -123,7 +152,11 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 			return err
 		}
 		if !s.registerConnection(conn) {
-			_ = conn.CloseWithError(0, "server shutting down")
+			reason := "QUIC connection limit reached"
+			if !s.isAccepting() {
+				reason = "server shutting down"
+			}
+			_ = conn.CloseWithError(0, reason)
 			continue
 		}
 		go s.acceptStreams(conn, handler)
@@ -170,7 +203,7 @@ func (s *Server) Shutdown(context.Context) error {
 		_ = ln.Close()
 	}
 	s.connections.Range(func(key, _ interface{}) bool {
-		if conn, ok := key.(quicgo.Connection); ok {
+		if conn, ok := key.(*quicgo.Conn); ok {
 			_ = conn.CloseWithError(0, "server shutting down")
 		}
 		return true
@@ -184,10 +217,11 @@ func (s *Server) Shutdown(context.Context) error {
 	return nil
 }
 
-func (s *Server) acceptStreams(conn quicgo.Connection, handler core.Handler) {
+func (s *Server) acceptStreams(conn *quicgo.Conn, handler core.Handler) {
 	defer func() {
 		_ = conn.CloseWithError(0, "stream accept stopped")
 		s.connections.Delete(conn)
+		s.releaseConnectionSlot()
 	}()
 	for {
 		stream, err := conn.AcceptStream(conn.Context())
@@ -223,10 +257,13 @@ func (s *Server) isAccepting() bool {
 	return s.accepting
 }
 
-func (s *Server) registerConnection(conn quicgo.Connection) bool {
+func (s *Server) registerConnection(conn *quicgo.Conn) bool {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
 	if !s.accepting {
+		return false
+	}
+	if !s.tryAcquireConnectionSlot() {
 		return false
 	}
 	s.connections.Store(conn, struct{}{})
@@ -261,11 +298,32 @@ func (s *Server) tryAcquireStreamSlot() bool {
 	}
 }
 
+func (s *Server) tryAcquireConnectionSlot() bool {
+	limit := int64(s.config.MaxConnections)
+	if limit <= 0 {
+		atomic.AddInt64(&s.activeConns, 1)
+		return true
+	}
+	for {
+		active := atomic.LoadInt64(&s.activeConns)
+		if active >= limit {
+			return false
+		}
+		if atomic.CompareAndSwapInt64(&s.activeConns, active, active+1) {
+			return true
+		}
+	}
+}
+
+func (s *Server) releaseConnectionSlot() {
+	atomic.AddInt64(&s.activeConns, -1)
+}
+
 type session struct {
 	id        uint64
 	server    *Server
-	conn      quicgo.Connection
-	stream    quicgo.Stream
+	conn      *quicgo.Conn
+	stream    *quicgo.Stream
 	sendQueue chan []byte
 	done      chan struct{}
 	closeOnce sync.Once
@@ -304,7 +362,7 @@ func (s *session) Send(msg core.Message) error {
 		return core.ErrClosed
 	default:
 		_ = s.Close()
-		return core.ErrClosed
+		return core.ErrSendQueueFull
 	}
 }
 
@@ -348,8 +406,23 @@ func (s *session) readLoop(handler core.Handler) {
 			_ = s.Send(core.Message{ID: core.MsgPong, Seq: msg.Seq})
 			continue
 		}
-		_ = handler(core.AcquireContext(s, msg))
+		err = invokeHandler(handler, s, msg)
+		if !transportapi.ContinueAfterHandlerError(
+			s.server.config.HandlerErrorPolicy,
+			s.server.config.OnHandlerError,
+			s,
+			msg,
+			err,
+		) {
+			return
+		}
 	}
+}
+
+func invokeHandler(handler core.Handler, session core.Session, msg core.Message) (err error) {
+	ctx := core.AcquireTransportContext(session, msg)
+	defer core.ReleaseTransportContext(ctx)
+	return handler(ctx)
 }
 
 func (s *session) writeLoop() {
@@ -383,12 +456,11 @@ func normalizeConfig(config Config) Config {
 		config.MaxFrameSize = DefaultMaxFrameSize
 	}
 	if config.MaxStreams <= 0 {
-		config.MaxStreams = config.MaxConnections
-	}
-	if config.MaxStreams <= 0 {
 		config.MaxStreams = DefaultMaxStreams
 	}
-	config.MaxConnections = config.MaxStreams
+	if config.MaxConnections <= 0 {
+		config.MaxConnections = DefaultMaxConnections
+	}
 	if config.SendQueueSize <= 0 {
 		config.SendQueueSize = DefaultSendQueueSize
 	}
@@ -408,6 +480,15 @@ func normalizeConfig(config Config) Config {
 		config.NextProtos = []string{DefaultALPN}
 	}
 	return config
+}
+
+func (s *Server) signalReady() {
+	if s == nil || s.ready == nil {
+		return
+	}
+	s.readyOnce.Do(func() {
+		close(s.ready)
+	})
 }
 
 func cloneOwnedConfig(config Config) Config {

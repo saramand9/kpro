@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/codec"
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/transport/udp"
+	"github.com/saramand9/kpro/codec"
+	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/transport/udp"
 )
 
 const strictUDPMaxPacketSize = 64 * 1024
@@ -106,7 +106,7 @@ func TestUDPWireCRCTraceStrict1000(t *testing.T) {
 
 		assertWireFrameSetEqual(t, logs.clientSent, logs.serverReceived)
 		assertWireFrameSetEqual(t, logs.serverSent, logs.clientReceived)
-		assertStrictErrorResponses(t, messages, logs.clientReceived.snapshot(), core.ErrNoHandler.Error())
+		assertStrictErrorResponses(t, messages, logs.clientReceived.snapshot(), core.PublicErrorMessage(core.ErrNoHandler))
 	})
 
 	t.Run("heartbeat_pong", func(t *testing.T) {
@@ -228,7 +228,7 @@ func TestUDPWireCRCTraceStrict1000(t *testing.T) {
 
 		assertWireFrameSetEqual(t, logs.clientSent, logs.serverReceived)
 		assertWireFrameSetEqual(t, logs.serverSent, logs.clientReceived)
-		assertStrictLimitedErrorResponses(t, messages, logs.clientReceived.snapshot(), msgStrictUDPInflight, core.ErrTooManyInflight.Error(), 1)
+		assertStrictLimitedErrorResponses(t, messages, logs.clientReceived.snapshot(), msgStrictUDPInflight, core.PublicErrorMessage(core.ErrTooManyInflight), 1)
 	})
 
 	t.Run("router_closed_errors", func(t *testing.T) {
@@ -245,7 +245,7 @@ func TestUDPWireCRCTraceStrict1000(t *testing.T) {
 
 		assertWireFrameSetEqual(t, logs.clientSent, logs.serverReceived)
 		assertWireFrameSetEqual(t, logs.serverSent, logs.clientReceived)
-		assertStrictErrorResponses(t, messages, logs.clientReceived.snapshot(), core.ErrRouterClosed.Error())
+		assertStrictErrorResponses(t, messages, logs.clientReceived.snapshot(), core.PublicErrorMessage(core.ErrRouterClosed))
 	})
 
 	t.Run("multi_client_echo", func(t *testing.T) {

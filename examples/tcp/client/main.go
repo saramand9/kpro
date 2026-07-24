@@ -6,13 +6,13 @@ package main
 import (
 	"flag"
 	"fmt"
-	"github.com/saramand9/bignet/kpro/examples/internal/msgid"
+	"github.com/saramand9/kpro/examples/internal/msgid"
 	"log"
 	"net"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/examples/internal/wire"
+	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/examples/internal/wire"
 )
 
 func main() {

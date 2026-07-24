@@ -8,7 +8,7 @@ import (
 	"log"
 	"runtime/debug"
 
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/core"
 )
 
 // Recover converts handler panics into returned errors.
@@ -22,7 +22,7 @@ func Recover() core.Middleware {
 			defer func() {
 				if r := recover(); r != nil {
 					logPanicStack(r, debug.Stack())
-					err = fmt.Errorf("handler panic: %v", r)
+					err = core.WithErrorKind(core.ErrorKindRecovered, fmt.Errorf("handler panic: %v", r))
 				}
 			}()
 			return next(ctx)

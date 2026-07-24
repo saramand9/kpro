@@ -1,8 +1,8 @@
 package sse
 
 import (
-	"github.com/saramand9/bignet/kpro/core"
-	transportapi "github.com/saramand9/bignet/kpro/transport"
+	"github.com/saramand9/kpro/core"
+	transportapi "github.com/saramand9/kpro/transport"
 )
 
 // Descriptor advertises SSE's native server-streaming capabilities.

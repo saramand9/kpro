@@ -3,23 +3,31 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/middleware"
-	"github.com/saramand9/bignet/kpro/observability/zapx"
-	"github.com/saramand9/bignet/kpro/server"
-	"github.com/saramand9/bignet/kpro/transport/httpx"
+	"github.com/saramand9/kpro/middleware"
+	"github.com/saramand9/kpro/observability/zapx"
+	"github.com/saramand9/kpro/server"
+	"github.com/saramand9/kpro/transport/httpx"
 	"go.uber.org/zap"
 )
 
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func run() (returnErr error) {
 	logger, err := zap.NewProduction()
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("initialize logger: %w", err)
 	}
 	defer logger.Sync()
 
@@ -28,8 +36,13 @@ func main() {
 		ShutdownTimeout: 10 * time.Second,
 	})
 	if err != nil {
-		logger.Fatal("invalid server configuration", zap.Error(err))
+		return fmt.Errorf("invalid server configuration: %w", err)
 	}
+	defer func() {
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancelShutdown()
+		returnErr = errors.Join(returnErr, app.Shutdown(shutdownCtx))
+	}()
 	app.Use(
 		middleware.Recover(),
 		zapx.Middleware(logger),
@@ -49,19 +62,32 @@ func main() {
 		return ctx.JSON(http.StatusOK, map[string]string{"message": "hello from {{.ServiceName}}"})
 	})
 
-	shutdownSignals, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	baseCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	runCtx, stopSignals := signal.NotifyContext(baseCtx, os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
-	go func() {
-		<-shutdownSignals.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := app.Shutdown(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			logger.Error("shutdown failed", zap.Error(err))
-		}
-	}()
-
-	logger.Info("service listening", zap.String("address", ":8080"))
-	if err := app.ListenAndServe(); err != nil {
-		logger.Fatal("service stopped", zap.Error(err))
+	handle, err := app.Start(runCtx)
+	if err != nil {
+		return fmt.Errorf("start service: %w", err)
 	}
+	readyCtx, cancelReady := context.WithTimeout(context.Background(), 15*time.Second)
+	if err := handle.WaitReady(readyCtx); err != nil {
+		cancelReady()
+		cancelRun()
+		runErr := handle.Wait()
+		if server.IsContextTermination(runErr) {
+			runErr = nil
+		}
+		return errors.Join(fmt.Errorf("service failed before readiness: %w", err), runErr)
+	}
+	cancelReady()
+
+	logger.Info("service ready", zap.String("address", ":8080"))
+	if err := handle.Wait(); err != nil {
+		if server.IsContextTermination(err) && runCtx.Err() != nil {
+			return nil
+		}
+		return fmt.Errorf("service stopped: %w", err)
+	}
+	return nil
 }

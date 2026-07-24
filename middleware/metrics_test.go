@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/core"
 )
 
 func TestMetricsRecordsSuccessAndError(t *testing.T) {

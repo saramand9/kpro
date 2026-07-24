@@ -14,8 +14,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/server"
-	http3x "github.com/saramand9/bignet/kpro/transport/http3"
+	"github.com/saramand9/kpro/server"
+	http3x "github.com/saramand9/kpro/transport/http3"
 )
 
 func main() {

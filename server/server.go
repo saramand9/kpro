@@ -12,17 +12,17 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/transport"
-	"github.com/saramand9/bignet/kpro/transport/grpcx"
-	http3x "github.com/saramand9/bignet/kpro/transport/http3"
-	"github.com/saramand9/bignet/kpro/transport/httpx"
-	"github.com/saramand9/bignet/kpro/transport/kcp"
-	quictransport "github.com/saramand9/bignet/kpro/transport/quic"
-	"github.com/saramand9/bignet/kpro/transport/sse"
-	"github.com/saramand9/bignet/kpro/transport/tcp"
-	"github.com/saramand9/bignet/kpro/transport/udp"
-	"github.com/saramand9/bignet/kpro/transport/websocket"
+	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/transport"
+	"github.com/saramand9/kpro/transport/grpcx"
+	http3x "github.com/saramand9/kpro/transport/http3"
+	"github.com/saramand9/kpro/transport/httpx"
+	"github.com/saramand9/kpro/transport/kcp"
+	quictransport "github.com/saramand9/kpro/transport/quic"
+	"github.com/saramand9/kpro/transport/sse"
+	"github.com/saramand9/kpro/transport/tcp"
+	"github.com/saramand9/kpro/transport/udp"
+	"github.com/saramand9/kpro/transport/websocket"
 )
 
 var (
@@ -30,6 +30,11 @@ var (
 	ErrNoTransports = errors.New("no transports registered")
 	// ErrInvalidConfiguration reports a failed Config or component startup check.
 	ErrInvalidConfiguration = errors.New("invalid server configuration")
+	// ErrComponentExitedBeforeReady reports a runner that stopped before
+	// publishing listener readiness.
+	ErrComponentExitedBeforeReady = errors.New("component exited before readiness")
+	// ErrComponentPanic reports a panic recovered at a component lifecycle boundary.
+	ErrComponentPanic = errors.New("component lifecycle panic recovered")
 )
 
 // DefaultShutdownTimeout bounds automatic cleanup after a runner exits.
@@ -103,6 +108,9 @@ type Server struct {
 	waitStarted bool
 	state       atomic.Uint32
 
+	readyMu   sync.Mutex
+	readiness *readinessAttempt
+
 	runnerShutdownMu      sync.Mutex
 	runnerShutdownCurrent *runnerShutdownAttempt
 }
@@ -116,16 +124,88 @@ type managedResourceState struct {
 	resource ManagedResource
 	mu       sync.Mutex
 	stopped  bool
+	current  *resourceShutdownAttempt
+}
+
+type resourceShutdownAttempt struct {
+	done chan struct{}
+	err  error
+}
+
+type readinessAttempt struct {
+	done     chan struct{}
+	err      error
+	signaled bool
+}
+
+type runResult struct {
+	done chan struct{}
+	err  error
+}
+
+// RunHandle identifies one asynchronously started Server generation. Unlike
+// Server.WaitReady, it cannot observe a completed readiness result from an
+// earlier retry.
+type RunHandle struct {
+	readiness *readinessAttempt
+	result    *runResult
+}
+
+// Ready is closed when this run becomes ready or fails during startup.
+func (h *RunHandle) Ready() <-chan struct{} {
+	if h == nil || h.readiness == nil {
+		return nil
+	}
+	return h.readiness.done
+}
+
+// WaitReady waits for this run's readiness result.
+func (h *RunHandle) WaitReady(ctx context.Context) error {
+	if h == nil || h.readiness == nil {
+		return ErrServerStopped
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-h.readiness.done:
+		return h.readiness.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Done is closed after serving and bounded cleanup finish.
+func (h *RunHandle) Done() <-chan struct{} {
+	if h == nil || h.result == nil {
+		return nil
+	}
+	return h.result.done
+}
+
+// Wait returns this run's final serving and cleanup result.
+func (h *RunHandle) Wait() error {
+	if h == nil || h.result == nil {
+		return ErrServerStopped
+	}
+	<-h.result.done
+	return h.result.err
 }
 
 // New creates a Server with optional configuration.
 func New(config ...Config) *Server {
+	if len(config) > 1 {
+		panic(fmt.Errorf("%w: expected at most one Config, got %d", ErrInvalidConfiguration, len(config)))
+	}
 	return &Server{config: normalizeServerConfig(config)}
 }
 
 // NewChecked creates a Server after strict Config validation. New remains
 // permissive and applies compatibility defaults for existing callers.
 func NewChecked(config ...Config) (*Server, error) {
+	if len(config) > 1 {
+		return nil, fmt.Errorf("%w: expected at most one Config, got %d", ErrInvalidConfiguration, len(config))
+	}
 	if len(config) > 0 {
 		if err := config[0].Validate(); err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrInvalidConfiguration, err)
@@ -302,6 +382,11 @@ func (s *Server) UseChecked(middlewares ...core.Middleware) error {
 	if len(middlewares) == 0 {
 		return nil
 	}
+	for index, middleware := range middlewares {
+		if middleware == nil {
+			return fmt.Errorf("%w: middleware %d is nil", ErrInvalidConfiguration, index)
+		}
+	}
 	if err := s.beginConfiguration(); err != nil {
 		return err
 	}
@@ -440,12 +525,62 @@ func (s *Server) SSE(addr, path string, config ...sse.Config) *sse.Endpoint {
 
 // ListenAndServe starts all mounted runners and stops the rest when one exits.
 func (s *Server) ListenAndServe() error {
+	return s.ListenAndServeContext(context.Background())
+}
+
+// Run starts all mounted runners with ctx as their parent lifetime.
+// Canceling ctx begins the same bounded graceful shutdown used when a runner
+// exits. Run is an ergonomic alias for ListenAndServeContext.
+func (s *Server) Run(ctx context.Context) error {
+	return s.ListenAndServeContext(ctx)
+}
+
+// Start synchronously claims a new lifecycle generation and runs it in the
+// background. Use the returned handle for race-free readiness and completion
+// waits, especially when retrying after validation or empty-server failures.
+func (s *Server) Start(parent context.Context) (*RunHandle, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	attempt, err := s.claimRun()
+	if err != nil {
+		return nil, err
+	}
+	handle := &RunHandle{
+		readiness: attempt,
+		result:    &runResult{done: make(chan struct{})},
+	}
+	go func() {
+		handle.result.err = s.listenAndServeClaimed(parent)
+		close(handle.result.done)
+	}()
+	return handle, nil
+}
+
+// ListenAndServeContext starts all mounted runners with ctx as their parent
+// lifetime and stops the rest when ctx is canceled or one runner exits.
+func (s *Server) ListenAndServeContext(parent context.Context) error {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if _, err := s.claimRun(); err != nil {
+		return err
+	}
+	return s.listenAndServeClaimed(parent)
+}
+
+func (s *Server) claimRun() (*readinessAttempt, error) {
 	s.mu.Lock()
 	if !s.state.CompareAndSwap(uint32(StateCreated), uint32(StateStarting)) {
 		s.mu.Unlock()
-		return s.startError()
+		return nil, s.startError()
 	}
+	attempt := s.prepareReadyAttempt()
 	s.mu.Unlock()
+	return attempt, nil
+}
+
+func (s *Server) listenAndServeClaimed(parent context.Context) error {
 	s.configuring.Wait()
 
 	var runners []transport.Runner
@@ -459,6 +594,7 @@ func (s *Server) ListenAndServe() error {
 		if len(s.runners) == 0 {
 			s.mu.Unlock()
 			s.state.CompareAndSwap(uint32(StateStarting), uint32(StateCreated))
+			s.signalReady(ErrNoTransports)
 			return ErrNoTransports
 		}
 		runners = append(runners[:0], s.runners...)
@@ -469,6 +605,7 @@ func (s *Server) ListenAndServe() error {
 			if !s.state.CompareAndSwap(uint32(StateStarting), uint32(StateCreated)) {
 				return errors.Join(err, ErrServerStopped)
 			}
+			s.signalReady(err)
 			return err
 		}
 
@@ -481,30 +618,139 @@ func (s *Server) ListenAndServe() error {
 			s.mu.Unlock()
 			continue
 		}
-		s.ctx, s.cancel = context.WithCancel(context.Background())
+		if parent.Err() != nil {
+			startupErr := context.Cause(parent)
+			s.mu.Unlock()
+			s.signalReady(startupErr)
+			s.mu.Lock()
+			s.beginDrainingLocked()
+			s.mu.Unlock()
+			return s.finishShutdown(startupErr, runners)
+		}
+		s.ctx, s.cancel = context.WithCancel(parent)
 		ctx := s.ctx
 		// Register every runner before publishing the running state by unlocking.
 		// Shutdown may otherwise observe a zero WaitGroup between this unlock and
 		// the first goroutine, close managed resources, and race runner startup.
 		s.wg.Add(len(runners))
 		errCh = make(chan error, len(runners))
-		s.state.Store(uint32(StateRunning))
-		for _, runner := range runners {
+		entered := make([]chan struct{}, len(runners))
+		for i, runner := range runners {
 			r := runner
+			entered[i] = make(chan struct{})
+			started := entered[i]
 			go func() {
 				defer s.wg.Done()
-				errCh <- r.ListenAndServe(ctx)
+				close(started)
+				errCh <- safeRunnerServe(r, ctx)
 			}()
 		}
 		s.mu.Unlock()
+
+		readyEvents := make(chan struct{}, len(runners))
+		for i, runner := range runners {
+			ready := runnerReadyChannel(runner)
+			started := entered[i]
+			go func() {
+				if ready == nil {
+					ready = started
+				}
+				select {
+				case <-ready:
+					readyEvents <- struct{}{}
+				case <-ctx.Done():
+				}
+			}()
+		}
+		var startupErr error
+		startupAborted := false
+		for readyCount := 0; readyCount < len(runners); {
+			if ctx.Err() != nil {
+				startupAborted = true
+				if parent.Err() != nil {
+					startupErr = context.Cause(parent)
+				} else {
+					startupErr = ErrServerStopped
+				}
+				break
+			}
+			select {
+			case <-readyEvents:
+				if ctx.Err() != nil {
+					startupAborted = true
+					if parent.Err() != nil {
+						startupErr = context.Cause(parent)
+					} else {
+						startupErr = ErrServerStopped
+					}
+					break
+				}
+				select {
+				case startupErr = <-errCh:
+					if startupErr == nil {
+						startupErr = ErrComponentExitedBeforeReady
+					}
+					readyCount = len(runners)
+				default:
+					readyCount++
+				}
+			case startupErr = <-errCh:
+				if startupErr == nil {
+					startupErr = ErrComponentExitedBeforeReady
+				}
+				readyCount = len(runners)
+			case <-ctx.Done():
+				startupAborted = true
+				if parent.Err() != nil {
+					startupErr = context.Cause(parent)
+				} else {
+					startupErr = ErrServerStopped
+				}
+				readyCount = len(runners)
+			}
+		}
+		if startupErr != nil {
+			s.signalReady(startupErr)
+			s.mu.Lock()
+			s.beginDrainingLocked()
+			s.cancel()
+			s.mu.Unlock()
+			if startupAborted && parent.Err() == nil {
+				startupErr = nil
+			}
+			return s.finishShutdown(startupErr, runners)
+		}
+		if !s.state.CompareAndSwap(uint32(StateStarting), uint32(StateRunning)) {
+			startupErr = ErrServerStopped
+			s.signalReady(startupErr)
+			s.mu.Lock()
+			if s.cancel != nil {
+				s.cancel()
+			}
+			s.mu.Unlock()
+			if parent.Err() == nil {
+				startupErr = nil
+			}
+			return s.finishShutdown(startupErr, runners)
+		}
+		s.signalReady(nil)
 		break
 	}
 
-	runnerErr := <-errCh
+	var runnerErr error
+	select {
+	case runnerErr = <-errCh:
+	case <-parent.Done():
+		runnerErr = context.Cause(parent)
+	}
 	s.mu.Lock()
 	s.beginDrainingLocked()
 	s.cancel()
 	s.mu.Unlock()
+	return s.finishShutdown(runnerErr, runners)
+}
+
+func (s *Server) finishShutdown(runnerErr error, runners []transport.Runner) error {
 	shutdownCtx, shutdownCancel := context.WithTimeout(
 		context.Background(),
 		s.config.ShutdownTimeout,
@@ -522,7 +768,86 @@ func (s *Server) ListenAndServe() error {
 		resourceCancel()
 		s.state.Store(uint32(StateStopped))
 	}
-	return errors.Join(runnerErr, shutdownErr, waitErr, resourceErr)
+	cleanupErr := errors.Join(shutdownErr, waitErr, resourceErr)
+	if cleanupErr != nil && IsContextTermination(runnerErr) {
+		// Cancellation initiated shutdown; once cleanup fails, returning the
+		// cancellation wrapper would let common errors.Is checks hide the real
+		// operational failure.
+		return cleanupErr
+	}
+	return errors.Join(runnerErr, cleanupErr)
+}
+
+// IsContextTermination reports whether every leaf in err is cancellation or a
+// deadline. It is safe for entry points to suppress only when no cleanup error
+// is joined into the result.
+func IsContextTermination(err error) bool {
+	if err == nil {
+		return false
+	}
+	if err == context.Canceled || err == context.DeadlineExceeded {
+		return true
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		children := joined.Unwrap()
+		if len(children) == 0 {
+			return false
+		}
+		for _, child := range children {
+			if !IsContextTermination(child) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return IsContextTermination(wrapped.Unwrap())
+	}
+	return false
+}
+
+func safeRunnerServe(runner transport.Runner, ctx context.Context) (err error) {
+	name := safeComponentName(runner)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = wrapNamedComponentError(
+				name,
+				"serve",
+				fmt.Errorf("%w: %v", ErrComponentPanic, recovered),
+			)
+			return
+		}
+		err = wrapNamedComponentError(name, "serve", err)
+	}()
+	err = runner.ListenAndServe(ctx)
+	return err
+}
+
+func safeComponentName(component transport.Component) (name string) {
+	name = fmt.Sprintf("%T", component)
+	if isNilComponent(component) {
+		return name
+	}
+	defer func() {
+		_ = recover()
+	}()
+	if candidate := component.Name(); candidate != "" {
+		name = candidate
+	}
+	return name
+}
+
+func runnerReadyChannel(runner transport.Runner) <-chan struct{} {
+	if endpoint, ok := runner.(*Endpoint); ok && !isNilComponent(endpoint.transport) {
+		if provider, ok := endpoint.transport.(transport.ReadinessProvider); ok {
+			return provider.Ready()
+		}
+		return nil
+	}
+	if provider, ok := runner.(transport.ReadinessProvider); ok {
+		return provider.Ready()
+	}
+	return nil
 }
 
 func validateRunners(runners []transport.Runner) error {
@@ -562,6 +887,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	s.mu.Lock()
 	s.beginDrainingLocked()
+	s.signalReady(ErrServerStopped)
 	if s.cancel != nil {
 		s.cancel()
 	}
@@ -581,6 +907,60 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // State returns the current observable one-shot Server lifecycle state.
 func (s *Server) State() State {
 	return State(s.state.Load())
+}
+
+// Ready returns a channel closed after every readiness-aware runner has bound
+// its listener. Legacy runners are considered ready when ListenAndServe is
+// entered. If startup fails first, the channel is also closed and WaitReady
+// returns that failure.
+func (s *Server) Ready() <-chan struct{} {
+	s.readyMu.Lock()
+	defer s.readyMu.Unlock()
+	return s.readyAttemptLocked().done
+}
+
+// WaitReady waits for startup readiness or a startup failure.
+func (s *Server) WaitReady(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.readyMu.Lock()
+	attempt := s.readyAttemptLocked()
+	s.readyMu.Unlock()
+	select {
+	case <-attempt.done:
+		return attempt.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *Server) signalReady(err error) {
+	s.readyMu.Lock()
+	defer s.readyMu.Unlock()
+	attempt := s.readyAttemptLocked()
+	if attempt.signaled {
+		return
+	}
+	attempt.err = err
+	attempt.signaled = true
+	close(attempt.done)
+}
+
+func (s *Server) prepareReadyAttempt() *readinessAttempt {
+	s.readyMu.Lock()
+	defer s.readyMu.Unlock()
+	if s.readiness == nil || s.readiness.signaled {
+		s.readiness = &readinessAttempt{done: make(chan struct{})}
+	}
+	return s.readiness
+}
+
+func (s *Server) readyAttemptLocked() *readinessAttempt {
+	if s.readiness == nil {
+		s.readiness = &readinessAttempt{done: make(chan struct{})}
+	}
+	return s.readiness
 }
 
 // Name returns the configured diagnostic server name.
@@ -691,7 +1071,7 @@ func safeRunnerShutdown(ctx context.Context, runner transport.Runner) (err error
 			err = fmt.Errorf("shutdown component %T panic: %v", runner, recovered)
 		}
 	}()
-	return runner.Shutdown(ctx)
+	return wrapComponentError(runner, "shutdown", runner.Shutdown(ctx))
 }
 
 func (s *Server) shutdownResources(ctx context.Context) error {
@@ -710,15 +1090,47 @@ func (s *Server) shutdownResources(ctx context.Context) error {
 
 func (r *managedResourceState) shutdown(ctx context.Context) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.stopped {
+		r.mu.Unlock()
 		return nil
 	}
-	err := r.resource.Shutdown(ctx)
-	if err == nil {
-		r.stopped = true
+	attempt := r.current
+	if attempt == nil {
+		attempt = &resourceShutdownAttempt{done: make(chan struct{})}
+		r.current = attempt
+		go func() {
+			attempt.err = safeResourceShutdown(ctx, r.resource)
+			r.mu.Lock()
+			if attempt.err == nil {
+				r.stopped = true
+			}
+			if r.current == attempt {
+				r.current = nil
+			}
+			close(attempt.done)
+			r.mu.Unlock()
+		}()
 	}
-	return err
+	r.mu.Unlock()
+	select {
+	case <-attempt.done:
+		return attempt.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func safeResourceShutdown(ctx context.Context, resource ManagedResource) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = &ComponentError{
+				Component: fmt.Sprintf("%T", resource),
+				Phase:     "shutdown",
+				Err:       fmt.Errorf("panic: %v", recovered),
+			}
+		}
+	}()
+	return wrapNamedComponentError(fmt.Sprintf("%T", resource), "shutdown", resource.Shutdown(ctx))
 }
 
 // Endpoint binds a message transport to a core Router.
@@ -805,5 +1217,11 @@ func (e *Endpoint) Shutdown(ctx context.Context) error {
 }
 
 func (e *Endpoint) dispatch(ctx core.Context) error {
-	return e.router.Dispatch(ctx)
+	// Router rejection is already translated into a bounded, public MsgError
+	// response and accounted in RouterStats. Do not feed it back into the
+	// transport's direct-handler error policy: closing the session here can
+	// discard that queued response and turns normal admission control into an
+	// unexpected EOF for clients.
+	_ = e.router.Dispatch(ctx)
+	return nil
 }

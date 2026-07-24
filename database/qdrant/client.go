@@ -10,7 +10,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/saramand9/bignet/kpro/database/common/lifecycle"
+	"github.com/saramand9/kpro/database/common/lifecycle"
 )
 
 // Client owns Qdrant HTTP API access.

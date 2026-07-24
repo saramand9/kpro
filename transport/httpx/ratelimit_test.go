@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/middleware"
+	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/middleware"
 	"golang.org/x/time/rate"
 )
 
@@ -78,7 +78,7 @@ func TestConnRateLimitPersistsAcrossHTTPKeepAliveRequests(t *testing.T) {
 		t.Fatalf("first status/body = %d/%q", status, body)
 	}
 	body, status = doRateLimitHTTPGet(t, client, "http://"+addr+"/echo")
-	if status != http.StatusInternalServerError || !strings.Contains(body, middleware.ErrRateLimited.Error()) {
+	if status != http.StatusTooManyRequests || !strings.Contains(body, middleware.ErrRateLimited.Error()) {
 		t.Fatalf("second status/body = %d/%q, want rate limit", status, body)
 	}
 

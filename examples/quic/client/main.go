@@ -9,10 +9,10 @@ import (
 	"time"
 
 	quicgo "github.com/quic-go/quic-go"
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/examples/internal/msgid"
-	"github.com/saramand9/bignet/kpro/examples/internal/wire"
-	quictransport "github.com/saramand9/bignet/kpro/transport/quic"
+	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/examples/internal/msgid"
+	"github.com/saramand9/kpro/examples/internal/wire"
+	quictransport "github.com/saramand9/kpro/transport/quic"
 )
 
 func main() {

@@ -15,6 +15,7 @@ type Context struct {
 	header      http.Header
 	body        []byte
 	bodyRead    bool
+	bodyErr     error
 	maxBody     int64
 	status      int
 	wroteHeader bool
@@ -26,6 +27,24 @@ func (c *Context) Context() context.Context {
 		return context.Background()
 	}
 	return c.r.Context()
+}
+
+// Request exposes the underlying request for protocol-specific integrations.
+// It must not be retained after the handler returns.
+func (c *Context) Request() *http.Request {
+	if c == nil {
+		return nil
+	}
+	return c.r
+}
+
+// ResponseWriter exposes the underlying writer for protocol-specific features
+// such as streaming and HTTP connection control.
+func (c *Context) ResponseWriter() http.ResponseWriter {
+	if c == nil {
+		return nil
+	}
+	return c.w
 }
 
 func (c *Context) Header() http.Header {
@@ -60,22 +79,25 @@ func (c *Context) setContentType(contentType string) {
 
 func (c *Context) Body() ([]byte, error) {
 	if c.bodyRead {
-		return c.body, nil
+		return c.body, c.bodyErr
 	}
+	c.bodyRead = true
 	if c.r.Body == nil {
-		c.bodyRead = true
 		return nil, nil
 	}
-	reader := c.r.Body
 	if c.maxBody > 0 {
-		reader = http.MaxBytesReader(c.w, c.r.Body, c.maxBody)
+		// Install the limiting reader on the request itself so every internal
+		// body consumer shares one budget. Body also caches terminal errors,
+		// preventing repeated calls from applying a fresh budget to the unread
+		// remainder of an oversized or chunked request.
+		c.r.Body = http.MaxBytesReader(c.w, c.r.Body, c.maxBody)
 	}
-	body, err := io.ReadAll(reader)
+	body, err := io.ReadAll(c.r.Body)
 	if err != nil {
-		return nil, err
+		c.bodyErr = err
+		return nil, c.bodyErr
 	}
 	c.body = body
-	c.bodyRead = true
 	return c.body, nil
 }
 
@@ -188,4 +210,13 @@ func (c *Context) Query(key string) string {
 		return ""
 	}
 	return c.r.URL.Query().Get(key)
+}
+
+// Param returns a wildcard captured by a registered ServeMux route pattern,
+// for example "id" from "/users/{id}".
+func (c *Context) Param(name string) string {
+	if c == nil || c.r == nil {
+		return ""
+	}
+	return c.r.PathValue(name)
 }

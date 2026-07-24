@@ -4,7 +4,7 @@
 package app
 
 import (
-	"github.com/saramand9/bignet/kpro/examples/grpc-modular/server/internal/modules/greeter"
+	"github.com/saramand9/kpro/examples/grpc-modular/server/internal/modules/greeter"
 	"google.golang.org/grpc"
 )
 

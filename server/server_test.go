@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/transport"
+	"github.com/saramand9/kpro/transport"
 )
 
 func TestListenAndServeRequiresTransport(t *testing.T) {
@@ -257,6 +257,42 @@ func TestConcurrentRunnerShutdownCallsAreCoalesced(t *testing.T) {
 	}
 }
 
+func TestManagedResourceShutdownDoesNotHoldLockAcrossCallback(t *testing.T) {
+	resource := &blockingManagedResource{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	state := &managedResourceState{resource: resource}
+	firstCtx, firstCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer firstCancel()
+	if err := state.shutdown(firstCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first shutdown error = %v, want deadline", err)
+	}
+	waitForClosed(t, resource.entered, "resource callback did not start")
+
+	secondCtx, secondCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer secondCancel()
+	if err := state.shutdown(secondCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("coalesced shutdown error = %v, want deadline", err)
+	}
+	close(resource.release)
+	if err := state.shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown after callback release: %v", err)
+	}
+	if got := resource.calls.Load(); got != 1 {
+		t.Fatalf("resource shutdown calls = %d, want 1", got)
+	}
+}
+
+func TestManagedResourceShutdownContainsPanic(t *testing.T) {
+	state := &managedResourceState{resource: panicManagedResource{}}
+	err := state.shutdown(context.Background())
+	var componentErr *ComponentError
+	if !errors.As(err, &componentErr) || componentErr.Phase != "shutdown" {
+		t.Fatalf("panic shutdown error = %v", err)
+	}
+}
+
 func TestRunnerShutdownTimeoutStillAttemptsOtherRunners(t *testing.T) {
 	stuck := newBlockingShutdownRunner()
 	responsive := newFakeRunner("responsive", nil, false)
@@ -405,6 +441,26 @@ func (r *managedTestRunner) Shutdown(context.Context) error {
 type managedTestResource struct {
 	shutdown  func()
 	shutdowns atomic.Int32
+}
+
+type blockingManagedResource struct {
+	entered chan struct{}
+	release chan struct{}
+	calls   atomic.Int32
+}
+
+func (r *blockingManagedResource) Shutdown(context.Context) error {
+	if r.calls.Add(1) == 1 {
+		close(r.entered)
+	}
+	<-r.release
+	return nil
+}
+
+type panicManagedResource struct{}
+
+func (panicManagedResource) Shutdown(context.Context) error {
+	panic("resource crash")
 }
 
 type retryingManagedResource struct {

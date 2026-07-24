@@ -7,10 +7,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/saramand9/bignet/kpro/internal/app/persistence"
-	commerceservice "github.com/saramand9/bignet/kpro/internal/modules/commerce/service"
-	projectservice "github.com/saramand9/bignet/kpro/internal/modules/projects/service"
-	userservice "github.com/saramand9/bignet/kpro/internal/modules/users/service"
+	"github.com/saramand9/kpro/internal/app/persistence"
+	commerceservice "github.com/saramand9/kpro/internal/modules/commerce/service"
+	projectservice "github.com/saramand9/kpro/internal/modules/projects/service"
+	userservice "github.com/saramand9/kpro/internal/modules/users/service"
 )
 
 func TestInitAppPersistenceCreatesServices(t *testing.T) {

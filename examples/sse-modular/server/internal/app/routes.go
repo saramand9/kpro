@@ -4,9 +4,9 @@
 package app
 
 import (
-	"github.com/saramand9/bignet/kpro/examples/sse-modular/server/internal/modules/events"
-	"github.com/saramand9/bignet/kpro/server"
-	"github.com/saramand9/bignet/kpro/transport/sse"
+	"github.com/saramand9/kpro/examples/sse-modular/server/internal/modules/events"
+	"github.com/saramand9/kpro/server"
+	"github.com/saramand9/kpro/transport/sse"
 )
 
 type Config struct {

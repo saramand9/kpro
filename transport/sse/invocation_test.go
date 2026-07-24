@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/core"
 )
 
 func TestEndpointUseWrapsStream(t *testing.T) {
@@ -113,7 +113,7 @@ func TestEndpointUseCanRejectBeforeStream(t *testing.T) {
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusInternalServerError)
 	}
-	if body := recorder.Body.String(); !strings.Contains(body, "blocked") {
+	if body := recorder.Body.String(); !strings.Contains(body, "internal error") || strings.Contains(body, "blocked") {
 		t.Fatalf("body = %q", body)
 	}
 }

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/core"
 	"golang.org/x/time/rate"
 )
 
@@ -43,7 +43,7 @@ func TestInvocationConnRateLimitRemovesLimiterWhenDoneCloses(t *testing.T) {
 	})
 
 	done := make(chan struct{})
-	ctx := core.NewInvocation(core.InvocationOptions{ConnID: 9, Done: done})
+	ctx := core.NewInvocation(core.InvocationOptions{ConnID: 9, ConnDone: done})
 	if err := handler(ctx); err != nil {
 		t.Fatalf("first call should pass: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestInvocationConnRateLimitRemovesLimiterWhenDoneCloses(t *testing.T) {
 	close(done)
 
 	reusedDone := make(chan struct{})
-	reusedCtx := core.NewInvocation(core.InvocationOptions{ConnID: 9, Done: reusedDone})
+	reusedCtx := core.NewInvocation(core.InvocationOptions{ConnID: 9, ConnDone: reusedDone})
 	t.Cleanup(func() {
 		close(reusedDone)
 	})
@@ -72,6 +72,9 @@ func TestInvocationMaxPayloadRejectsOversizedPayload(t *testing.T) {
 	err := handler(core.NewInvocation(core.InvocationOptions{Payload: []byte("toolong")}))
 	if err == nil || !strings.Contains(err.Error(), "payload too large") {
 		t.Fatalf("expected payload error, got %v", err)
+	}
+	if core.ErrorKindOf(err) != core.ErrorKindPayloadTooLarge {
+		t.Fatalf("error kind = %q, want payload_too_large", core.ErrorKindOf(err))
 	}
 	if handlerCalled {
 		t.Fatal("handler should not be called")
@@ -119,5 +122,8 @@ func TestInvocationRecoverConvertsPanicToError(t *testing.T) {
 	err := handler(core.NewInvocation(core.InvocationOptions{Operation: "panic"}))
 	if err == nil || !strings.Contains(err.Error(), "handler panic: boom") {
 		t.Fatalf("expected panic error, got %v", err)
+	}
+	if core.ErrorKindOf(err) != core.ErrorKindRecovered {
+		t.Fatalf("error kind = %q, want recovered", core.ErrorKindOf(err))
 	}
 }

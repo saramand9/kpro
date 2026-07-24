@@ -17,7 +17,7 @@ func main() {
 	text := flag.String("text", "hello http3", "echo payload")
 	flag.Parse()
 
-	roundTripper := &qh3.RoundTripper{
+	roundTripper := &qh3.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // example-only local certificate
 	}
 	defer roundTripper.Close()

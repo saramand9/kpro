@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/saramand9/bignet/kpro/eventing/delivery"
-	"github.com/saramand9/bignet/kpro/eventing/projector"
+	"github.com/saramand9/kpro/eventing/delivery"
+	"github.com/saramand9/kpro/eventing/projector"
 )
 
 const (

@@ -14,12 +14,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/transport/internal/serveutil"
+	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/transport/internal/serveutil"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/stats"
+	"google.golang.org/grpc/status"
 )
 
 // DefaultShutdownTimeout is the fallback graceful-stop timeout.
@@ -27,6 +29,10 @@ const DefaultShutdownTimeout = 5 * time.Second
 
 // Option configures a KPro gRPC server.
 type Option func(*Server)
+
+// ErrorMapper converts handler and middleware errors to stable gRPC status
+// errors. Mappers must not expose sensitive internal details.
+type ErrorMapper func(error) error
 
 // Server wraps google.golang.org/grpc.Server with KPro middleware invocation support.
 type Server struct {
@@ -37,6 +43,9 @@ type Server struct {
 	middlewareValue atomic.Value
 	connTracker     *connStatsHandler
 	shutdownTimeout time.Duration
+	errorMapper     ErrorMapper
+	ready           chan struct{}
+	readyOnce       sync.Once
 
 	mu        sync.Mutex
 	ln        net.Listener
@@ -50,6 +59,8 @@ func NewServer(addr string, opts ...Option) *Server {
 		addr:            addr,
 		connTracker:     &connStatsHandler{},
 		shutdownTimeout: DefaultShutdownTimeout,
+		errorMapper:     defaultErrorMapper,
+		ready:           make(chan struct{}),
 		accepting:       true,
 	}
 	s.middlewareValue.Store([]core.Middleware{})
@@ -78,6 +89,15 @@ func WithShutdownTimeout(timeout time.Duration) Option {
 	}
 }
 
+// WithErrorMapper overrides the default safe gRPC error translation.
+func WithErrorMapper(mapper ErrorMapper) Option {
+	return func(s *Server) {
+		if mapper != nil {
+			s.errorMapper = mapper
+		}
+	}
+}
+
 // RegisterService registers a gRPC service implementation.
 func (s *Server) RegisterService(desc *grpc.ServiceDesc, impl any) {
 	s.grpc.RegisterService(desc, impl)
@@ -86,6 +106,11 @@ func (s *Server) RegisterService(desc *grpc.ServiceDesc, impl any) {
 // Name returns the transport name.
 func (s *Server) Name() string {
 	return string(core.TransportGRPC)
+}
+
+// Ready closes after the listener has been published and gRPC can accept work.
+func (s *Server) Ready() <-chan struct{} {
+	return s.ready
 }
 
 // Use installs middleware on unary and stream gRPC calls.
@@ -162,6 +187,7 @@ func (s *Server) serveClaimed(ctx context.Context, ln net.Listener) error {
 		return core.ErrClosed
 	}
 	s.ln = ln
+	s.readyOnce.Do(func() { close(s.ready) })
 	s.mu.Unlock()
 
 	serveDone := make(chan struct{})
@@ -372,7 +398,8 @@ func (s *Server) unaryCallInterceptor() grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		middlewares := s.middlewaresSnapshot()
 		if len(middlewares) == 0 {
-			return handler(ctx, req)
+			resp, err := handler(ctx, req)
+			return resp, s.mapError(err)
 		}
 
 		var resp any
@@ -383,7 +410,7 @@ func (s *Server) unaryCallInterceptor() grpc.UnaryServerInterceptor {
 			return err
 		})
 		err := invHandler(inv)
-		return resp, err
+		return resp, s.mapError(err)
 	}
 }
 
@@ -391,7 +418,7 @@ func (s *Server) streamCallInterceptor() grpc.StreamServerInterceptor {
 	return func(srv any, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		middlewares := s.middlewaresSnapshot()
 		if len(middlewares) == 0 {
-			return handler(srv, stream)
+			return s.mapError(handler(srv, stream))
 		}
 
 		limited := &middlewareServerStream{
@@ -407,7 +434,49 @@ func (s *Server) streamCallInterceptor() grpc.StreamServerInterceptor {
 			limited.ctx = invocation.Context()
 			return handler(srv, limited)
 		})
-		return invHandler(inv)
+		return s.mapError(invHandler(inv))
+	}
+}
+
+func (s *Server) mapError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if s.errorMapper == nil {
+		return defaultErrorMapper(err)
+	}
+	return s.errorMapper(err)
+}
+
+func defaultErrorMapper(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) {
+		return status.Error(codes.Canceled, context.Canceled.Error())
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return status.Error(codes.DeadlineExceeded, context.DeadlineExceeded.Error())
+	}
+	type grpcStatus interface {
+		GRPCStatus() *status.Status
+	}
+	if explicit, ok := err.(grpcStatus); ok {
+		if existing := explicit.GRPCStatus(); existing != nil && existing.Code() != codes.Unknown {
+			return existing.Err()
+		}
+	}
+	switch core.ErrorKindOf(err) {
+	case core.ErrorKindRateLimited:
+		return status.Error(codes.ResourceExhausted, "rate limit exceeded")
+	case core.ErrorKindPayloadTooLarge:
+		return status.Error(codes.ResourceExhausted, "payload too large")
+	case core.ErrorKindOverloaded:
+		return status.Error(codes.ResourceExhausted, "service overloaded")
+	case core.ErrorKindInternal, core.ErrorKindRecovered:
+		return status.Error(codes.Internal, "internal error")
+	default:
+		return status.Error(codes.Internal, "internal error")
 	}
 }
 

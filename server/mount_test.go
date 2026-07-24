@@ -6,10 +6,10 @@ package server
 import (
 	"testing"
 
-	"github.com/saramand9/bignet/kpro/core"
-	http3x "github.com/saramand9/bignet/kpro/transport/http3"
-	"github.com/saramand9/bignet/kpro/transport/httpx"
-	quictransport "github.com/saramand9/bignet/kpro/transport/quic"
+	"github.com/saramand9/kpro/core"
+	http3x "github.com/saramand9/kpro/transport/http3"
+	"github.com/saramand9/kpro/transport/httpx"
+	quictransport "github.com/saramand9/kpro/transport/quic"
 )
 
 func TestServerMountsMessageEndpoints(t *testing.T) {

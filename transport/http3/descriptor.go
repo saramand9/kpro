@@ -1,8 +1,8 @@
 package http3
 
 import (
-	"github.com/saramand9/bignet/kpro/core"
-	transportapi "github.com/saramand9/bignet/kpro/transport"
+	"github.com/saramand9/kpro/core"
+	transportapi "github.com/saramand9/kpro/transport"
 )
 
 // Descriptor advertises HTTP/3's native request and TLS capabilities.

@@ -8,8 +8,8 @@ import (
 	"flag"
 	"log"
 
-	"github.com/saramand9/bignet/kpro/server"
-	"github.com/saramand9/bignet/kpro/transport/grpcx"
+	"github.com/saramand9/kpro/server"
+	"github.com/saramand9/kpro/transport/grpcx"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 

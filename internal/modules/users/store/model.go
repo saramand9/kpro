@@ -7,8 +7,8 @@ import (
 	"context"
 	"time"
 
-	gormstore "github.com/saramand9/bignet/kpro/database/gorm"
-	"github.com/saramand9/bignet/kpro/internal/modules/users"
+	gormstore "github.com/saramand9/kpro/database/gorm"
+	"github.com/saramand9/kpro/internal/modules/users"
 )
 
 type userRow struct {

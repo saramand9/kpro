@@ -6,9 +6,9 @@ package app
 import (
 	"context"
 
-	gormstore "github.com/saramand9/bignet/kpro/database/gorm"
-	projectstore "github.com/saramand9/bignet/kpro/internal/modules/projects/store"
-	userstore "github.com/saramand9/bignet/kpro/internal/modules/users/store"
+	gormstore "github.com/saramand9/kpro/database/gorm"
+	projectstore "github.com/saramand9/kpro/internal/modules/projects/store"
+	userstore "github.com/saramand9/kpro/internal/modules/users/store"
 )
 
 // InitGormSchemas initializes source-of-truth schemas for GORM-backed examples.

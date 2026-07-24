@@ -10,12 +10,15 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"text/template"
 
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/module"
+	"golang.org/x/mod/semver"
 )
 
 //go:embed templates/service/*
@@ -23,9 +26,22 @@ var templateFiles embed.FS
 
 var serviceNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
+const (
+	kproModulePath           = "github.com/saramand9/kpro"
+	developmentModuleVersion = "v0.0.0"
+)
+
+var (
+	version = "devel"
+	commit  = "unknown"
+	date    = "unknown"
+)
+
 type scaffoldData struct {
 	Module      string
 	ServiceName string
+	KProModule  string
+	KProVersion string
 	KProReplace string
 }
 
@@ -55,9 +71,54 @@ func execute(args []string, stdout, stderr io.Writer) error {
 	switch args[0] {
 	case "new":
 		return runNew(args[1:], stdout, stderr)
+	case "version":
+		return runVersion(args[1:], stdout, stderr)
+	case "doctor":
+		return runDoctor(args[1:], stdout, stderr)
 	default:
 		return fmt.Errorf("unknown command %q; run 'kpro help'", args[0])
 	}
+}
+
+func runVersion(args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("version", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("usage: kpro version")
+	}
+	resolvedVersion, resolvedCommit, resolvedDate := resolvedBuildMetadata()
+	fmt.Fprintf(stdout, "kpro %s (commit %s, built %s, %s/%s, %s)\n", resolvedVersion, resolvedCommit, resolvedDate, runtime.GOOS, runtime.GOARCH, runtime.Version())
+	return nil
+}
+
+func runDoctor(args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("usage: kpro doctor")
+	}
+	fmt.Fprintf(stdout, "go: %s\nplatform: %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
+	if info, ok := debug.ReadBuildInfo(); ok {
+		moduleVersion := info.Main.Version
+		if moduleVersion == "" {
+			moduleVersion = "(devel)"
+		}
+		fmt.Fprintf(stdout, "module: %s %s\n", info.Main.Path, moduleVersion)
+		for _, setting := range info.Settings {
+			if setting.Key == "vcs.revision" {
+				fmt.Fprintf(stdout, "revision: %s\n", setting.Value)
+				break
+			}
+		}
+	}
+	fmt.Fprintln(stdout, "status: ok")
+	return nil
 }
 
 func runNew(args []string, stdout, stderr io.Writer) error {
@@ -102,20 +163,39 @@ func runNew(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	kproVersion := developmentModuleVersion
+	if replacePath == "" {
+		var ok bool
+		kproVersion, ok = resolvedReleaseVersion()
+		if !ok {
+			return errors.New("KPro release version is unavailable; run from a KPro checkout or pass --kpro-replace <checkout>")
+		}
+	}
 	if err := ensureEmptyTarget(target); err != nil {
 		return err
+	}
+	quotedReplace := ""
+	if replacePath != "" {
+		quotedReplace = strconv.Quote(filepath.ToSlash(replacePath))
 	}
 	data := scaffoldData{
 		Module:      *modulePath,
 		ServiceName: *serviceName,
-		KProReplace: strconv.Quote(filepath.ToSlash(replacePath)),
+		KProModule:  kproModulePath,
+		KProVersion: kproVersion,
+		KProReplace: quotedReplace,
 	}
 	for _, file := range scaffoldTemplates {
 		if err := renderTemplate(target, file.source, file.target, file.mode, data); err != nil {
 			return err
 		}
 	}
-	fmt.Fprintf(stdout, "created %s\nusing KPro source %s\n\nnext:\n  cd %s\n  go mod tidy\n  go run .\n", *serviceName, replacePath, target)
+	if replacePath != "" {
+		fmt.Fprintf(stdout, "created %s\nusing KPro source %s\n", *serviceName, replacePath)
+	} else {
+		fmt.Fprintf(stdout, "created %s\nusing KPro %s\n", *serviceName, kproVersion)
+	}
+	fmt.Fprintf(stdout, "\nnext:\n  cd %s\n  go mod tidy\n  go run .\n", target)
 	return nil
 }
 
@@ -143,7 +223,10 @@ func resolveKProReplace(configured string) (string, error) {
 			break
 		}
 	}
-	return "", errors.New("KPro is not published as a versioned module yet; run from a KPro checkout or pass --kpro-replace <checkout>")
+	if _, ok := resolvedReleaseVersion(); ok {
+		return "", nil
+	}
+	return "", errors.New("KPro release version is unavailable; run from a KPro checkout or pass --kpro-replace <checkout>")
 }
 
 func validateKProRoot(path string) error {
@@ -151,10 +234,60 @@ func validateKProRoot(path string) error {
 	if err != nil {
 		return fmt.Errorf("KPro checkout %q: read go.mod: %w", path, err)
 	}
-	if got := modfile.ModulePath(data); got != "github.com/saramand9/bignet/kpro" {
+	if got := modfile.ModulePath(data); got != kproModulePath {
 		return fmt.Errorf("KPro checkout %q has module %q", path, got)
 	}
 	return nil
+}
+
+func resolvedReleaseVersion() (string, bool) {
+	resolvedVersion, _, _ := resolvedBuildMetadata()
+	if !strings.HasPrefix(resolvedVersion, "v") {
+		resolvedVersion = "v" + resolvedVersion
+	}
+	if !semver.IsValid(resolvedVersion) || semver.Prerelease(resolvedVersion) == "-devel" {
+		return "", false
+	}
+	return resolvedVersion, true
+}
+
+func resolvedBuildMetadata() (resolvedVersion, resolvedCommit, resolvedDate string) {
+	resolvedVersion, resolvedCommit, resolvedDate = version, commit, date
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return resolvedVersion, resolvedCommit, resolvedDate
+	}
+	if _, release := normalizeReleaseVersion(resolvedVersion); !release {
+		if buildVersion, valid := normalizeReleaseVersion(info.Main.Version); valid {
+			resolvedVersion = buildVersion
+		}
+	} else if normalized, valid := normalizeReleaseVersion(resolvedVersion); valid {
+		resolvedVersion = normalized
+	}
+	for _, setting := range info.Settings {
+		switch setting.Key {
+		case "vcs.revision":
+			if resolvedCommit == "" || resolvedCommit == "unknown" {
+				resolvedCommit = setting.Value
+			}
+		case "vcs.time":
+			if resolvedDate == "" || resolvedDate == "unknown" {
+				resolvedDate = setting.Value
+			}
+		}
+	}
+	return resolvedVersion, resolvedCommit, resolvedDate
+}
+
+func normalizeReleaseVersion(candidate string) (string, bool) {
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" || candidate == "devel" || candidate == "(devel)" || candidate == "unknown" {
+		return "", false
+	}
+	if !strings.HasPrefix(candidate, "v") {
+		candidate = "v" + candidate
+	}
+	return candidate, semver.IsValid(candidate)
 }
 
 func ensureEmptyTarget(target string) error {
@@ -204,4 +337,6 @@ func printUsage(output io.Writer) {
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "Usage:")
 	fmt.Fprintln(output, "  kpro new <directory> [--module example.com/service] [--name service] [--kpro-replace path]")
+	fmt.Fprintln(output, "  kpro version")
+	fmt.Fprintln(output, "  kpro doctor")
 }

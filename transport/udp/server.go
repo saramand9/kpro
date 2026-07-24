@@ -6,15 +6,17 @@ package udp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"hash/fnv"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/codec"
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/transport/internal/serveutil"
+	"github.com/saramand9/kpro/codec"
+	"github.com/saramand9/kpro/core"
+	transportapi "github.com/saramand9/kpro/transport"
+	"github.com/saramand9/kpro/transport/internal/serveutil"
 )
 
 const (
@@ -24,6 +26,7 @@ const (
 	DefaultSendQueueSize      = 64
 	DefaultSessionIdleTimeout = 90 * time.Second
 	DefaultCleanupInterval    = 30 * time.Second
+	udpDatagramReadBufferSize = 64 * 1024
 )
 
 // Config controls UDP listener, packet codec, sessions, queues, and cleanup.
@@ -42,6 +45,10 @@ type Config struct {
 	SessionIdleTimeout time.Duration
 	// CleanupInterval controls how often idle UDP sessions are swept.
 	CleanupInterval time.Duration
+	// HandlerErrorPolicy defaults to closing the affected virtual session.
+	HandlerErrorPolicy transportapi.HandlerErrorPolicy
+	// OnHandlerError observes handler failures before the policy is applied.
+	OnHandlerError transportapi.HandlerErrorObserver
 }
 
 // Server maps UDP peers to virtual sessions and dispatches decoded packets.
@@ -52,10 +59,12 @@ type Server struct {
 	// clockBase lets atomic activity timestamps retain Go's monotonic clock.
 	clockBase time.Time
 
-	mu       sync.Mutex
-	sessions map[string]*packetSession
-	closed   bool
-	started  bool
+	mu        sync.Mutex
+	sessions  map[string]*packetSession
+	closed    bool
+	started   bool
+	ready     chan struct{}
+	readyOnce sync.Once
 }
 
 // New creates a UDP transport with normalized defaults.
@@ -65,6 +74,7 @@ func New(config Config) *Server {
 		rawConfig: config,
 		sessions:  make(map[string]*packetSession),
 		clockBase: time.Now(),
+		ready:     make(chan struct{}),
 	}
 }
 
@@ -78,6 +88,14 @@ func (s *Server) Name() string {
 	return "udp"
 }
 
+// Ready is closed once the UDP socket is successfully bound and published.
+func (s *Server) Ready() <-chan struct{} {
+	if s == nil {
+		return nil
+	}
+	return s.ready
+}
+
 // ListenAndServe reads UDP packets until ctx is cancelled or the socket fails.
 func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error {
 	if err := s.Validate(); err != nil {
@@ -88,6 +106,10 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 	}
 	if err := s.claimStart(); err != nil {
 		return err
+	}
+	if handler == nil {
+		s.rollbackStart()
+		return fmt.Errorf("udp: %w", core.ErrNoHandler)
 	}
 	addr, err := net.ResolveUDPAddr("udp", s.config.Addr)
 	if err != nil {
@@ -103,6 +125,7 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 		_ = conn.Close()
 		return core.ErrClosed
 	}
+	s.signalReady()
 
 	serveDone := make(chan struct{})
 	watcherDone := serveutil.ShutdownOnCancel(ctx, serveDone, func() {
@@ -118,7 +141,11 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 		<-cleanupDone
 	}()
 
-	buf := make([]byte, s.config.MaxPacketSize)
+	// Read the complete UDP datagram before enforcing MaxPacketSize. Reading
+	// directly into a MaxPacketSize buffer can silently truncate an oversized
+	// datagram and make a valid frame prefix indistinguishable from the complete
+	// packet on platforms where ReadFromUDP reports no truncation error.
+	buf := make([]byte, udpDatagramReadBufferSize)
 	for {
 		n, remote, err := conn.ReadFromUDP(buf)
 		if err != nil {
@@ -126,6 +153,9 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 				return nil
 			}
 			return err
+		}
+		if n > s.config.MaxPacketSize {
+			continue
 		}
 		msg, err := s.config.Codec.DecodePacket(buf[:n])
 		if err != nil {
@@ -139,8 +169,23 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 			_ = session.Send(core.Message{ID: core.MsgPong, Seq: msg.Seq})
 			continue
 		}
-		_ = handler(core.AcquireContext(session, msg))
+		err = invokeHandler(handler, session, msg)
+		if !transportapi.ContinueAfterHandlerError(
+			s.config.HandlerErrorPolicy,
+			s.config.OnHandlerError,
+			session,
+			msg,
+			err,
+		) {
+			_ = session.Close()
+		}
 	}
+}
+
+func invokeHandler(handler core.Handler, session core.Session, msg core.Message) (err error) {
+	ctx := core.AcquireTransportContext(session, msg)
+	defer core.ReleaseTransportContext(ctx)
+	return handler(ctx)
 }
 
 func (s *Server) claimStart() error {
@@ -201,6 +246,13 @@ func (s *Server) Shutdown(context.Context) error {
 		_ = session.Close()
 	}
 	return closeErr
+}
+
+func (s *Server) signalReady() {
+	if s == nil || s.ready == nil {
+		return
+	}
+	s.readyOnce.Do(func() { close(s.ready) })
 }
 
 func (s *Server) getOrCreateSession(addr *net.UDPAddr) (*packetSession, bool) {

@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	gormstore "github.com/saramand9/bignet/kpro/database/gorm"
-	"github.com/saramand9/bignet/kpro/eventing/events"
+	gormstore "github.com/saramand9/kpro/database/gorm"
+	"github.com/saramand9/kpro/eventing/events"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
@@ -48,6 +48,44 @@ func TestGORMStoreAppendFetchAck(t *testing.T) {
 	}
 	if len(records) != 0 {
 		t.Fatalf("records after ack=%#v", records)
+	}
+}
+
+func TestGORMStoreMaterializesConsumerDeliveriesInBoundedBatches(t *testing.T) {
+	database := openDeliveryTestDatabase(t)
+	defer closeDeliveryTestDatabase(t, database)
+	store := NewGORMStore(database)
+	ctx := context.Background()
+	consumer := "bounded-projector"
+
+	envelopes := make([]events.Envelope, 5)
+	for i := range envelopes {
+		envelopes[i] = testEnvelope(fmt.Sprintf("bounded-%d", i))
+	}
+	if err := store.Append(ctx, envelopes...); err != nil {
+		t.Fatal(err)
+	}
+	records, err := store.Fetch(ctx, consumer, 2)
+	if err != nil || len(records) != 2 {
+		t.Fatalf("first fetch records=%#v err=%v", records, err)
+	}
+	var count int64
+	if err := database.GORM().Model(&outboxDeliveryRow{}).Where("consumer = ?", consumer).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("materialized rows=%d, want one batch of 2", count)
+	}
+
+	records, err = store.Fetch(ctx, consumer, 2)
+	if err != nil || len(records) != 2 {
+		t.Fatalf("second fetch records=%#v err=%v", records, err)
+	}
+	if err := database.GORM().Model(&outboxDeliveryRow{}).Where("consumer = ?", consumer).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 4 {
+		t.Fatalf("materialized rows=%d, want two batches of 2", count)
 	}
 }
 

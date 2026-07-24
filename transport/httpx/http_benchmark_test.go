@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/core"
 )
 
 func BenchmarkEndpointServeHTTP(b *testing.B) {

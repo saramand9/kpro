@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/database/common/lifecycle"
-	gormstore "github.com/saramand9/bignet/kpro/database/gorm"
-	"github.com/saramand9/bignet/kpro/eventing/events"
+	"github.com/saramand9/kpro/database/common/lifecycle"
+	gormstore "github.com/saramand9/kpro/database/gorm"
+	"github.com/saramand9/kpro/eventing/events"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -222,6 +222,16 @@ PRIMARY KEY (event_id, consumer)
 				),
 			},
 		},
+		{
+			Version: 202607240101,
+			Name:    "index_event_outbox_order",
+			Statements: []gormstore.Statement{
+				gormstore.DialectSQL(
+					`CREATE INDEX IF NOT EXISTS idx_event_outbox_events_order ON event_outbox_events (occurred_at, id)`,
+					map[string]string{"mysql": `CREATE INDEX idx_event_outbox_events_order ON event_outbox_events (occurred_at, id)`},
+				),
+			},
+		},
 	}
 }
 
@@ -335,7 +345,7 @@ func (s *GORMStore) Fetch(ctx context.Context, consumer string, limit int) ([]Re
 			return err
 		}
 		leaseUntil := now.Add(s.leaseDuration)
-		if err := ensureConsumerDeliveries(tx, consumer, now); err != nil {
+		if err := ensureConsumerDeliveries(tx, consumer, now, limit); err != nil {
 			return err
 		}
 		if err := tx.Model(&outboxDeliveryRow{}).
@@ -749,14 +759,16 @@ WHERE consumer = ?`, StatusPending, StatusInflight, StatusFailed, StatusDead, co
 	return stats, err
 }
 
-func ensureConsumerDeliveries(db *gorm.DB, consumer string, now time.Time) error {
+func ensureConsumerDeliveries(db *gorm.DB, consumer string, now time.Time, limit int) error {
 	const insertBody = ` INTO event_outbox_deliveries (event_id, consumer, status, attempts, available_at, last_error, updated_at)
 SELECT e.id, ?, ?, 0, ?, '', ?
 FROM event_outbox_events e`
 	const missing = ` WHERE NOT EXISTS (
   SELECT 1 FROM event_outbox_deliveries d WHERE d.event_id = e.id AND d.consumer = ?
-)`
-	args := []any{consumer, StatusPending, now, now, consumer}
+)
+ORDER BY e.occurred_at ASC, e.id ASC
+LIMIT ?`
+	args := []any{consumer, StatusPending, now, now, consumer, limit}
 	switch db.Dialector.Name() {
 	case "mysql":
 		return db.Exec("INSERT IGNORE"+insertBody+missing, args...).Error

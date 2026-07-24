@@ -90,3 +90,40 @@ func TestChainRunsInOrder(t *testing.T) {
 		}
 	}
 }
+
+func TestWithInvocationContextPreservesConnectionLifetime(t *testing.T) {
+	connectionDone := make(chan struct{})
+	requestCtx, cancel := context.WithCancel(context.Background())
+	invocation := NewInvocation(InvocationOptions{
+		Context:  context.Background(),
+		ConnDone: connectionDone,
+	})
+	wrapped := WithInvocationContext(invocation, requestCtx)
+
+	if got := InvocationConnDone(wrapped); got != connectionDone {
+		t.Fatal("connection lifetime was not preserved by context wrapper")
+	}
+	if got := InvocationDone(wrapped); got != requestCtx.Done() {
+		t.Fatal("request lifetime did not follow replacement context")
+	}
+	cancel()
+	select {
+	case <-connectionDone:
+		t.Fatal("request cancellation closed the connection lifetime")
+	default:
+	}
+	close(connectionDone)
+}
+
+func TestMessageInvocationExposesSessionAsConnectionLifetime(t *testing.T) {
+	session := newFakeSession(7)
+	invocation := NewMessageInvocation(context.Background(), NewContext(session, Message{ID: 42}))
+	defer invocation.Release()
+
+	if got := InvocationConnDone(invocation); got != session.Done() {
+		t.Fatal("message invocation did not expose session lifetime as connection lifetime")
+	}
+	if err := session.Close(); err != nil {
+		t.Fatalf("close session: %v", err)
+	}
+}

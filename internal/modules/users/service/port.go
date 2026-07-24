@@ -6,7 +6,7 @@ package service
 import (
 	"context"
 
-	"github.com/saramand9/bignet/kpro/internal/modules/users"
+	"github.com/saramand9/kpro/internal/modules/users"
 )
 
 // UserStore is the users module persistence port.

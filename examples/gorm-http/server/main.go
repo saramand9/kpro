@@ -8,9 +8,9 @@ import (
 	"flag"
 	"log"
 
-	gormstore "github.com/saramand9/bignet/kpro/database/gorm"
-	routeapp "github.com/saramand9/bignet/kpro/examples/gorm-http/server/internal/app"
-	"github.com/saramand9/bignet/kpro/server"
+	gormstore "github.com/saramand9/kpro/database/gorm"
+	routeapp "github.com/saramand9/kpro/examples/gorm-http/server/internal/app"
+	"github.com/saramand9/kpro/server"
 	"gorm.io/driver/sqlite"
 
 	_ "modernc.org/sqlite"

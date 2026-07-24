@@ -16,10 +16,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/core"
-	http3x "github.com/saramand9/bignet/kpro/transport/http3"
-	"github.com/saramand9/bignet/kpro/transport/httpx"
-	"github.com/saramand9/bignet/kpro/transport/sse"
+	"github.com/saramand9/kpro/core"
+	http3x "github.com/saramand9/kpro/transport/http3"
+	"github.com/saramand9/kpro/transport/httpx"
+	"github.com/saramand9/kpro/transport/sse"
 )
 
 func TestEndpointUseWrapsMessageDispatch(t *testing.T) {
@@ -126,6 +126,37 @@ func TestServerUseAppliesToMountedMessageEndpoints(t *testing.T) {
 	dispatchTestEcho(t, endpoint)
 	waitForSignal(t, callSeen, "middleware")
 	waitForSignal(t, handlerSeen, "handler")
+}
+
+func TestUseCheckedRejectsNilMiddlewareWithoutMutation(t *testing.T) {
+	app := New()
+	runner := &customMiddlewareRunner{}
+	app.MountRunner(runner)
+	valid := func(next core.InvocationHandler) core.InvocationHandler { return next }
+
+	err := app.UseChecked(valid, nil)
+	if !errors.Is(err, ErrInvalidConfiguration) {
+		t.Fatalf("UseChecked() error = %v, want %v", err, ErrInvalidConfiguration)
+	}
+	if app.State() != StateCreated {
+		t.Fatalf("server state = %v, want %v", app.State(), StateCreated)
+	}
+	if got := len(app.middlewares); got != 0 {
+		t.Fatalf("server middleware count = %d, want 0", got)
+	}
+	if runner.middlewareCount != 0 {
+		t.Fatalf("runner middleware count = %d, want 0", runner.middlewareCount)
+	}
+
+	if err := app.UseChecked(valid); err != nil {
+		t.Fatalf("UseChecked() after rejection error = %v", err)
+	}
+	if got := len(app.middlewares); got != 1 {
+		t.Fatalf("server middleware count after retry = %d, want 1", got)
+	}
+	if runner.middlewareCount != 1 {
+		t.Fatalf("runner middleware count after retry = %d, want 1", runner.middlewareCount)
+	}
 }
 
 func TestUseCheckedDoesNotHoldServerLockDuringMiddlewareCompilation(t *testing.T) {

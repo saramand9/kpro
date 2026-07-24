@@ -12,10 +12,10 @@ import (
 	"strings"
 	"testing"
 
-	gormstore "github.com/saramand9/bignet/kpro/database/gorm"
-	projectservice "github.com/saramand9/bignet/kpro/internal/modules/projects/service"
-	projectstore "github.com/saramand9/bignet/kpro/internal/modules/projects/store"
-	"github.com/saramand9/bignet/kpro/transport/httpx"
+	gormstore "github.com/saramand9/kpro/database/gorm"
+	projectservice "github.com/saramand9/kpro/internal/modules/projects/service"
+	projectstore "github.com/saramand9/kpro/internal/modules/projects/store"
+	"github.com/saramand9/kpro/transport/httpx"
 	"gorm.io/driver/sqlite"
 
 	_ "modernc.org/sqlite"

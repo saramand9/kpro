@@ -5,10 +5,16 @@ All notable KPro changes are recorded here. The format follows
 will follow Semantic Versioning as described in
 [docs/api-stability.md](docs/api-stability.md).
 
-KPro is currently pre-1.0 and has no published release tag. Entries under
-`Unreleased` describe repository behavior, not a released compatibility promise.
+KPro follows pre-1.0 semantic versioning. See the API stability policy before
+upgrading between minor versions.
 
 ## Unreleased
+
+No changes yet.
+
+## [0.1.0] - 2026-07-24
+
+Initial developer release of the KPro application framework.
 
 ### Added
 
@@ -28,6 +34,18 @@ KPro is currently pre-1.0 and has no published release tag. Entries under
   and extension documentation.
 - Runnable KCP and QUIC message server/client examples, including local-only
   in-memory TLS setup for QUIC.
+- Race-free asynchronous startup through `Server.Start` and per-generation
+  `RunHandle` readiness/completion waits, plus component/phase lifecycle errors.
+- Optional message `ContextProvider` and `core.ContextOf`, preserving custom
+  `core.Context` compatibility while propagating deadlines, tracing, and
+  cancellation into handlers.
+- HTTP and HTTP/3 `ServeMux` patterns, path parameters, route groups,
+  route-local middleware, and checked route registration.
+- Public `transport/transportkit` extension helpers and package-level API docs
+  for the core framework surfaces.
+- `kpro version` and `kpro doctor`, dependency-update automation, security
+  policy, coverage/vulnerability gates, and verified checksum/SBOM release
+  automation.
 
 ### Changed
 
@@ -57,6 +75,12 @@ KPro is currently pre-1.0 and has no published release tag. Entries under
   pattern drains normally.
 - HTTP/3 now creates and owns its QUIC listener explicitly so startup
   cancellation and concurrent shutdown cannot strand the UDP socket.
+- HTTP and HTTP/3 now apply safe zero-value header/body/time limits and redact
+  unclassified handler failures; HTTP/3 0-RTT is disabled unless explicitly
+  enabled and both HTTP/3 and QUIC enforce physical connection ceilings.
+- TCP, KCP, QUIC, UDP, and WebSocket now define handler-error policy and
+  observation hooks, default to closing the affected session, report full send
+  queues consistently, and publish readiness only after successful binding.
 - TCP, KCP, QUIC, and WebSocket sends now deterministically return
   `core.ErrClosed` after session close instead of occasionally queueing an
   undeliverable frame.
@@ -66,16 +90,63 @@ KPro is currently pre-1.0 and has no published release tag. Entries under
   being rebuilt for every invocation.
 - Message contexts are pooled; background work must retain a `CloneContext`
   snapshot rather than the request-scoped context.
+- Connection-aware rate limiting now keys physical connection lifetime,
+  bounds bucket cardinality, and evicts idle state without collapsing distinct
+  transports or peers into one bucket.
+- Framework error responses now use stable protocol-neutral classifications;
+  internal, recovered, and unknown details are never copied to HTTP, SSE,
+  gRPC, or KPro wire responses.
 - Packet decoding rejects trailing bytes instead of silently accepting more
   than one frame.
+- Projector registration and execution validate inputs, isolate panics, and
+  publish registry snapshots atomically. Delivery scans materialize bounded
+  batches and include supporting migration indexes.
+- Caller-supplied GORM and Elasticsearch transports remain caller-owned;
+  ClickHouse transactions roll back after panics; Redis locks synchronize TTL
+  and key prefix use, and stream reads/trimming expose explicit bounds.
 - SQL outbox lease decisions use the database UTC clock.
 - Dead-letter replay keeps lease attempt receipts monotonic across generations,
   while `last_dead_attempts` restarts the retry budget for each explicit replay.
+- The module baseline is Go 1.25.12. quic-go, gRPC, pgx, ClickHouse, Redis,
+  `x/net`, and `x/text` were upgraded to patched versions; quic-go integrations
+  use the v0.59 connection, stream, listener, and HTTP/3 transport APIs.
+- Passing more than one configuration to `server.New` or `core.NewRouter`, and
+  invalid unchecked route registration, now panics instead of silently ignoring
+  extra/invalid input. Checked constructors and registration methods return the
+  corresponding error. `core.ErrClosed` now uses component-neutral wording.
 
 ### Deprecated
 
 - `delivery.GORMStore.Ack` and `Fail` are compatibility-only for the first
   attempt. Lease-aware consumers should use `AckAttempt` and `FailAttempt`.
+
+### Fixed
+
+- gRPC always applies the safe error boundary, including calls without
+  middleware, and does not expose details from wrapped status/context errors.
+- HTTP/3 closes the QUIC listener before gracefully draining accepted
+  connections, preventing new handshakes during shutdown.
+- WebSocket validates request method/version, singleton handshake headers,
+  origins, close payloads, and close replies at the protocol boundary.
+- UDP rejects oversized datagrams instead of dispatching a truncated prefix.
+- Duplicate HTTP/message routes and nil middleware are rejected without
+  replacing or corrupting existing configuration.
+- Redis lock objects use a cryptographically random immutable token for one
+  successful acquisition, so stale owners cannot release a replacement lease.
+
+### Known limitations
+
+- TCP, KCP, QUIC, UDP, and WebSocket shutdown is a bounded stop, not a reply
+  delivery barrier. Outbound replies are at-most-once; applications requiring
+  delivery confirmation need acknowledgements, retries, and idempotency.
+- `database/redis.Lock` is a single-node TTL lease, not a fencing or quorum
+  lock. An `Acquire` transport failure can leave the `SET NX` outcome unknown.
+- WebSocket can close immediately for some malformed frames rather than first
+  sending close code 1002, and server shutdown does not perform a full peer
+  close-handshake exchange.
+- Repository tests and microbenchmarks are not workload-specific production
+  certification; deployments must run their own load, failure, and recovery
+  exercises.
 
 ### Validation
 
@@ -84,3 +155,6 @@ KPro is currently pre-1.0 and has no published release tag. Entries under
   configured in CI.
 - Repository tests are evidence of implemented behavior, not a claim of
   workload-specific production certification.
+
+[Unreleased]: https://github.com/saramand9/kpro/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/saramand9/kpro/releases/tag/v0.1.0

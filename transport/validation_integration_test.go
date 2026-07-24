@@ -9,17 +9,17 @@ import (
 	"time"
 
 	quicgo "github.com/quic-go/quic-go"
-	"github.com/saramand9/bignet/kpro/codec"
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/transport/grpcx"
-	"github.com/saramand9/bignet/kpro/transport/http3"
-	"github.com/saramand9/bignet/kpro/transport/httpx"
-	"github.com/saramand9/bignet/kpro/transport/kcp"
-	quictransport "github.com/saramand9/bignet/kpro/transport/quic"
-	"github.com/saramand9/bignet/kpro/transport/sse"
-	"github.com/saramand9/bignet/kpro/transport/tcp"
-	"github.com/saramand9/bignet/kpro/transport/udp"
-	"github.com/saramand9/bignet/kpro/transport/websocket"
+	"github.com/saramand9/kpro/codec"
+	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/transport/grpcx"
+	"github.com/saramand9/kpro/transport/http3"
+	"github.com/saramand9/kpro/transport/httpx"
+	"github.com/saramand9/kpro/transport/kcp"
+	quictransport "github.com/saramand9/kpro/transport/quic"
+	"github.com/saramand9/kpro/transport/sse"
+	"github.com/saramand9/kpro/transport/tcp"
+	"github.com/saramand9/kpro/transport/udp"
+	"github.com/saramand9/kpro/transport/websocket"
 )
 
 func TestBuiltInValidationReportsActionableTLSAndAddressErrors(t *testing.T) {

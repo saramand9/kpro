@@ -7,13 +7,30 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
-	"github.com/saramand9/bignet/kpro/database/common/lifecycle"
+	"github.com/saramand9/kpro/database/common/lifecycle"
 )
 
 type searchDoc struct {
 	Title string `json:"title"`
+}
+
+type closeCountingTransport struct {
+	base   http.RoundTripper
+	closes atomic.Int32
+}
+
+func (t *closeCountingTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	return t.base.RoundTrip(request)
+}
+
+func (t *closeCountingTransport) CloseIdleConnections() {
+	t.closes.Add(1)
+	if closer, ok := t.base.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
 }
 
 func TestSearchIndexLifecycle(t *testing.T) {
@@ -54,6 +71,9 @@ func TestSearchIndexLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
+	if !client.ownsTransport || client.transport == nil {
+		t.Fatal("implicitly created transport is not lifecycle-owned")
+	}
 	if health := client.Health(context.Background()); health.Status != lifecycle.StatusOK {
 		t.Fatalf("health=%#v", health)
 	}
@@ -95,6 +115,42 @@ func TestSearchIndexLifecycle(t *testing.T) {
 		if !strings.Contains(bulkBody, want) {
 			t.Fatalf("bulk body %q missing %q", bulkBody, want)
 		}
+	}
+}
+
+func TestCloseDoesNotCloseCallerOwnedTransport(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Elastic-Product", "Elasticsearch")
+		_, _ = w.Write([]byte(`{"name":"test"}`))
+	}))
+	defer server.Close()
+
+	base := http.DefaultTransport.(*http.Transport).Clone()
+	transport := &closeCountingTransport{base: base}
+	client, err := Open(context.Background(), Config{
+		Addresses: []string{server.URL},
+		Transport: transport,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.ownsTransport {
+		t.Fatal("caller-provided transport marked as owned")
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := transport.closes.Load(); got != 0 {
+		t.Fatalf("caller-owned transport closes=%d, want 0", got)
+	}
+	base.CloseIdleConnections()
+
+	owned := &Client{ownsTransport: true, transport: transport}
+	if err := owned.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := transport.closes.Load(); got != 1 {
+		t.Fatalf("owned transport closes=%d, want 1", got)
 	}
 }
 

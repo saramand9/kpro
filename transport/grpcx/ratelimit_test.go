@@ -6,12 +6,13 @@ package grpcx
 import (
 	"context"
 	"net"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/middleware"
+	"github.com/saramand9/kpro/middleware"
 	"golang.org/x/time/rate"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
@@ -49,8 +50,8 @@ func TestConnRateLimitPersistsAcrossGRPCClientConn(t *testing.T) {
 	ctx, cancel = context.WithTimeout(context.Background(), 3*time.Second)
 	_, err = client.SayHello(ctx, wrapperspb.String("two"))
 	cancel()
-	if err == nil || !strings.Contains(err.Error(), middleware.ErrRateLimited.Error()) {
-		t.Fatalf("second call err = %v, want rate limit", err)
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("second call err = %v, want ResourceExhausted", err)
 	}
 
 	otherConn := dialTestGRPC(t, ln.Addr().String())

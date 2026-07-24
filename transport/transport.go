@@ -6,7 +6,7 @@ package transport
 import (
 	"context"
 
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/core"
 )
 
 // Component is the common lifecycle surface shared by message and native
@@ -47,4 +47,14 @@ type Runner = NativeRunner
 // accept protocol-neutral invocation middleware.
 type MiddlewareTarget interface {
 	ApplyMiddleware(...core.Middleware)
+}
+
+// ReadinessProvider is implemented by transports that can report when their
+// listener has been bound and the component is ready to accept work. Server
+// orchestration falls back to the legacy "ListenAndServe entered" signal for
+// components that do not implement this optional capability. Implementations
+// must close Ready only after successful listener publication; startup failure
+// is returned by ListenAndServe and must not close the readiness channel.
+type ReadinessProvider interface {
+	Ready() <-chan struct{}
 }

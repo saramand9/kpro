@@ -7,7 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"runtime"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -137,17 +139,38 @@ func (r *Router) Use(middlewares ...Middleware) {
 
 // Handle registers a sync handler for msgID.
 func (r *Router) Handle(msgID uint32, h Handler) {
-	r.HandleSync(msgID, h)
+	if err := r.HandleChecked(msgID, h); err != nil {
+		panic(err)
+	}
 }
 
 // HandleSync registers a handler that is serialized per session.
 func (r *Router) HandleSync(msgID uint32, h Handler) {
-	r.handle(msgID, h, DispatchSync)
+	if err := r.HandleSyncChecked(msgID, h); err != nil {
+		panic(err)
+	}
 }
 
 // HandleAsync registers a handler that is run by shared async workers.
 func (r *Router) HandleAsync(msgID uint32, h Handler) {
-	r.handle(msgID, h, DispatchAsync)
+	if err := r.HandleAsyncChecked(msgID, h); err != nil {
+		panic(err)
+	}
+}
+
+// HandleChecked registers a sync handler and reports invalid, duplicate, or late registration.
+func (r *Router) HandleChecked(msgID uint32, h Handler) error {
+	return r.HandleSyncChecked(msgID, h)
+}
+
+// HandleSyncChecked registers a serialized handler and reports invalid or late registration.
+func (r *Router) HandleSyncChecked(msgID uint32, h Handler) error {
+	return r.handle(msgID, h, DispatchSync)
+}
+
+// HandleAsyncChecked registers an async handler and reports invalid or late registration.
+func (r *Router) HandleAsyncChecked(msgID uint32, h Handler) error {
+	return r.handle(msgID, h, DispatchAsync)
 }
 
 // Dispatch submits a decoded message context using the configured
@@ -161,12 +184,14 @@ func (r *Router) Dispatch(ctx Context) error {
 // DispatchContext submits a decoded message context. Reject mode returns
 // immediately when a global, per-session, or queue limit is reached. Wait mode
 // waits for capacity until waitCtx, the Router, or the Session is canceled.
-// The Router owns ctx after this call and releases pooled contexts on every
-// success or failure path.
+// The Router owns one ctx reference after this call and releases it on every
+// success or failure path. Transport-managed contexts retain their caller
+// reference until ReleaseTransportContext is called.
 func (r *Router) DispatchContext(waitCtx context.Context, ctx Context) error {
 	if waitCtx == nil {
 		waitCtx = context.Background()
 	}
+	retainRouterContext(ctx)
 	if err := r.ensureRunning(); err != nil {
 		return r.rejectDispatch(ctx, err, false)
 	}
@@ -225,7 +250,7 @@ func (r *Router) rejectDispatch(ctx Context, err error, waited bool) error {
 		r.waited.Add(1)
 	}
 	r.rejected.Add(1)
-	_ = ctx.Error(err.Error())
+	_ = ctx.Error(PublicErrorMessage(err))
 	releaseContext(ctx)
 	return err
 }
@@ -274,12 +299,19 @@ func (r *Router) Shutdown(ctx context.Context) error {
 	}
 }
 
-func (r *Router) handle(msgID uint32, h Handler, mode DispatchMode) {
+func (r *Router) handle(msgID uint32, h Handler, mode DispatchMode) error {
+	if h == nil {
+		return ErrNilHandler
+	}
 	if r.closed() {
-		return
+		return ErrRouterClosed
 	}
 	for {
 		r.mu.RLock()
+		if _, exists := r.routes[msgID]; exists {
+			r.mu.RUnlock()
+			return fmt.Errorf("%w: message id %d", ErrHandlerAlreadyRegistered, msgID)
+		}
 		revision := r.revision
 		middlewares := append([]Middleware(nil), r.middlewares...)
 		r.mu.RUnlock()
@@ -293,7 +325,11 @@ func (r *Router) handle(msgID uint32, h Handler, mode DispatchMode) {
 		}
 		if r.closed() {
 			r.mu.Unlock()
-			return
+			return ErrRouterClosed
+		}
+		if _, exists := r.routes[msgID]; exists {
+			r.mu.Unlock()
+			return fmt.Errorf("%w: message id %d", ErrHandlerAlreadyRegistered, msgID)
 		}
 		r.routes[msgID] = route{
 			handler:           h,
@@ -302,7 +338,7 @@ func (r *Router) handle(msgID uint32, h Handler, mode DispatchMode) {
 		}
 		r.revision++
 		r.mu.Unlock()
-		return
+		return nil
 	}
 }
 
@@ -346,7 +382,7 @@ func buildMessageInvocationHandler(handler Handler, middlewares []Middleware) In
 		if !ok {
 			return fmt.Errorf("message invocation native context has type %T", invocation.Native())
 		}
-		return handler(ctx)
+		return handler(withMessageContext(ctx, invocation.Context()))
 	})
 	if len(middlewares) > 0 {
 		invocationHandler = Chain(middlewares...)(invocationHandler)
@@ -511,13 +547,15 @@ func (r *Router) execute(task dispatchTask) {
 	defer task.session.release()
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			_ = task.ctx.Error(fmt.Sprintf("handler panic: %v", recovered))
+			log.Printf("message handler panic: %v\n%s", recovered, debug.Stack())
+			_ = task.ctx.Error(PublicErrorMessage(ErrRecovered))
 		}
 	}()
 	inv := NewMessageInvocation(context.Background(), task.ctx)
 	defer inv.Release()
 	if err := task.handler(inv); err != nil {
-		_ = task.ctx.Error(err.Error())
+		log.Printf("message handler error: %v", err)
+		_ = task.ctx.Error(PublicErrorMessage(err))
 	}
 }
 
@@ -784,7 +822,7 @@ func (s *sessionExecutor) close() {
 			for _, task := range drained {
 				s.router.releaseGlobal()
 				s.router.dropped.Add(1)
-				_ = task.ctx.Error(ErrRouterClosed.Error())
+				_ = task.ctx.Error(PublicErrorMessage(ErrRouterClosed))
 				releaseContext(task.ctx)
 			}
 			return
@@ -932,6 +970,9 @@ func resetTimer(timer *time.Timer, d time.Duration) {
 func firstRouterConfig(config []RouterConfig) RouterConfig {
 	if len(config) == 0 {
 		return RouterConfig{}
+	}
+	if len(config) > 1 {
+		panic("core.NewRouter accepts at most one RouterConfig")
 	}
 	return config[0]
 }

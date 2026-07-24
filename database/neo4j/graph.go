@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/saramand9/bignet/kpro/database/common/readmodels"
+	"github.com/saramand9/kpro/database/common/readmodels"
 )
 
 var graphIdentifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)

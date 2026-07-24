@@ -4,11 +4,11 @@
 package app
 
 import (
-	"github.com/saramand9/bignet/kpro/codec"
-	"github.com/saramand9/bignet/kpro/examples/tcp-modular/server/internal/modules/echo"
-	"github.com/saramand9/bignet/kpro/middleware"
-	"github.com/saramand9/bignet/kpro/server"
-	"github.com/saramand9/bignet/kpro/transport/tcp"
+	"github.com/saramand9/kpro/codec"
+	"github.com/saramand9/kpro/examples/tcp-modular/server/internal/modules/echo"
+	"github.com/saramand9/kpro/middleware"
+	"github.com/saramand9/kpro/server"
+	"github.com/saramand9/kpro/transport/tcp"
 )
 
 type Config struct {

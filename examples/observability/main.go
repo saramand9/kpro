@@ -7,24 +7,26 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/middleware"
-	"github.com/saramand9/bignet/kpro/observability/healthx"
-	"github.com/saramand9/bignet/kpro/observability/otelx"
-	"github.com/saramand9/bignet/kpro/observability/prometheusx"
-	"github.com/saramand9/bignet/kpro/observability/zapx"
-	"github.com/saramand9/bignet/kpro/server"
-	"github.com/saramand9/bignet/kpro/transport"
-	"github.com/saramand9/bignet/kpro/transport/httpx"
+	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/middleware"
+	"github.com/saramand9/kpro/observability/healthx"
+	"github.com/saramand9/kpro/observability/otelx"
+	"github.com/saramand9/kpro/observability/prometheusx"
+	"github.com/saramand9/kpro/observability/zapx"
+	"github.com/saramand9/kpro/server"
+	"github.com/saramand9/kpro/transport"
+	"github.com/saramand9/kpro/transport/httpx"
 	"go.uber.org/zap"
 )
 
@@ -111,39 +113,45 @@ func main() {
 }
 
 func run(app *server.Server, ready *atomic.Bool, logger *zap.Logger, apiAddr, adminAddr string) error {
+	baseCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
 	signalCtx, stopSignals := signal.NotifyContext(
-		context.Background(),
+		baseCtx,
 		os.Interrupt,
 		syscall.SIGTERM,
 	)
 	defer stopSignals()
 
-	ready.Store(true)
-	defer ready.Store(false)
-	serveErr := make(chan error, 1)
-	go func() {
-		serveErr <- app.ListenAndServe()
-	}()
+	handle, err := app.Start(signalCtx)
+	if err != nil {
+		return err
+	}
 
 	logger.Info("service starting",
 		zap.String("api_address", apiAddr),
 		zap.String("admin_address", adminAddr),
 	)
-	select {
-	case err := <-serveErr:
-		return err
-	case <-signalCtx.Done():
-		ready.Store(false)
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownWindow)
-		defer cancel()
-		shutdownErr := app.Shutdown(shutdownCtx)
-		select {
-		case err := <-serveErr:
-			return errors.Join(shutdownErr, err)
-		case <-shutdownCtx.Done():
-			return errors.Join(shutdownErr, shutdownCtx.Err())
+	readyCtx, cancelReady := context.WithTimeout(context.Background(), shutdownWindow)
+	if err := handle.WaitReady(readyCtx); err != nil {
+		cancelReady()
+		cancelRun()
+		runErr := handle.Wait()
+		if server.IsContextTermination(runErr) {
+			runErr = nil
 		}
+		if runErr != nil {
+			return runErr
+		}
+		return err
 	}
+	cancelReady()
+	ready.Store(true)
+	defer ready.Store(false)
+	err = handle.Wait()
+	if server.IsContextTermination(err) && signalCtx.Err() != nil {
+		return nil
+	}
+	return err
 }
 
 func contextCheck(ctx context.Context) error {
@@ -169,11 +177,14 @@ func readinessCheck(ready *atomic.Bool) healthx.CheckFunc {
 
 type adminServer struct {
 	server *http.Server
+	ready  chan struct{}
+	once   sync.Once
 }
 
 var (
 	_ transport.Runner             = (*adminServer)(nil)
 	_ transport.CapabilityProvider = (*adminServer)(nil)
+	_ transport.ReadinessProvider  = (*adminServer)(nil)
 	_ transport.Validator          = (*adminServer)(nil)
 )
 
@@ -182,7 +193,7 @@ func newAdminServer(addr string, liveness, readiness, metrics http.Handler) *adm
 	mux.Handle("/livez", liveness)
 	mux.Handle("/readyz", readiness)
 	mux.Handle("/metrics", metrics)
-	return &adminServer{server: &http.Server{
+	return &adminServer{ready: make(chan struct{}), server: &http.Server{
 		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -195,6 +206,10 @@ func newAdminServer(addr string, liveness, readiness, metrics http.Handler) *adm
 
 func (*adminServer) Name() string {
 	return "observability-http"
+}
+
+func (a *adminServer) Ready() <-chan struct{} {
+	return a.ready
 }
 
 func (*adminServer) Descriptor() transport.Descriptor {
@@ -219,13 +234,18 @@ func (a *adminServer) Validate() error {
 }
 
 func (a *adminServer) ListenAndServe(ctx context.Context) error {
+	listener, err := net.Listen("tcp", a.server.Addr)
+	if err != nil {
+		return err
+	}
+	a.once.Do(func() { close(a.ready) })
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownWindow)
 		defer cancel()
 		_ = a.Shutdown(shutdownCtx)
 	}()
-	err := a.server.ListenAndServe()
+	err = a.server.Serve(listener)
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}

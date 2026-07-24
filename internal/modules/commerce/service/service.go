@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/saramand9/bignet/kpro/internal/modules/commerce"
+	"github.com/saramand9/kpro/internal/modules/commerce"
 )
 
 var ErrInvalidInput = commerce.ErrInvalidInput

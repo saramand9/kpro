@@ -3,7 +3,7 @@
 
 package echo
 
-import "github.com/saramand9/bignet/kpro/transport/httpx"
+import "github.com/saramand9/kpro/transport/httpx"
 
 func echo(ctx *httpx.Context) error {
 	body, err := ctx.Body()
