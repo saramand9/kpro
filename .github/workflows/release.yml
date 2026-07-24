@@ -53,10 +53,13 @@ jobs:
             echo "tag commit ${tag_commit} does not match checkout ${checkout_commit}"
             exit 1
           fi
-          git fetch --no-tags origin \
-            "${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+          default_ref="refs/remotes/origin/${DEFAULT_BRANCH}"
+          if ! git show-ref --verify --quiet "${default_ref}"; then
+            echo "checkout is missing default branch ref ${default_ref}"
+            exit 1
+          fi
           if ! git merge-base --is-ancestor \
-            "${tag_commit}" "refs/remotes/origin/${DEFAULT_BRANCH}"; then
+            "${tag_commit}" "${default_ref}"; then
             echo "tag commit ${tag_commit} is not on ${DEFAULT_BRANCH}"
             exit 1
           fi
