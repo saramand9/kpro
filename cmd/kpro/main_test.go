@@ -20,6 +20,26 @@ func TestNewCreatesParseableServiceWithoutOverwriting(t *testing.T) {
 	if _, err := parser.ParseFile(token.NewFileSet(), mainPath, nil, parser.AllErrors); err != nil {
 		t.Fatalf("parse generated main.go: %v", err)
 	}
+	generatedMain, err := os.ReadFile(mainPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mainContents := string(generatedMain)
+	for _, expected := range []string{
+		`server.MountNative(app, httpx.New(httpx.Config{`,
+		`Addr:            ":8080"`,
+		`httpEndpoint.Get("/livez", liveness)`,
+		`httpEndpoint.Get("/readyz", readiness)`,
+		`httpEndpoint.Get("/healthz", readiness)`,
+		`"dependencies": "none"`,
+	} {
+		if !strings.Contains(mainContents, expected) {
+			t.Fatalf("generated main.go does not contain %q:\n%s", expected, mainContents)
+		}
+	}
+	if strings.Contains(mainContents, `app.HTTP(`) {
+		t.Fatalf("generated main.go still uses the removed HTTP convenience method:\n%s", mainContents)
+	}
 	goMod, err := os.ReadFile(filepath.Join(target, "go.mod"))
 	if err != nil {
 		t.Fatal(err)

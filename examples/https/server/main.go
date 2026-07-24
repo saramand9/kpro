@@ -32,10 +32,14 @@ func main() {
 	defer cleanup()
 
 	app := server.New(server.Config{Name: "https-example"})
-	app.HTTPS(*addr, httpx.Config{
+	httpEndpoint := httpx.New(httpx.Config{
+		Addr:     *addr,
+		TLS:      true,
 		CertFile: certFile,
 		KeyFile:  keyFile,
-	}).
+	})
+	app.MountRunner(httpEndpoint)
+	httpEndpoint.
 		Get("/health", func(ctx *httpx.Context) error {
 			return ctx.Text(200, "ok\n")
 		}).

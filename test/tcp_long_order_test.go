@@ -55,12 +55,13 @@ func runTCPMultiClientRandomOrderStrict(t *testing.T, clients, messagesPerClient
 			ShutdownTimeout:       30 * time.Second,
 		},
 	})
-	app.TCP(addr, tcp.Config{
+	app.Mount(tcp.New(tcp.Config{
+		Addr:          addr,
 		Codec:         codec.KProV1(),
 		SendQueueSize: messagesPerClient + 16,
 		ReadTimeout:   2 * time.Minute,
 		WriteTimeout:  2 * time.Minute,
-	}).HandleSync(msgTCPOrderStress, func(ctx core.Context) error {
+	})).HandleSync(msgTCPOrderStress, func(ctx core.Context) error {
 		clientID, token, err := decodeTCPOrderPayload(ctx.Message().Data)
 		if err != nil {
 			return err

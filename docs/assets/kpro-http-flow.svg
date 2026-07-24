@@ -45,17 +45,17 @@
   <text class="text" x="96" y="246">owns runner lifecycle</text>
 
   <rect class="box setup" x="380" y="174" width="270" height="110" rx="8" />
-  <text class="boxTitle" x="438" y="206">app.HTTP</text>
-  <text class="text" x="416" y="232">cfg.Addr = addr</text>
-  <text class="text" x="416" y="254">httpx.New(cfg)</text>
+  <text class="boxTitle" x="438" y="206">httpx.New(cfg)</text>
+  <text class="text" x="416" y="232">cfg.Addr set explicitly</text>
+  <text class="text" x="416" y="254">HTTP configuration</text>
 
   <rect class="box setup" x="710" y="174" width="286" height="110" rx="8" />
-  <text class="boxTitle" x="766" y="206">app.HTTPS</text>
-  <text class="text" x="738" y="232">cfg.Addr = addr</text>
+  <text class="boxTitle" x="766" y="206">httpx.New(cfg)</text>
+  <text class="text" x="738" y="232">cfg.Addr set explicitly</text>
   <text class="text" x="738" y="254">cfg.TLS = true</text>
 
   <rect class="box setup" x="1056" y="190" width="292" height="78" rx="8" />
-  <text class="boxTitle" x="1110" y="222">MountRunner</text>
+  <text class="boxTitle" x="1090" y="222">server.MountNative</text>
   <text class="text" x="1092" y="246">register httpx.Endpoint</text>
 
   <rect class="box setup" x="1408" y="190" width="306" height="78" rx="8" />

@@ -28,6 +28,7 @@ import (
 	"github.com/saramand9/kpro/transport/sse"
 	"github.com/saramand9/kpro/transport/tcp"
 	"github.com/saramand9/kpro/transport/udp"
+	"github.com/saramand9/kpro/transport/websocket"
 	"go.uber.org/zap"
 )
 
@@ -54,6 +55,10 @@ func run() (returnErr error) {
 	sseAddr := flag.String("sse", ":8081", "sse listen address")
 	gormDriver := flag.String("gorm-driver", "sqlite", "gorm driver: sqlite, mysql, or postgres")
 	gormDSN := flag.String("gorm-dsn", "", "gorm data source name, disabled when empty")
+	gormMaxOpenConns := flag.Int("gorm-max-open-conns", 0, "gorm max open connections, 0 uses KPro's driver-specific default")
+	gormMaxIdleConns := flag.Int("gorm-max-idle-conns", 0, "gorm max idle connections, 0 uses KPro's driver-specific default")
+	gormConnMaxLifetime := flag.Duration("gorm-conn-max-lifetime", 0, "gorm connection max lifetime, 0 uses KPro's driver-specific default")
+	gormConnMaxIdleTime := flag.Duration("gorm-conn-max-idle-time", 0, "gorm connection max idle time, 0 uses KPro's driver-specific default")
 	defaultLog := logx.DefaultConfig("kpro-app")
 	defaultLog.FileName = defaultAppLogFile()
 	logLevel := flag.String("log-level", defaultLog.Level, "log level: debug, info, warn, error, dpanic, panic, fatal")
@@ -76,11 +81,16 @@ func run() (returnErr error) {
 	defer cleanup()
 
 	ctx := context.Background()
+	sqlConfig := (persistence.SQLConfig{
+		Driver:          *gormDriver,
+		DSN:             *gormDSN,
+		MaxOpenConns:    *gormMaxOpenConns,
+		MaxIdleConns:    *gormMaxIdleConns,
+		ConnMaxLifetime: *gormConnMaxLifetime,
+		ConnMaxIdleTime: *gormConnMaxIdleTime,
+	}).WithDefaults()
 	resources, services, err := initAppPersistence(ctx, persistence.Config{
-		SQL: persistence.SQLConfig{
-			Driver: *gormDriver,
-			DSN:    *gormDSN,
-		},
+		SQL: sqlConfig,
 	})
 	if err != nil {
 		return fmt.Errorf("init gorm persistence: %w", err)
@@ -103,74 +113,75 @@ func run() (returnErr error) {
 	}
 	metrics := middleware.NewMetrics()
 
-	tcpEndpoint := app.TCP(*tcpAddr, tcp.Config{
+	tcpEndpoint := app.Mount(tcp.New(tcp.Config{
+		Addr:         *tcpAddr,
 		Codec:        codec.KProV1(),
 		MaxFrameSize: 64 * 1024,
-	}).Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024))
+	})).Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024))
 	registerMessageRoutes(tcpEndpoint, services)
 
-	kcpEndpoint := app.KCP(*kcpAddr, kcp.Config{
+	kcpEndpoint := app.Mount(kcp.New(kcp.Config{
+		Addr:         *kcpAddr,
 		Codec:        codec.KProV1(),
 		MaxFrameSize: 64 * 1024,
-	}).Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024))
+	})).Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024))
 	registerMessageRoutes(kcpEndpoint, services)
 
 	if *quicAddr != "" {
 		if *quicCert == "" || *quicKey == "" {
 			return errors.New("quic requires -quic-cert and -quic-key")
 		}
-		quicEndpoint := app.QUIC(*quicAddr, quictransport.Config{
+		quicEndpoint := app.Mount(quictransport.New(quictransport.Config{
+			Addr:         *quicAddr,
 			Codec:        codec.KProV1(),
 			MaxFrameSize: 64 * 1024,
 			MaxStreams:   *quicMaxStreams,
 			CertFile:     *quicCert,
 			KeyFile:      *quicKey,
-		}).Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024))
+		})).Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024))
 		registerMessageRoutes(quicEndpoint, services)
 	}
 
-	udpEndpoint := app.UDP(*udpAddr, udp.Config{
+	udpEndpoint := app.Mount(udp.New(udp.Config{
+		Addr:          *udpAddr,
 		Codec:         codec.KProV1(),
 		MaxPacketSize: 2048,
-	}).Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(1500))
+	})).Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(1500))
 	registerMessageRoutes(udpEndpoint, services)
 
-	wsEndpoint := app.WebSocket(*wsAddr, "/ws").Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024))
+	wsEndpoint := app.Mount(websocket.New(websocket.Config{
+		Addr: *wsAddr,
+		Path: "/ws",
+	})).Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024))
 	registerMessageRoutes(wsEndpoint, services)
 
-	httpEndpoint := app.HTTP(*httpAddr, httpx.Config{
+	httpEndpoint := httpx.New(httpx.Config{
+		Addr:            *httpAddr,
 		ReadTimeout:     5 * time.Second,
 		WriteTimeout:    10 * time.Second,
 		IdleTimeout:     60 * time.Second,
 		ShutdownTimeout: 10 * time.Second,
 		MaxBodyBytes:    1 << 20,
 	})
-	registerHTTPRoutes(httpEndpoint, metrics, services)
+	app.MountRunner(httpEndpoint)
+	registerHTTPRoutes(httpEndpoint, metrics, services, resources)
 
 	if *http3Addr != "" {
 		if *http3Cert == "" || *http3Key == "" {
 			return errors.New("http3 requires -http3-cert and -http3-key")
 		}
-		app.HTTP3(*http3Addr, http3x.Config{
+		http3Endpoint := http3x.New(http3x.Config{
+			Addr:     *http3Addr,
 			CertFile: *http3Cert,
 			KeyFile:  *http3Key,
-		}).
-			Get("/health", func(ctx *http3x.Context) error {
-				return ctx.Text(200, "ok\n")
-			}).
-			Get("/metrics", func(ctx *http3x.Context) error {
-				return ctx.JSON(200, metrics.Snapshot())
-			}).
-			Post("/echo", func(ctx *http3x.Context) error {
-				body, err := ctx.Body()
-				if err != nil {
-					return err
-				}
-				return ctx.JSON(200, map[string]interface{}{"echo": string(body)})
-			})
+		})
+		app.MountRunner(http3Endpoint)
+		registerHTTP3Routes(http3Endpoint, metrics, resources)
 	}
 
-	app.SSE(*sseAddr, "/events").
+	sseEndpoint := sse.New(sse.Config{Addr: *sseAddr, Path: "/events"})
+	app.MountRunner(sseEndpoint)
+	sseEndpoint.
 		Handle(func(ctx *sse.Context) error {
 			ticker := time.NewTicker(time.Second)
 			defer ticker.Stop()
@@ -217,6 +228,10 @@ func run() (returnErr error) {
 		zap.String("sse", *sseAddr),
 		zap.Bool("gorm_enabled", services.Users != nil),
 		zap.String("gorm_driver", *gormDriver),
+		zap.Int("gorm_max_open_conns", sqlConfig.MaxOpenConns),
+		zap.Int("gorm_max_idle_conns", sqlConfig.MaxIdleConns),
+		zap.Duration("gorm_conn_max_lifetime", sqlConfig.ConnMaxLifetime),
+		zap.Duration("gorm_conn_max_idle_time", sqlConfig.ConnMaxIdleTime),
 		zap.String("log_file", *logFile),
 	)
 	if err := handle.Wait(); err != nil {

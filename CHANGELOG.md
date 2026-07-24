@@ -10,7 +10,40 @@ upgrading between minor versions.
 
 ## Unreleased
 
-No changes yet.
+### Added
+
+- `server.MountNative` and `server.MountNativeChecked` preserve concrete native
+  runner types while mounting them through the dependency-neutral lifecycle.
+- A source-level dependency boundary test prevents `server` production code
+  from importing concrete transport implementations.
+- `core.RouterConfig.ErrorObserver` receives payload-free handler, panic, and
+  error-response diagnostics while preserving original error chains.
+
+### Changed
+
+- `server` no longer imports every built-in protocol. Applications now create
+  selected transports in their own packages and attach message transports with
+  `Server.Mount` or native runners with `MountNative`/`MountRunner`. This is a
+  pre-1.0 source change: replace `app.HTTP(...)`, `app.TCP(...)`, and the other
+  protocol convenience methods with explicit protocol construction and
+  mounting. Runtime lifecycle, middleware, readiness, validation, and shutdown
+  semantics are unchanged.
+- The reference app now exposes distinct `/livez` and `/readyz` probes, keeps
+  `/health` as a readiness alias, and applies conservative driver-specific SQL
+  connection-pool defaults with command-line overrides.
+- Generated services expose `/livez`, `/readyz`, and a `/healthz` readiness
+  alias instead of presenting one ambiguous static health response.
+
+### Fixed
+
+- Router handler and panic paths no longer discard failures while sending the
+  safe `MsgError` response; observers receive the response failure and rejected
+  dispatches retain both errors through `errors.Is`/`errors.As`.
+- HTTP, HTTPS, and SSE force-close remaining non-hijacked HTTP connections when
+  graceful shutdown fails or reaches its deadline, while preserving the
+  shutdown error for the caller.
+- The reference app no longer reports readiness while an enabled SQL resource
+  is unhealthy, and it no longer leaves the SQL pool unbounded by default.
 
 ## [0.1.0] - 2026-07-24
 

@@ -43,14 +43,17 @@ func RegisterGRPCModules(endpoint *grpcx.Server) {
 // MountOptionalProtocolModules mounts optional non-HTTP modules for the example.
 func MountOptionalProtocolModules(app *server.Server, config Config) {
 	if config.UDPAddr != "" {
-		udpEndpoint := app.UDP(config.UDPAddr, udp.Config{
+		udpEndpoint := app.Mount(udp.New(udp.Config{
+			Addr:          config.UDPAddr,
 			Codec:         codec.KProV1(),
 			MaxPacketSize: 2048,
-		}).Use(middleware.Recover(), middleware.MaxPayload(1500))
+		})).Use(middleware.Recover(), middleware.MaxPayload(1500))
 		RegisterUDPModules(udpEndpoint)
 	}
 	if config.GRPCAddr != "" {
-		grpcEndpoint := app.GRPC(config.GRPCAddr).Use(middleware.Recover())
+		grpcEndpoint := grpcx.NewServer(config.GRPCAddr)
+		app.MountRunner(grpcEndpoint)
+		grpcEndpoint.Use(middleware.Recover())
 		RegisterGRPCModules(grpcEndpoint)
 	}
 }

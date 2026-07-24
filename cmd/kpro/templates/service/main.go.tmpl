@@ -48,16 +48,26 @@ func run() (returnErr error) {
 		zapx.Middleware(logger),
 		middleware.MaxPayload(1<<20),
 	)
-	httpEndpoint := app.HTTP(":8080", httpx.Config{
+	httpEndpoint := server.MountNative(app, httpx.New(httpx.Config{
+		Addr:            ":8080",
 		ReadTimeout:     5 * time.Second,
 		WriteTimeout:    10 * time.Second,
 		IdleTimeout:     60 * time.Second,
 		ShutdownTimeout: 10 * time.Second,
 		MaxBodyBytes:    1 << 20,
-	})
-	httpEndpoint.Get("/healthz", func(ctx *httpx.Context) error {
-		return ctx.JSON(http.StatusOK, map[string]string{"status": "ok"})
-	})
+	}))
+	liveness := func(ctx *httpx.Context) error {
+		return ctx.JSON(http.StatusOK, map[string]string{"status": "alive"})
+	}
+	readiness := func(ctx *httpx.Context) error {
+		return ctx.JSON(http.StatusOK, map[string]string{
+			"status":       "ready",
+			"dependencies": "none",
+		})
+	}
+	httpEndpoint.Get("/livez", liveness)
+	httpEndpoint.Get("/readyz", readiness)
+	httpEndpoint.Get("/healthz", readiness)
 	httpEndpoint.Get("/hello", func(ctx *httpx.Context) error {
 		return ctx.JSON(http.StatusOK, map[string]string{"message": "hello from {{.ServiceName}}"})
 	})

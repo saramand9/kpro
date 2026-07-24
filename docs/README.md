@@ -26,6 +26,7 @@ Start with the quickstart and golden path. The remaining guides separate impleme
 
 | Document | Purpose |
 | --- | --- |
+| [Dependency Boundaries](dependency-boundaries.md) | Keep the common server lifecycle independent from concrete protocols and decide when optional modules are justified. |
 | [Extending KPro](extending-kpro.md) | Implement descriptors/validation, transports, runners, codecs, middleware, health checks, and database adapters. |
 | [Invocation Middleware Design](invocation-middleware-design.md) | Unified `core.Invocation` middleware model and protocol bridges. |
 

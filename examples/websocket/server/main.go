@@ -21,7 +21,11 @@ func main() {
 	flag.Parse()
 
 	app := server.New(server.Config{Name: "websocket-example"})
-	app.WebSocket(*addr, *path, websocket.Config{Codec: codec.KProV1()}).
+	app.Mount(websocket.New(websocket.Config{
+		Addr:  *addr,
+		Path:  *path,
+		Codec: codec.KProV1(),
+	})).
 		Use(middleware.Recover()).
 		Handle(msgid.Echo, echo)
 

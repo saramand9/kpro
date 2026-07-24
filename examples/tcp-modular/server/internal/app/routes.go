@@ -20,10 +20,11 @@ type MessageModule interface {
 }
 
 func RegisterRoutes(app *server.Server, cfg Config) {
-	endpoint := app.TCP(cfg.Addr, tcp.Config{
+	endpoint := app.Mount(tcp.New(tcp.Config{
+		Addr:         cfg.Addr,
 		Codec:        codec.KProV1(),
 		MaxFrameSize: 64 * 1024,
-	}).Use(middleware.Recover(), middleware.MaxPayload(64*1024))
+	})).Use(middleware.Recover(), middleware.MaxPayload(64*1024))
 
 	registerMessages(endpoint, echo.Module{})
 }

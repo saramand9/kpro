@@ -250,7 +250,9 @@ func TestServerUseAppliesToHTTPEndpoint(t *testing.T) {
 	})
 
 	addr := freeServerTestTCPAddr(t)
-	app.HTTP(addr).Get("/middleware", func(ctx *httpx.Context) error {
+	endpoint := httpx.New(httpx.Config{Addr: addr})
+	app.MountRunner(endpoint)
+	endpoint.Get("/middleware", func(ctx *httpx.Context) error {
 		return ctx.Text(http.StatusOK, "ok")
 	})
 	errCh := startServerTestApp(t, app)
@@ -266,7 +268,8 @@ func TestServerUseAppliesToHTTPEndpoint(t *testing.T) {
 
 func TestServerUseAppliesToHTTP3Endpoint(t *testing.T) {
 	app := New()
-	endpoint := app.HTTP3("127.0.0.1:0", http3x.Config{})
+	endpoint := http3x.New(http3x.Config{Addr: "127.0.0.1:0"})
+	app.MountRunner(endpoint)
 	callSeen := false
 	app.Use(func(next core.InvocationHandler) core.InvocationHandler {
 		return func(ctx core.Invocation) error {
@@ -310,7 +313,9 @@ func TestServerUseAppliesToSSEEndpoint(t *testing.T) {
 	})
 
 	addr := freeServerTestTCPAddr(t)
-	app.SSE(addr, "/events").Handle(func(ctx *sse.Context) error {
+	endpoint := sse.New(sse.Config{Addr: addr, Path: "/events"})
+	app.MountRunner(endpoint)
+	endpoint.Handle(func(ctx *sse.Context) error {
 		return ctx.Send("message", []byte("ok"))
 	})
 	errCh := startServerTestApp(t, app)

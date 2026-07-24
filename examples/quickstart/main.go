@@ -41,13 +41,15 @@ func main() {
 		middleware.MaxPayload(maxBodyBytes),
 	)
 
-	app.HTTP(*addr, httpx.Config{
+	httpEndpoint := server.MountNative(app, httpx.New(httpx.Config{
+		Addr:            *addr,
 		ReadTimeout:     5 * time.Second,
 		WriteTimeout:    10 * time.Second,
 		IdleTimeout:     60 * time.Second,
 		ShutdownTimeout: shutdownWindow,
 		MaxBodyBytes:    maxBodyBytes,
-	}).
+	}))
+	httpEndpoint.
 		Get("/health", func(ctx *httpx.Context) error {
 			return ctx.Text(http.StatusOK, "ok\n")
 		}).

@@ -8,6 +8,7 @@ import (
 
 	gormstore "github.com/saramand9/kpro/database/gorm"
 	"github.com/saramand9/kpro/server"
+	"github.com/saramand9/kpro/transport/httpx"
 )
 
 // Config controls mounted routes for the GORM HTTP example.
@@ -23,7 +24,8 @@ func RegisterRoutes(ctx context.Context, app *server.Server, database *gormstore
 		return err
 	}
 
-	httpEndpoint := app.HTTP(config.HTTPAddr)
+	httpEndpoint := httpx.New(httpx.Config{Addr: config.HTTPAddr})
+	app.MountRunner(httpEndpoint)
 	if err := RegisterHTTPModules(httpEndpoint, NewGORMStores(database)); err != nil {
 		return err
 	}

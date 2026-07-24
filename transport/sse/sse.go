@@ -104,6 +104,9 @@ type Endpoint struct {
 	active     int64
 	ready      chan struct{}
 	readyOnce  sync.Once
+
+	forceCloseOnce sync.Once
+	forceCloseErr  error
 }
 
 // New creates an SSE endpoint with normalized defaults.
@@ -237,11 +240,44 @@ func (e *Endpoint) Shutdown(ctx context.Context) error {
 	e.mu.Unlock()
 	if server == nil {
 		if listener != nil {
-			return listener.Close()
+			return ignoreServerClosed(listener.Close())
 		}
 		return nil
 	}
-	return server.Shutdown(ctx)
+	shutdownErr := ignoreServerClosed(server.Shutdown(ctx))
+	var listenerErr error
+	if listener != nil {
+		listenerErr = ignoreServerClosed(listener.Close())
+	}
+	gracefulErr := errors.Join(shutdownErr, listenerErr)
+	if gracefulErr == nil {
+		return nil
+	}
+	return errors.Join(gracefulErr, e.forceClose())
+}
+
+// forceClose immediately closes the listener and active non-hijacked HTTP
+// connections after a graceful shutdown failure. Hijacked connections are
+// caller-owned under net/http and remain outside Endpoint shutdown. A
+// successful graceful drain never enters this path.
+func (e *Endpoint) forceClose() error {
+	e.forceCloseOnce.Do(func() {
+		e.mu.RLock()
+		server := e.server
+		listener := e.listener
+		e.mu.RUnlock()
+
+		var serverErr error
+		if server != nil {
+			serverErr = ignoreServerClosed(server.Close())
+		}
+		var listenerErr error
+		if listener != nil {
+			listenerErr = ignoreServerClosed(listener.Close())
+		}
+		e.forceCloseErr = errors.Join(serverErr, listenerErr)
+	})
+	return e.forceCloseErr
 }
 
 func (e *Endpoint) connContext(ctx context.Context, conn net.Conn) context.Context {
@@ -582,7 +618,7 @@ func normalizeConfig(config Config) Config {
 }
 
 func ignoreServerClosed(err error) error {
-	if errors.Is(err, http.ErrServerClosed) {
+	if errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) {
 		return nil
 	}
 	return err
