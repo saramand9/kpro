@@ -12,8 +12,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/saramand9/bignet/kpro/eventing/delivery"
-	"github.com/saramand9/bignet/kpro/eventing/projector"
+	"github.com/saramand9/kpro/eventing/delivery"
+	"github.com/saramand9/kpro/eventing/projector"
 )
 
 type fakeBacklogSource struct {

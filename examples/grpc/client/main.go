@@ -10,7 +10,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/transport/grpcx"
+	"github.com/saramand9/kpro/transport/grpcx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/wrapperspb"

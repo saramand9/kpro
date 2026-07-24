@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/internal/modules/users"
-	userservice "github.com/saramand9/bignet/kpro/internal/modules/users/service"
-	"github.com/saramand9/bignet/kpro/transport/httpx"
+	"github.com/saramand9/kpro/internal/modules/users"
+	userservice "github.com/saramand9/kpro/internal/modules/users/service"
+	"github.com/saramand9/kpro/transport/httpx"
 )
 
 // CreateRequest is the public input for creating a user.

@@ -10,7 +10,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/core"
 )
 
 func TestEndpointUseWrapsNativeHTTPRoute(t *testing.T) {
@@ -231,7 +231,7 @@ func TestEndpointUseErrorReturnsHTTPError(t *testing.T) {
 	if resp.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d", resp.Code, http.StatusInternalServerError)
 	}
-	if got := resp.Body.String(); got != "blocked" {
-		t.Fatalf("body = %q", got)
+	if got := resp.Body.String(); got != core.ErrInternal.Error() {
+		t.Fatalf("body = %q, want safe internal error", got)
 	}
 }

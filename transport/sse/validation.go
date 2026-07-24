@@ -3,8 +3,8 @@ package sse
 import (
 	"errors"
 
-	transportapi "github.com/saramand9/bignet/kpro/transport"
-	"github.com/saramand9/bignet/kpro/transport/internal/configcheck"
+	transportapi "github.com/saramand9/kpro/transport"
+	"github.com/saramand9/kpro/transport/internal/configcheck"
 )
 
 var _ transportapi.Validator = (*Endpoint)(nil)

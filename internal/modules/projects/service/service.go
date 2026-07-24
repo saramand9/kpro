@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/saramand9/bignet/kpro/internal/modules/projects"
+	"github.com/saramand9/kpro/internal/modules/projects"
 )
 
 const (

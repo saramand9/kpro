@@ -6,9 +6,9 @@ import (
 	"log"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/examples/internal/msgid"
-	"github.com/saramand9/bignet/kpro/examples/internal/wire"
+	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/examples/internal/msgid"
+	"github.com/saramand9/kpro/examples/internal/wire"
 	kcpgo "github.com/xtaci/kcp-go"
 )
 

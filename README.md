@@ -1,6 +1,7 @@
 # KPro
 
-KPro is a Go network framework experiment for building a multi-transport app server behind one application-level programming model.
+KPro is a pre-1.0 Go application framework for building a multi-transport app
+server behind one application-level programming model.
 
 The design goal is:
 
@@ -29,7 +30,10 @@ SSE         implemented
 gRPC        implemented through transport/grpcx and server.GRPC
 ```
 
-Implemented means the code path and repository-level tests exist; it is not a production certification or a capacity/availability guarantee. The repository currently has no release tags and should be treated as pre-1.0 software.
+Implemented means the code path and repository-level tests exist; it is not a
+production certification or a capacity/availability guarantee. `v0.1.0` is the
+initial developer release and remains pre-1.0: pin the exact version, review
+minor-version upgrades, and validate the framework against the target workload.
 
 Developer and operational support currently includes checked server
 construction and component preflight validation, transport capability
@@ -52,7 +56,16 @@ application or platform responsibilities.
 | Understand compatibility expectations | [API Stability, Versioning, and Deprecation](docs/api-stability.md) |
 | Add a transport, middleware, codec, or database adapter | [Extending KPro](docs/extending-kpro.md) |
 
-From this checkout, create a starter service in a missing or empty directory:
+Install the exact release and create a starter service in a missing or empty
+directory:
+
+```sh
+go install github.com/saramand9/kpro/cmd/kpro@v0.1.0
+kpro new ../hello-kpro --module example.com/hello-kpro --name hello-kpro
+```
+
+For unreleased development from this checkout, use the source-mode command; it
+adds a local `replace` to the generated module:
 
 ```sh
 go run ./cmd/kpro new ../hello-kpro --module example.com/hello-kpro --name hello-kpro
@@ -234,21 +247,22 @@ Use [the quickstart](docs/quickstart.md) as the application template. The dense 
 package main
 
 import (
+	"context"
 	"log"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/middleware"
-	"github.com/saramand9/bignet/kpro/codec"
-	"github.com/saramand9/bignet/kpro/server"
-	http3x "github.com/saramand9/bignet/kpro/transport/http3"
-	"github.com/saramand9/bignet/kpro/transport/httpx"
-	"github.com/saramand9/bignet/kpro/transport/kcp"
-	quictransport "github.com/saramand9/bignet/kpro/transport/quic"
-	"github.com/saramand9/bignet/kpro/transport/sse"
-	"github.com/saramand9/bignet/kpro/transport/tcp"
-	"github.com/saramand9/bignet/kpro/transport/udp"
-	"github.com/saramand9/bignet/kpro/transport/websocket"
+	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/middleware"
+	"github.com/saramand9/kpro/codec"
+	"github.com/saramand9/kpro/server"
+	http3x "github.com/saramand9/kpro/transport/http3"
+	"github.com/saramand9/kpro/transport/httpx"
+	"github.com/saramand9/kpro/transport/kcp"
+	quictransport "github.com/saramand9/kpro/transport/quic"
+	"github.com/saramand9/kpro/transport/sse"
+	"github.com/saramand9/kpro/transport/tcp"
+	"github.com/saramand9/kpro/transport/udp"
+	"github.com/saramand9/kpro/transport/websocket"
 )
 
 const msgEcho uint32 = 100
@@ -327,7 +341,18 @@ func main() {
 			}
 		})
 
-	log.Fatal(app.ListenAndServe())
+	handle, err := app.Start(context.Background())
+	if err != nil {
+		log.Fatal(err)
+	}
+	readyCtx, cancelReady := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelReady()
+	if err := handle.WaitReady(readyCtx); err != nil {
+		log.Fatal(err)
+	}
+	if err := handle.Wait(); err != nil {
+		log.Fatal(err)
+	}
 }
 
 func echo(ctx core.Context) error {
@@ -339,7 +364,7 @@ func echo(ctx core.Context) error {
 ## Run
 
 ```powershell
-cd D:\dev\saramand9\bignet\kpro
+# Run from the repository root.
 go run .\cmd\app -tcp :8088 -kcp :8090 -udp :8089 -ws :8091 -http :8080 -sse :8081 -gorm-driver sqlite -gorm-dsn file:kpro-app.db
 ```
 
@@ -396,12 +421,17 @@ See [examples/README.md](examples/README.md) for startup commands.
 
 - TCP, KCP and QUIC are stream-oriented, so they use `codec.StreamCodec`.
 - UDP and WebSocket have message boundaries, so they use `codec.PacketCodec`.
-- HTTP/HTTPS keep native method + path routing for REST-style APIs and do not convert requests into `core.Message`.
+- HTTP/HTTPS keep native Go `ServeMux` method + path-pattern routing, including path parameters, groups, and route-local middleware; they do not convert requests into `core.Message`.
 - HTTP/3 uses the same path-routing handler model over QUIC/UDP and requires TLS certificates.
-- QUIC uses bidirectional QUIC streams as `core.Session` instances and runs KPro messages directly over them. `quic.Config.MaxStreams` limits active stream sessions; the older `MaxConnections` field is kept as a compatibility alias.
+- WebSocket upgrades default to a same-host `Origin` check when the header is
+  present; use `Config.CheckOrigin` for an explicit cross-origin allowlist.
+- HTTP/3 shutdown sends GOAWAY and drains accepted requests until its deadline.
+  Message transports instead provide a bounded stop with at-most-once replies,
+  not a reply-delivery guarantee.
+- QUIC uses bidirectional QUIC streams as `core.Session` instances and runs KPro messages directly over them. `quic.Config.MaxConnections` caps physical QUIC connections, while `MaxStreams` independently caps active bidirectional stream sessions.
 - `server.Server.Use(...)` installs unified `core.Middleware` for TCP, KCP, QUIC, UDP, WebSocket, HTTP, HTTPS, HTTP/3, SSE and gRPC endpoints mounted before or after the call.
 - `core.Middleware` runs on `core.Invocation`; TCP, KCP, QUIC, UDP and WebSocket build the invocation at real handler execution time after Router scheduling.
-- `server.NewChecked` validates server configuration, while `ListenAndServe` preflights mounted `transport.Validator` components before serving; `server.New` remains the permissive compatibility constructor.
+- `server.NewChecked` validates server configuration, while `Start`/`Run` preflight mounted `transport.Validator` components before serving; `server.New` remains the permissive compatibility constructor.
 - Built-in transports advertise mode and capabilities through `transport.Descriptor`; `transport.Describe` gives tooling a conservative fallback for older custom components.
 - `prometheusx` uses bounded transport/operation/result labels, `zapx` uses an application logger, `healthx` bounds probe responses, and every health check must honor its context.
 - `otelx` instruments invocations with an application-supplied or global provider; the application configures and owns the SDK, sampler, exporter, flush, and shutdown lifecycle.
@@ -418,7 +448,7 @@ See [examples/README.md](examples/README.md) for startup commands.
 ## Test
 
 ```powershell
-$env:GOCACHE='C:\tmp\go-build-bignet-kpro'
+$env:GOCACHE='C:\tmp\go-build-kpro'
 gofmt -l .
 go test ./...
 go vet ./...
@@ -442,5 +472,6 @@ go test ./...
 go vet ./...
 ```
 
+## License
 
-
+KPro is licensed under the [Apache License 2.0](LICENSE).

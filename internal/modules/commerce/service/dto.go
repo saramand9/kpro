@@ -3,7 +3,7 @@
 
 package service
 
-import "github.com/saramand9/bignet/kpro/internal/modules/commerce"
+import "github.com/saramand9/kpro/internal/modules/commerce"
 
 type CreateProductInput struct {
 	SKU        string

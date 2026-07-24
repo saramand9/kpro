@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -19,8 +20,9 @@ import (
 	"time"
 
 	quicgo "github.com/quic-go/quic-go"
-	"github.com/saramand9/bignet/kpro/codec"
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/codec"
+	"github.com/saramand9/kpro/core"
+	transportapi "github.com/saramand9/kpro/transport"
 )
 
 func TestQUICEchoDispatch(t *testing.T) {
@@ -160,6 +162,69 @@ func TestQUICOversizedFrameClosesWithoutDispatch(t *testing.T) {
 	}
 }
 
+func TestQUICHandlerErrorIsObservedAndClosesStreamByDefault(t *testing.T) {
+	wantErr := errors.New("quic handler failed")
+	observed := make(chan transportapi.HandlerErrorEvent, 1)
+	server, addr, stop := startQUICTestServer(t, Config{
+		Addr:           freeQUICTestAddr(t),
+		ReadTimeout:    time.Second,
+		WriteTimeout:   time.Second,
+		OnHandlerError: func(event transportapi.HandlerErrorEvent) { observed <- event },
+	}, func(core.Context) error { return wantErr })
+	defer stop()
+
+	conn := dialQUICTest(t, addr)
+	defer conn.CloseWithError(0, "")
+	stream := openQUICTestStream(t, conn)
+	defer stream.Close()
+	writeQUICTestMessage(t, stream, core.Message{ID: testMsgEcho, Seq: 19})
+	select {
+	case event := <-observed:
+		if !errors.Is(event.Err, wantErr) || event.Transport != core.TransportQUIC || event.MessageID != testMsgEcho || event.Sequence != 19 {
+			t.Fatalf("handler error event = %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("handler error was not observed")
+	}
+	assertQUICStreamClosed(t, stream)
+	waitForQUICActiveCount(t, server, 0)
+}
+
+func TestQUICSendQueueFullReturnsOverloadBeforeClosedState(t *testing.T) {
+	server := New(Config{Codec: codec.KProV1()})
+	session := &session{server: server, sendQueue: make(chan []byte), done: make(chan struct{})}
+	// Prevent this focused unit from dereferencing a real stream while retaining
+	// the Send path's close-on-overload behavior.
+	session.closeOnce.Do(func() {})
+	err := session.Send(core.Message{ID: testMsgEcho})
+	if !errors.Is(err, core.ErrSendQueueFull) {
+		t.Fatalf("Send() error = %v, want %v", err, core.ErrSendQueueFull)
+	}
+	if errors.Is(err, core.ErrClosed) {
+		t.Fatalf("Send() error = %v, must report overload rather than prior closed state", err)
+	}
+}
+
+func TestQUICRejectsNilHandlerWithoutBinding(t *testing.T) {
+	certFile, keyFile := quicTestSelfSignedCert(t)
+	server := New(Config{Addr: freeQUICTestAddr(t), CertFile: certFile, KeyFile: keyFile})
+	err := server.ListenAndServe(context.Background(), nil)
+	if !errors.Is(err, core.ErrNoHandler) {
+		t.Fatalf("ListenAndServe() error = %v, want %v", err, core.ErrNoHandler)
+	}
+	select {
+	case <-server.Ready():
+		t.Fatal("Ready() closed after nil handler startup failure")
+	default:
+	}
+	server.lifecycleMu.Lock()
+	listener := server.ln
+	server.lifecycleMu.Unlock()
+	if listener != nil {
+		t.Fatal("nil handler startup published a QUIC listener")
+	}
+}
+
 func TestContextCancellationClosesListenerAndAcceptedConnection(t *testing.T) {
 	certFile, keyFile := quicTestSelfSignedCert(t)
 	addr := freeQUICTestAddr(t)
@@ -175,10 +240,10 @@ func TestContextCancellationClosesListenerAndAcceptedConnection(t *testing.T) {
 	stream := openQUICTestStream(t, conn)
 	defer stream.Close()
 	deadline := time.Now().Add(time.Second)
-	var acceptedConnection quicgo.Connection
+	var acceptedConnection *quicgo.Conn
 	for {
 		server.connections.Range(func(key, _ interface{}) bool {
-			acceptedConnection, _ = key.(quicgo.Connection)
+			acceptedConnection, _ = key.(*quicgo.Conn)
 			return false
 		})
 		if acceptedConnection != nil {
@@ -205,30 +270,37 @@ func TestContextCancellationClosesListenerAndAcceptedConnection(t *testing.T) {
 		t.Fatal("server-side QUIC connection remained open after cancellation")
 	}
 
-	listener, err := net.ListenPacket("udp", addr)
-	if err != nil {
-		t.Fatalf("QUIC listener address remained bound: %v", err)
+	releaseDeadline := time.Now().Add(2 * time.Second)
+	for {
+		listener, err := net.ListenPacket("udp", addr)
+		if err == nil {
+			_ = listener.Close()
+			break
+		}
+		if time.Now().After(releaseDeadline) {
+			t.Fatalf("QUIC listener address remained bound: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	_ = listener.Close()
 }
 
-func TestNormalizeConfigUsesMaxStreams(t *testing.T) {
+func TestNormalizeConfigKeepsStreamAndConnectionLimitsIndependent(t *testing.T) {
 	config := normalizeConfig(Config{MaxStreams: 7, MaxConnections: 3})
 	if config.MaxStreams != 7 {
 		t.Fatalf("max streams = %d, want 7", config.MaxStreams)
 	}
-	if config.MaxConnections != 7 {
-		t.Fatalf("compat max connections = %d, want mirrored max streams 7", config.MaxConnections)
+	if config.MaxConnections != 3 {
+		t.Fatalf("max connections = %d, want 3", config.MaxConnections)
 	}
 }
 
-func TestNormalizeConfigKeepsMaxConnectionsCompatibility(t *testing.T) {
+func TestNormalizeConfigDoesNotTreatConnectionsAsStreams(t *testing.T) {
 	config := normalizeConfig(Config{MaxConnections: 5})
-	if config.MaxStreams != 5 {
-		t.Fatalf("max streams = %d, want compat max connections 5", config.MaxStreams)
+	if config.MaxStreams != DefaultMaxStreams {
+		t.Fatalf("max streams = %d, want default %d", config.MaxStreams, DefaultMaxStreams)
 	}
 	if config.MaxConnections != 5 {
-		t.Fatalf("compat max connections = %d, want 5", config.MaxConnections)
+		t.Fatalf("max connections = %d, want 5", config.MaxConnections)
 	}
 }
 
@@ -268,6 +340,121 @@ func TestTryAcquireStreamSlotIsAtomic(t *testing.T) {
 	}
 }
 
+func TestTryAcquireConnectionSlotIsAtomic(t *testing.T) {
+	server := New(Config{MaxConnections: 1})
+	const contenders = 128
+	start := make(chan struct{})
+	results := make(chan bool, contenders)
+	var wg sync.WaitGroup
+	for index := 0; index < contenders; index++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results <- server.tryAcquireConnectionSlot()
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	acquired := 0
+	for result := range results {
+		if result {
+			acquired++
+		}
+	}
+	if acquired != 1 {
+		t.Fatalf("acquired connection slots = %d, want 1", acquired)
+	}
+	if active := atomic.LoadInt64(&server.activeConns); active != 1 {
+		t.Fatalf("active connections = %d, want 1", active)
+	}
+	server.releaseConnectionSlot()
+	if active := atomic.LoadInt64(&server.activeConns); active != 0 {
+		t.Fatalf("active connections after release = %d, want 0", active)
+	}
+}
+
+func TestQUICPhysicalConnectionLimitRejectsAndReleases(t *testing.T) {
+	server, addr, stop := startQUICTestServer(t, Config{
+		Addr:           freeQUICTestAddr(t),
+		MaxConnections: 1,
+		MaxStreams:     4,
+		ReadTimeout:    time.Second,
+		WriteTimeout:   time.Second,
+	}, func(ctx core.Context) error {
+		msg := ctx.Message()
+		return ctx.Reply(msg.ID, msg.Data)
+	})
+	defer stop()
+
+	first := dialQUICTest(t, addr)
+	firstStream := openQUICTestStream(t, first)
+	waitForQUICConnectionCount(t, server, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	second, err := quicgo.DialAddr(ctx, addr, &tls.Config{
+		InsecureSkipVerify: true,
+		NextProtos:         []string{DefaultALPN},
+	}, &quicgo.Config{HandshakeIdleTimeout: time.Second})
+	cancel()
+	if err == nil {
+		defer second.CloseWithError(0, "")
+		streamCtx, streamCancel := context.WithTimeout(context.Background(), time.Second)
+		stream, streamErr := second.OpenStreamSync(streamCtx)
+		streamCancel()
+		if streamErr == nil {
+			_ = stream.SetWriteDeadline(time.Now().Add(time.Second))
+			_, writeErr := stream.Write([]byte{0x4b, 0x50})
+			_ = stream.SetReadDeadline(time.Now().Add(time.Second))
+			var one [1]byte
+			_, readErr := stream.Read(one[:])
+			if writeErr == nil && readErr == nil {
+				t.Fatal("second physical QUIC connection remained usable above MaxConnections")
+			}
+		}
+	}
+	if active := atomic.LoadInt64(&server.activeConns); active != 1 {
+		t.Fatalf("active physical connections = %d, want 1", active)
+	}
+
+	_ = firstStream.Close()
+	_ = first.CloseWithError(0, "")
+	waitForQUICConnectionCount(t, server, 0)
+
+	third := dialQUICTest(t, addr)
+	defer third.CloseWithError(0, "")
+	thirdStream := openQUICTestStream(t, third)
+	defer thirdStream.Close()
+	writeQUICTestMessage(t, thirdStream, core.Message{ID: testMsgEcho, Seq: 23, Data: []byte("released")})
+	if got := readQUICTestMessage(t, thirdStream); got.Seq != 23 || string(got.Data) != "released" {
+		t.Fatalf("response after slot release = %+v", got)
+	}
+}
+
+func TestReadyStaysOpenOnQUICStartupFailureAndShutdownBeforeStart(t *testing.T) {
+	invalid := New(Config{})
+	if err := invalid.ListenAndServe(context.Background(), func(core.Context) error { return nil }); err == nil {
+		t.Fatal("ListenAndServe() error = nil, want TLS validation error")
+	}
+	select {
+	case <-invalid.Ready():
+		t.Fatal("Ready() closed after startup failure")
+	default:
+	}
+
+	closed := New(Config{})
+	if err := closed.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	select {
+	case <-closed.Ready():
+		t.Fatal("Ready() closed after shutdown-before-start")
+	default:
+	}
+}
+
 func startQUICTestServer(t *testing.T, config Config, handler core.Handler) (*Server, string, func()) {
 	t.Helper()
 
@@ -280,7 +467,17 @@ func startQUICTestServer(t *testing.T, config Config, handler core.Handler) (*Se
 	go func() {
 		errCh <- server.ListenAndServe(ctx, handler)
 	}()
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-server.Ready():
+	case <-time.After(time.Second):
+		t.Fatal("QUIC Ready() did not close")
+	}
+	server.lifecycleMu.Lock()
+	listener := server.ln
+	server.lifecycleMu.Unlock()
+	if listener == nil {
+		t.Fatal("QUIC Ready() closed without a published listener")
+	}
 
 	stop := func() {
 		cancel()
@@ -307,7 +504,7 @@ func freeQUICTestAddr(t *testing.T) string {
 	return conn.LocalAddr().String()
 }
 
-func dialQUICTest(t *testing.T, addr string) quicgo.Connection {
+func dialQUICTest(t *testing.T, addr string) *quicgo.Conn {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -325,7 +522,7 @@ func dialQUICTest(t *testing.T, addr string) quicgo.Connection {
 	return conn
 }
 
-func openQUICTestStream(t *testing.T, conn quicgo.Connection) quicgo.Stream {
+func openQUICTestStream(t *testing.T, conn *quicgo.Conn) *quicgo.Stream {
 	t.Helper()
 
 	stream, err := openQUICTestStreamResult(conn)
@@ -335,20 +532,20 @@ func openQUICTestStream(t *testing.T, conn quicgo.Connection) quicgo.Stream {
 	return stream
 }
 
-func openQUICTestStreamResult(conn quicgo.Connection) (quicgo.Stream, error) {
+func openQUICTestStreamResult(conn *quicgo.Conn) (*quicgo.Stream, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	return conn.OpenStreamSync(ctx)
 }
 
-func writeQUICTestMessage(t *testing.T, stream quicgo.Stream, msg core.Message) {
+func writeQUICTestMessage(t *testing.T, stream *quicgo.Stream, msg core.Message) {
 	t.Helper()
 	if err := writeQUICTestMessageResult(stream, msg); err != nil {
 		t.Fatalf("write quic message: %v", err)
 	}
 }
 
-func writeQUICTestMessageResult(stream quicgo.Stream, msg core.Message) error {
+func writeQUICTestMessageResult(stream *quicgo.Stream, msg core.Message) error {
 	frame, err := codec.KProV1().Encode(msg)
 	if err != nil {
 		return fmt.Errorf("encode message: %w", err)
@@ -360,7 +557,7 @@ func writeQUICTestMessageResult(stream quicgo.Stream, msg core.Message) error {
 	return nil
 }
 
-func readQUICTestMessage(t *testing.T, stream quicgo.Stream) core.Message {
+func readQUICTestMessage(t *testing.T, stream *quicgo.Stream) core.Message {
 	t.Helper()
 	msg, err := readQUICTestMessageResult(stream)
 	if err != nil {
@@ -369,7 +566,7 @@ func readQUICTestMessage(t *testing.T, stream quicgo.Stream) core.Message {
 	return msg
 }
 
-func readQUICTestMessageResult(stream quicgo.Stream) (core.Message, error) {
+func readQUICTestMessageResult(stream *quicgo.Stream) (core.Message, error) {
 	_ = stream.SetReadDeadline(time.Now().Add(time.Second))
 	result, err := codec.KProV1().Read(stream, 64*1024)
 	if err != nil {
@@ -378,7 +575,7 @@ func readQUICTestMessageResult(stream quicgo.Stream) (core.Message, error) {
 	return result.Message, nil
 }
 
-func assertQUICStreamClosed(t *testing.T, stream quicgo.Stream) {
+func assertQUICStreamClosed(t *testing.T, stream *quicgo.Stream) {
 	t.Helper()
 	_ = stream.SetReadDeadline(time.Now().Add(time.Second))
 	var buf [1]byte
@@ -397,6 +594,18 @@ func waitForQUICActiveCount(t *testing.T, server *Server, want int64) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("active quic sessions = %d, want %d", atomic.LoadInt64(&server.active), want)
+}
+
+func waitForQUICConnectionCount(t *testing.T, server *Server, want int64) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if got := atomic.LoadInt64(&server.activeConns); got == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("active quic connections = %d, want %d", atomic.LoadInt64(&server.activeConns), want)
 }
 
 func quicTestSelfSignedCert(t *testing.T) (string, string) {

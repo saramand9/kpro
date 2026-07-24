@@ -6,7 +6,7 @@ package greeter
 import (
 	"context"
 
-	"github.com/saramand9/bignet/kpro/transport/grpcx"
+	"github.com/saramand9/kpro/transport/grpcx"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 

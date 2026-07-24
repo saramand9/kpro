@@ -1,23 +1,22 @@
 # KPro benchmark results
 
-## 2026-07-23 hot-path regression baseline
+## 2026-07-24 hot-path regression baseline
 
 Environment:
 
 ```text
 goos: windows
 goarch: amd64
-go: go1.26.4
+go: go1.26.5
 cpu: Intel(R) Core(TM) i5-14400
-source state: provisional Unreleased workspace based on b814121
+source state: v0.1.0 release-candidate tree
 ```
 
-This measurement predates the final commit for the Unreleased changes and is
-therefore provisional; refresh the source identifier after the work is
-committed. CI selects its Go version from `go.mod` (currently Go 1.21), while
-this local run used Go 1.26.4. Compare latency numbers only under the same Go
-toolchain and benchmark conditions; the checked-in budgets intentionally span
-normal CI toolchain and host variation.
+This measurement was captured from the `v0.1.0` release candidate before
+tagging. The module baseline in `go.mod` is Go 1.25.12, while this local run
+used Go 1.26.5; CI verifies both Go 1.25.12 and Go 1.26.5. Compare latency
+numbers only under the same Go toolchain and benchmark conditions; the
+checked-in budgets intentionally span normal CI toolchain and host variation.
 
 Command (the same benchmark selection enforced by CI):
 
@@ -29,12 +28,12 @@ go run ./cmd/benchguard -budget benchmark/budgets.json -input benchmark-current.
 Observed result:
 
 ```text
-BenchmarkRouterDispatchSync/no_middleware-16                 2109 ns/op    200 B/op     3 allocs/op
-BenchmarkRouterDispatchSync/one_middleware-16                1950 ns/op    200 B/op     3 allocs/op
-BenchmarkRouterDispatchSync/four_middlewares-16              1946 ns/op    200 B/op     3 allocs/op
-BenchmarkEndpointServeHTTP/direct-16                          116 ns/op    120 B/op     3 allocs/op
-BenchmarkEndpointServeHTTP/middleware-16                      195 ns/op    312 B/op     4 allocs/op
-BenchmarkEndpointServeHTTP/middleware_headers_meta-16         548 ns/op   1032 B/op    11 allocs/op
+BenchmarkRouterDispatchSync/no_middleware-16                 2101 ns/op    200 B/op     3 allocs/op
+BenchmarkRouterDispatchSync/one_middleware-16                2002 ns/op    200 B/op     3 allocs/op
+BenchmarkRouterDispatchSync/four_middlewares-16              2008 ns/op    200 B/op     3 allocs/op
+BenchmarkEndpointServeHTTP/direct-16                        129.7 ns/op    136 B/op     3 allocs/op
+BenchmarkEndpointServeHTTP/middleware-16                    194.2 ns/op    328 B/op     4 allocs/op
+BenchmarkEndpointServeHTTP/middleware_headers_meta-16       507.8 ns/op   1048 B/op    11 allocs/op
 ```
 
 These short microbenchmarks are allocation-regression evidence, not capacity
@@ -50,7 +49,7 @@ Environment:
 ```text
 goos: windows
 goarch: amd64
-pkg: github.com/saramand9/bignet/kpro/benchmark
+pkg: github.com/saramand9/kpro/benchmark
 cpu: Intel(R) Core(TM) i5-14400
 ```
 
@@ -89,7 +88,7 @@ Environment:
 ```text
 goos: windows
 goarch: amd64
-pkg: github.com/saramand9/bignet/kpro/benchmark
+pkg: github.com/saramand9/kpro/benchmark
 cpu: Intel(R) Core(TM) i5-14400
 ```
 
@@ -138,7 +137,7 @@ Environment:
 ```text
 goos: windows
 goarch: amd64
-pkg: github.com/saramand9/bignet/kpro/benchmark
+pkg: github.com/saramand9/kpro/benchmark
 cpu: Intel(R) Core(TM) i5-14400
 ```
 
@@ -187,7 +186,7 @@ Environment:
 ```text
 goos: windows
 goarch: amd64
-pkg: github.com/saramand9/bignet/kpro/benchmark
+pkg: github.com/saramand9/kpro/benchmark
 cpu: Intel(R) Core(TM) i5-14400
 ```
 
@@ -236,7 +235,7 @@ Environment:
 ```text
 goos: windows
 goarch: amd64
-pkg: github.com/saramand9/bignet/kpro/benchmark
+pkg: github.com/saramand9/kpro/benchmark
 cpu: Intel(R) Core(TM) i5-14400
 ```
 
@@ -272,7 +271,7 @@ Environment:
 ```text
 goos: windows
 goarch: amd64
-pkg: github.com/saramand9/bignet/kpro/benchmark
+pkg: github.com/saramand9/kpro/benchmark
 cpu: Intel(R) Core(TM) i5-14400
 ```
 
@@ -311,7 +310,7 @@ Environment:
 ```text
 goos: windows
 goarch: amd64
-pkg: github.com/saramand9/bignet/kpro/benchmark
+pkg: github.com/saramand9/kpro/benchmark
 cpu: Intel(R) Core(TM) i5-14400
 ```
 
@@ -392,7 +391,7 @@ Environment:
 ```text
 goos: windows
 goarch: amd64
-pkg: github.com/saramand9/bignet/kpro/benchmark
+pkg: github.com/saramand9/kpro/benchmark
 cpu: Intel(R) Core(TM) i5-14400
 ```
 

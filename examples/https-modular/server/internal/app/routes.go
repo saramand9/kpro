@@ -4,11 +4,11 @@
 package app
 
 import (
-	"github.com/saramand9/bignet/kpro/examples/https-modular/server/internal/modules/echo"
-	"github.com/saramand9/bignet/kpro/examples/https-modular/server/internal/modules/health"
-	"github.com/saramand9/bignet/kpro/examples/https-modular/server/internal/modules/users"
-	"github.com/saramand9/bignet/kpro/server"
-	"github.com/saramand9/bignet/kpro/transport/httpx"
+	"github.com/saramand9/kpro/examples/https-modular/server/internal/modules/echo"
+	"github.com/saramand9/kpro/examples/https-modular/server/internal/modules/health"
+	"github.com/saramand9/kpro/examples/https-modular/server/internal/modules/users"
+	"github.com/saramand9/kpro/server"
+	"github.com/saramand9/kpro/transport/httpx"
 )
 
 type Config struct {

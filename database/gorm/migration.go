@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/database/common/lifecycle"
+	"github.com/saramand9/kpro/database/common/lifecycle"
 	"gorm.io/gorm"
 )
 

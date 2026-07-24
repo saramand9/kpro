@@ -7,8 +7,8 @@ import (
 	"flag"
 	"log"
 
-	routeapp "github.com/saramand9/bignet/kpro/examples/udp-modular/server/internal/app"
-	"github.com/saramand9/bignet/kpro/server"
+	routeapp "github.com/saramand9/kpro/examples/udp-modular/server/internal/app"
+	"github.com/saramand9/kpro/server"
 )
 
 func main() {

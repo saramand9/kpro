@@ -10,13 +10,13 @@ without changing this startup shape.
 
 ## 1. Prerequisites
 
-- Go 1.21 or newer.
-- A checkout of this repository.
+- Go 1.25 or newer. Repository CI verifies Go 1.25.12 and 1.26.5.
+- A checkout of this repository when running the example directly or testing
+  unreleased source.
 - Port `8080` available, or another port supplied with `-addr`.
 
-The repository currently has no release tags. Run this example from the
-checkout; external consumers should pin a reviewed commit until a versioned
-release exists. See [API stability](api-stability.md).
+`v0.1.0` is the initial pre-1.0 developer release. Pin that exact version and
+review the [API stability policy](api-stability.md) before upgrading.
 
 ## 2. Start the service
 
@@ -30,31 +30,52 @@ The process logs:
 
 ```text
 quickstart starting on :8080
+quickstart ready on :8080
 ```
 
 The complete source is [examples/quickstart/main.go](../examples/quickstart/main.go).
 
-To scaffold a separate service instead, run this from the KPro checkout. The
-target must be missing or empty; the command refuses to overwrite a non-empty
-directory:
+To scaffold a separate service with the released CLI, install the exact version
+and run it outside the KPro checkout. The generated `go.mod` pins the same KPro
+release and contains no local `replace`:
 
 ```sh
+go install github.com/saramand9/kpro/cmd/kpro@v0.1.0
+kpro doctor
+kpro version
+kpro new ../hello-kpro --module example.com/hello-kpro --name hello-kpro
+cd ../hello-kpro
+go mod tidy
+go run .
+```
+
+Private-module installations also need the organization's normal Git
+credentials and `GOPRIVATE` configuration. The target must be missing or empty;
+the command refuses to overwrite a non-empty directory.
+
+For unreleased development, run the tool from a KPro checkout instead:
+
+```sh
+go run ./cmd/kpro doctor
+go run ./cmd/kpro version
 go run ./cmd/kpro new ../hello-kpro --module example.com/hello-kpro --name hello-kpro
 cd ../hello-kpro
 go mod tidy
 go run .
 ```
 
-The tool detects the current KPro checkout and writes a quoted local `replace`
-into the generated `go.mod`. When invoking an installed tool from elsewhere,
-pass `--kpro-replace <checkout>`. The current Git remote, module import path,
-and lack of release tags do not form an external `go get` installation
-contract. For a shared build, use an organization-approved checkout, vendoring
-workflow, or module proxy and pin the reviewed commit. The generated service
-includes checked construction, explicit HTTP timeouts/body limits, Zap logging,
-recovery middleware, two starter routes, process signals, and graceful
-shutdown. Review those example limits against the workload, then add real
-readiness checks, metrics/tracing, and dependency ownership before deployment.
+`doctor` prints the Go runtime, platform, main module, and available VCS
+revision. `version` prints build metadata; a checkout run reports development
+values, while release artifacts receive version, commit, and build time from
+the release pipeline.
+
+The source-mode tool detects the current KPro checkout and writes a quoted local
+`replace` into the generated `go.mod`; `--kpro-replace <checkout>` selects one
+explicitly. The generated service includes checked construction, explicit HTTP
+timeouts/body limits, Zap logging, recovery middleware, two starter routes,
+process signals, and graceful shutdown. Review those example limits against the
+workload, then add real readiness checks, metrics/tracing, and dependency
+ownership before deployment.
 
 ## 3. Call the routes
 
@@ -89,25 +110,53 @@ observability backend.
 
 ## 4. Stop gracefully
 
-Press `Ctrl+C`. The example catches the process signal, gives the server five
-seconds to drain, stops mounted runners, and then lets managed resources close.
+Press `Ctrl+C`. Use the signal context as the lifetime passed to `Server.Start`.
+Cancellation starts the configured bounded stop. In this HTTP-only example,
+`net/http` attempts to drain accepted requests within the shutdown deadline;
+managed resources close only if runner stop succeeds. Message transports have
+at-most-once shutdown semantics and do not guarantee reply drain.
 
 The relevant lifecycle is:
 
 ```go
-serveErr := make(chan error, 1)
-go func() {
-	serveErr <- app.ListenAndServe()
-}()
+baseCtx, cancelRun := context.WithCancel(context.Background())
+defer cancelRun()
+runCtx, stopSignals := signal.NotifyContext(
+	baseCtx,
+	os.Interrupt,
+	syscall.SIGTERM,
+)
+defer stopSignals()
 
-<-signalCtx.Done()
-shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-defer cancel()
-_ = app.Shutdown(shutdownCtx)
+handle, err := app.Start(runCtx)
+if err != nil {
+	return err
+}
+
+readyCtx, cancelReady := context.WithTimeout(context.Background(), 15*time.Second)
+if err := handle.WaitReady(readyCtx); err != nil {
+	cancelReady()
+	cancelRun()
+	return errors.Join(err, handle.Wait())
+}
+cancelReady()
+
+if err := handle.Wait(); err != nil &&
+	!(server.IsContextTermination(err) && runCtx.Err() != nil) {
+	return err
+}
 ```
 
-Keep the shutdown deadline longer than the longest request you intend to drain,
-but bounded so a deployment cannot wait forever.
+`RunHandle.WaitReady` returns only after every readiness-aware runner has published a
+bound listener, or returns the startup error. Legacy custom runners without
+`transport.ReadinessProvider` are considered ready when their
+`ListenAndServe` method is entered. `RunHandle.Ready()` is available for select
+loops and is pinned to one start generation; use `WaitReady` when startup
+failure must be distinguished from readiness. Keep
+`server.Config.ShutdownTimeout` longer than the longest request you intend to
+drain, but bounded so a deployment cannot wait forever. An explicit
+`Server.Shutdown(ctx)` remains available when shutdown is initiated by something
+other than cancellation of the run context.
 
 ## 5. Understand the setup
 
@@ -116,7 +165,8 @@ The example follows four steps that should remain visible in a larger service:
 1. Create one checked `server.Server` and set its automatic shutdown timeout.
 2. Register global middleware before mounting endpoints.
 3. Mount an HTTP endpoint with explicit limits and timeouts.
-4. Start once and stop through `Server.Shutdown` with a deadline.
+4. Start once with `Server.Start`, wait for `RunHandle.WaitReady`, and stop by
+   canceling the run context or by calling `Server.Shutdown` with a deadline.
 
 New applications should surface configuration errors before serving:
 
@@ -131,8 +181,8 @@ if err != nil {
 ```
 
 `server.New` remains available and applies compatibility defaults for existing
-callers. `NewChecked` validates the server config; when `ListenAndServe` starts,
-the server also aggregates `Validate` failures from mounted components that
+callers. `NewChecked` validates the server config; when `Run` starts, the
+server also aggregates `Validate` failures from mounted components that
 implement `transport.Validator` before launching any serving goroutine.
 
 Middleware registration order is outermost to innermost:
@@ -149,8 +199,11 @@ Here recovery wraps metrics, and metrics records payload-limit failures. HTTP
 handlers continue to use the native `*httpx.Context`; KPro does not force HTTP
 requests into `core.Message`.
 
-The HTTP configuration is explicit because the built-in read, write, and idle
-timeouts default to zero:
+The HTTP configuration is explicit even though zero values select bounded
+built-in defaults: 5 seconds for request headers, 30 seconds for reads and
+writes, 60 seconds for idle connections, 5 seconds for shutdown, 1 MiB for
+headers, and 4 MiB for request bodies. Explicit values make the service contract
+reviewable:
 
 ```go
 app.HTTP(":8080", httpx.Config{
@@ -165,6 +218,19 @@ app.HTTP(":8080", httpx.Config{
 These values are examples, not universal production recommendations. Select
 them from measured request sizes, handler latency, client behavior, and the
 deployment shutdown budget.
+
+Handler and middleware errors are classified at the protocol boundary. HTTP
+maps rate limiting to 429, payload limits to 413, bounded-capacity overload to
+503, and unknown or recovered failures to 500. Response bodies use stable safe
+messages rather than returning the original error text. Application
+middleware can preserve its internal cause while selecting a public category:
+
+```go
+return core.WithErrorKind(core.ErrorKindOverloaded, err)
+```
+
+Log or trace the original error inside the application. Do not use the safe
+wire message as the only diagnostic record.
 
 ## 6. Add operational integrations
 
@@ -221,6 +287,8 @@ This quick start exercises code that exists in this repository:
 - request body limits;
 - in-process metrics;
 - checked configuration and component startup validation;
+- listener readiness through `RunHandle.WaitReady`;
+- stable HTTP error classification without exposing internal error text;
 - server shutdown with a deadline.
 
 It does not establish production capacity, availability, TLS posture, external

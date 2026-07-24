@@ -6,7 +6,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/eventing/events"
+	"github.com/saramand9/kpro/eventing/events"
 )
 
 // ErrLeaseLost means a worker tried to settle a delivery after its lease was

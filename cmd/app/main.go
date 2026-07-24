@@ -5,29 +5,40 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/codec"
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/internal/app/persistence"
-	"github.com/saramand9/bignet/kpro/middleware"
-	"github.com/saramand9/bignet/kpro/platform/logx"
-	"github.com/saramand9/bignet/kpro/server"
-	http3x "github.com/saramand9/bignet/kpro/transport/http3"
-	"github.com/saramand9/bignet/kpro/transport/kcp"
-	quictransport "github.com/saramand9/bignet/kpro/transport/quic"
-	"github.com/saramand9/bignet/kpro/transport/sse"
-	"github.com/saramand9/bignet/kpro/transport/tcp"
-	"github.com/saramand9/bignet/kpro/transport/udp"
+	"github.com/saramand9/kpro/codec"
+	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/internal/app/persistence"
+	"github.com/saramand9/kpro/middleware"
+	"github.com/saramand9/kpro/platform/logx"
+	"github.com/saramand9/kpro/server"
+	http3x "github.com/saramand9/kpro/transport/http3"
+	"github.com/saramand9/kpro/transport/httpx"
+	"github.com/saramand9/kpro/transport/kcp"
+	quictransport "github.com/saramand9/kpro/transport/quic"
+	"github.com/saramand9/kpro/transport/sse"
+	"github.com/saramand9/kpro/transport/tcp"
+	"github.com/saramand9/kpro/transport/udp"
 	"go.uber.org/zap"
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Printf("kpro-app: %v", err)
+		os.Exit(1)
+	}
+}
+
+func run() (returnErr error) {
 	tcpAddr := flag.String("tcp", ":8088", "tcp listen address")
 	kcpAddr := flag.String("kcp", ":8090", "kcp listen address")
 	quicAddr := flag.String("quic", "", "quic listen address, disabled when empty")
@@ -42,8 +53,9 @@ func main() {
 	http3Key := flag.String("http3-key", "", "http3 private key file")
 	sseAddr := flag.String("sse", ":8081", "sse listen address")
 	gormDriver := flag.String("gorm-driver", "sqlite", "gorm driver: sqlite, mysql, or postgres")
-	gormDSN := flag.String("gorm-dsn", "file:kpro-app.db", "gorm data source name, disabled when empty")
+	gormDSN := flag.String("gorm-dsn", "", "gorm data source name, disabled when empty")
 	defaultLog := logx.DefaultConfig("kpro-app")
+	defaultLog.FileName = defaultAppLogFile()
 	logLevel := flag.String("log-level", defaultLog.Level, "log level: debug, info, warn, error, dpanic, panic, fatal")
 	logFile := flag.String("log-file", defaultLog.FileName, "log file path")
 	logMaxSize := flag.Int("log-max-size", defaultLog.MaxSize, "log max size in MB")
@@ -59,7 +71,7 @@ func main() {
 		MaxAge:     *logMaxAge,
 	})
 	if err != nil {
-		log.Fatalf("init logger: %v", err)
+		return fmt.Errorf("init logger: %w", err)
 	}
 	defer cleanup()
 
@@ -71,10 +83,21 @@ func main() {
 		},
 	})
 	if err != nil {
-		logger.Fatal("init gorm persistence", zap.Error(err))
+		return fmt.Errorf("init gorm persistence: %w", err)
 	}
 
-	app := server.New(server.Config{Name: "kpro-app"})
+	app, err := server.NewChecked(server.Config{
+		Name:            "kpro-app",
+		ShutdownTimeout: 10 * time.Second,
+	})
+	if err != nil {
+		return fmt.Errorf("invalid server configuration: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancelShutdown()
+		returnErr = errors.Join(returnErr, app.Shutdown(shutdownCtx))
+	}()
 	if resources.Managed() {
 		app.Manage(resources)
 	}
@@ -94,7 +117,7 @@ func main() {
 
 	if *quicAddr != "" {
 		if *quicCert == "" || *quicKey == "" {
-			logger.Fatal("quic requires -quic-cert and -quic-key")
+			return errors.New("quic requires -quic-cert and -quic-key")
 		}
 		quicEndpoint := app.QUIC(*quicAddr, quictransport.Config{
 			Codec:        codec.KProV1(),
@@ -115,12 +138,18 @@ func main() {
 	wsEndpoint := app.WebSocket(*wsAddr, "/ws").Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024))
 	registerMessageRoutes(wsEndpoint, services)
 
-	httpEndpoint := app.HTTP(*httpAddr)
+	httpEndpoint := app.HTTP(*httpAddr, httpx.Config{
+		ReadTimeout:     5 * time.Second,
+		WriteTimeout:    10 * time.Second,
+		IdleTimeout:     60 * time.Second,
+		ShutdownTimeout: 10 * time.Second,
+		MaxBodyBytes:    1 << 20,
+	})
 	registerHTTPRoutes(httpEndpoint, metrics, services)
 
 	if *http3Addr != "" {
 		if *http3Cert == "" || *http3Key == "" {
-			logger.Fatal("http3 requires -http3-cert and -http3-key")
+			return errors.New("http3 requires -http3-cert and -http3-key")
 		}
 		app.HTTP3(*http3Addr, http3x.Config{
 			CertFile: *http3Cert,
@@ -157,17 +186,25 @@ func main() {
 			}
 		})
 
-	go func() {
-		ch := make(chan os.Signal, 1)
-		signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
-		<-ch
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		logger.Info("shutdown requested")
-		if err := app.Shutdown(ctx); err != nil {
-			logger.Error("graceful shutdown failed", zap.Error(err))
+	baseCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	runCtx, stopSignals := signal.NotifyContext(baseCtx, os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	handle, err := app.Start(runCtx)
+	if err != nil {
+		return fmt.Errorf("start app server: %w", err)
+	}
+	readyCtx, cancelReady := context.WithTimeout(context.Background(), 15*time.Second)
+	if err := handle.WaitReady(readyCtx); err != nil {
+		cancelReady()
+		cancelRun()
+		runErr := handle.Wait()
+		if server.IsContextTermination(runErr) {
+			runErr = nil
 		}
-	}()
+		return errors.Join(fmt.Errorf("app server failed before readiness: %w", err), runErr)
+	}
+	cancelReady()
 
 	logger.Info("app server listening",
 		zap.String("tcp", *tcpAddr),
@@ -182,9 +219,21 @@ func main() {
 		zap.String("gorm_driver", *gormDriver),
 		zap.String("log_file", *logFile),
 	)
-	if err := app.ListenAndServe(); err != nil {
-		logger.Fatal("app server stopped", zap.Error(err))
+	if err := handle.Wait(); err != nil {
+		if server.IsContextTermination(err) && runCtx.Err() != nil {
+			return nil
+		}
+		return fmt.Errorf("app server stopped: %w", err)
 	}
+	return nil
+}
+
+func defaultAppLogFile() string {
+	base, err := os.UserCacheDir()
+	if err != nil || base == "" {
+		base = os.TempDir()
+	}
+	return filepath.Join(base, "kpro", "logs", "kpro-app.log")
 }
 
 func echo(ctx core.Context) error {

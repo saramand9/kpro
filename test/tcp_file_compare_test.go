@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/codec"
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/transport/tcp"
+	"github.com/saramand9/kpro/codec"
+	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/transport/tcp"
 )
 
 const (
@@ -304,7 +304,7 @@ func TestTCPSyncQueueFullFileTraceError(t *testing.T) {
 	sendTraced(t, sent, conn, msgC)
 
 	first := readTraced(t, clientReceived, conn)
-	if first.ID != core.MsgError || first.Seq != msgC.Seq || string(first.Data) != core.ErrDispatchQueueFull.Error() {
+	if first.ID != core.MsgError || first.Seq != msgC.Seq || string(first.Data) != core.PublicErrorMessage(core.ErrDispatchQueueFull) {
 		t.Fatalf("expected queue-full error for seq=%d, got id=%d seq=%d data=%q", msgC.Seq, first.ID, first.Seq, string(first.Data))
 	}
 	release()
@@ -318,7 +318,7 @@ func TestTCPSyncQueueFullFileTraceError(t *testing.T) {
 	expectedHandled := trace.expected("expected_server_handled.ndjson", []core.Message{msgA, msgB})
 	assertTraceFileEqual(t, expectedHandled, handled.path)
 	expectedClientReceived := trace.expected("expected_client_received.ndjson", []core.Message{
-		{ID: core.MsgError, Seq: msgC.Seq, Data: []byte(core.ErrDispatchQueueFull.Error())},
+		{ID: core.MsgError, Seq: msgC.Seq, Data: []byte(core.PublicErrorMessage(core.ErrDispatchQueueFull))},
 		msgA,
 		msgB,
 	})
@@ -345,13 +345,13 @@ func TestTCPNoHandlerFileTraceError(t *testing.T) {
 	msg := core.Message{ID: msgTraceUnknown, Seq: 1, Data: []byte("unknown")}
 	sendTraced(t, sent, conn, msg)
 	resp := readTraced(t, clientReceived, conn)
-	if resp.ID != core.MsgError || resp.Seq != msg.Seq || string(resp.Data) != core.ErrNoHandler.Error() {
+	if resp.ID != core.MsgError || resp.Seq != msg.Seq || string(resp.Data) != core.PublicErrorMessage(core.ErrNoHandler) {
 		t.Fatalf("expected no-handler error, got id=%d seq=%d data=%q", resp.ID, resp.Seq, string(resp.Data))
 	}
 
 	assertTraceFileEqual(t, sent.path, received.path)
 	expected := trace.expected("expected_client_received.ndjson", []core.Message{
-		{ID: core.MsgError, Seq: msg.Seq, Data: []byte(core.ErrNoHandler.Error())},
+		{ID: core.MsgError, Seq: msg.Seq, Data: []byte(core.PublicErrorMessage(core.ErrNoHandler))},
 	})
 	assertTraceFileEqual(t, expected, clientReceived.path)
 }
@@ -403,7 +403,7 @@ func TestTCPMaxInflightFileTraceError(t *testing.T) {
 	sendTraced(t, sent, conn, msgB)
 
 	first := readTraced(t, clientReceived, conn)
-	if first.ID != core.MsgError || first.Seq != msgB.Seq || string(first.Data) != core.ErrTooManyInflight.Error() {
+	if first.ID != core.MsgError || first.Seq != msgB.Seq || string(first.Data) != core.PublicErrorMessage(core.ErrTooManyInflight) {
 		t.Fatalf("expected inflight error for seq=%d, got id=%d seq=%d data=%q", msgB.Seq, first.ID, first.Seq, string(first.Data))
 	}
 	release()
@@ -416,7 +416,7 @@ func TestTCPMaxInflightFileTraceError(t *testing.T) {
 	expectedHandled := trace.expected("expected_server_handled.ndjson", []core.Message{msgA})
 	assertTraceFileEqual(t, expectedHandled, handled.path)
 	expectedClientReceived := trace.expected("expected_client_received.ndjson", []core.Message{
-		{ID: core.MsgError, Seq: msgB.Seq, Data: []byte(core.ErrTooManyInflight.Error())},
+		{ID: core.MsgError, Seq: msgB.Seq, Data: []byte(core.PublicErrorMessage(core.ErrTooManyInflight))},
 		msgA,
 	})
 	assertTraceFileEqual(t, expectedClientReceived, clientReceived.path)
@@ -471,7 +471,7 @@ func TestTCPAsyncQueueFullFileTraceError(t *testing.T) {
 	sendTraced(t, sent, conn, msgC)
 
 	first := readTraced(t, clientReceived, conn)
-	if first.ID != core.MsgError || first.Seq != msgC.Seq || string(first.Data) != core.ErrDispatchQueueFull.Error() {
+	if first.ID != core.MsgError || first.Seq != msgC.Seq || string(first.Data) != core.PublicErrorMessage(core.ErrDispatchQueueFull) {
 		t.Fatalf("expected async queue-full error for seq=%d, got id=%d seq=%d data=%q", msgC.Seq, first.ID, first.Seq, string(first.Data))
 	}
 	release()
@@ -485,7 +485,7 @@ func TestTCPAsyncQueueFullFileTraceError(t *testing.T) {
 	expectedHandled := trace.expected("expected_server_handled.ndjson", []core.Message{msgA, msgB})
 	assertTraceFileEqual(t, expectedHandled, handled.path)
 	expectedClientReceived := trace.expected("expected_client_received.ndjson", []core.Message{
-		{ID: core.MsgError, Seq: msgC.Seq, Data: []byte(core.ErrDispatchQueueFull.Error())},
+		{ID: core.MsgError, Seq: msgC.Seq, Data: []byte(core.PublicErrorMessage(core.ErrDispatchQueueFull))},
 		msgA,
 		msgB,
 	})

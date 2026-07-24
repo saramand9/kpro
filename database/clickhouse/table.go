@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 
-	"github.com/saramand9/bignet/kpro/database/common/readmodels"
+	"github.com/saramand9/kpro/database/common/readmodels"
 )
 
 // WriterFunc writes one analytical event.

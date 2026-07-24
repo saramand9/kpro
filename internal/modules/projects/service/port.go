@@ -6,7 +6,7 @@ package service
 import (
 	"context"
 
-	"github.com/saramand9/bignet/kpro/internal/modules/projects"
+	"github.com/saramand9/kpro/internal/modules/projects"
 )
 
 // ProjectStore is the projects module persistence port.

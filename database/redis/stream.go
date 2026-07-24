@@ -16,15 +16,29 @@ type Message struct {
 	Values map[string]any
 }
 
+// StreamOptions controls retention applied atomically by Add. A zero MaxLen
+// leaves the stream unbounded. Limit is valid only with approximate trimming.
+type StreamOptions struct {
+	MaxLen      int64
+	Approximate bool
+	Limit       int64
+}
+
 // Stream provides stream operations for one Redis key.
 type Stream struct {
-	client *Client
-	key    string
+	client  *Client
+	key     string
+	options StreamOptions
 }
 
 // NewStream creates a stream helper.
 func NewStream(client *Client, key string) *Stream {
-	return &Stream{client: client, key: key}
+	return NewStreamWithOptions(client, key, StreamOptions{})
+}
+
+// NewStreamWithOptions creates a stream helper with bounded retention.
+func NewStreamWithOptions(client *Client, key string, options StreamOptions) *Stream {
+	return &Stream{client: client, key: key, options: options}
 }
 
 // Key returns the resolved Redis stream key.
@@ -41,10 +55,32 @@ func (s *Stream) Add(ctx context.Context, values map[string]any) (string, error)
 	if redisClient == nil {
 		return "", sql.ErrConnDone
 	}
+	if err := validateStreamOptions(s.options); err != nil {
+		return "", err
+	}
 	return redisClient.XAdd(contextOrBackground(ctx), &redis.XAddArgs{
 		Stream: s.redisKey(),
+		MaxLen: s.options.MaxLen,
+		Approx: s.options.Approximate,
+		Limit:  s.options.Limit,
 		Values: values,
 	}).Result()
+}
+
+// TrimMaxLen trims the stream to at most maxLen entries and returns the number
+// removed. Approximate trimming is typically cheaper for large streams.
+func (s *Stream) TrimMaxLen(ctx context.Context, maxLen int64, approximate bool) (int64, error) {
+	redisClient := s.redis()
+	if redisClient == nil {
+		return 0, sql.ErrConnDone
+	}
+	if maxLen < 0 {
+		return 0, ErrInvalidConfig
+	}
+	if approximate {
+		return redisClient.XTrimMaxLenApprox(contextOrBackground(ctx), s.redisKey(), maxLen, 0).Result()
+	}
+	return redisClient.XTrimMaxLen(contextOrBackground(ctx), s.redisKey(), maxLen).Result()
 }
 
 // Read reads messages after id. Use "0" to read from the beginning or "$" for new messages.
@@ -148,4 +184,14 @@ func streamMessages(streams []redis.XStream) []Message {
 		}
 	}
 	return messages
+}
+
+func validateStreamOptions(options StreamOptions) error {
+	if options.MaxLen < 0 || options.Limit < 0 {
+		return ErrInvalidConfig
+	}
+	if options.Limit > 0 && (options.MaxLen == 0 || !options.Approximate) {
+		return ErrInvalidConfig
+	}
+	return nil
 }

@@ -3,7 +3,10 @@
 
 package core
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestReleaseContextClearsPooledBaseContext(t *testing.T) {
 	session := newFakeSession(1)
@@ -15,10 +18,11 @@ func TestReleaseContextClearsPooledBaseContext(t *testing.T) {
 		Meta:    map[string]any{"attempt": 1},
 	})
 	ctx.Set("key", "value")
+	ctx.setContext(context.WithValue(context.Background(), messageContextTestKey{}, "pooled"))
 
 	releaseContext(ctx)
 
-	if ctx.pooled {
+	if ctx.refs.Load() != 0 {
 		t.Fatal("released context still marked as checked out")
 	}
 	if ctx.session != nil {
@@ -30,6 +34,9 @@ func TestReleaseContextClearsPooledBaseContext(t *testing.T) {
 	if ctx.values != nil {
 		t.Fatalf("released context retained handler values: %v", ctx.values)
 	}
+	if ctx.ctx != nil {
+		t.Fatal("released context retained middleware context")
+	}
 }
 
 func TestReleaseContextDoesNotTakeOwnershipOfNewContext(t *testing.T) {
@@ -40,5 +47,18 @@ func TestReleaseContextDoesNotTakeOwnershipOfNewContext(t *testing.T) {
 
 	if ctx.Session() != session || ctx.Message().ID != 10 {
 		t.Fatal("releaseContext mutated a context not acquired from the pool")
+	}
+}
+
+func TestTransportContextWaitsForRouterOwnership(t *testing.T) {
+	ctx := AcquireTransportContext(newFakeSession(1), Message{ID: 10})
+	retainRouterContext(ctx)
+	ReleaseTransportContext(ctx)
+	if got := ctx.refs.Load(); got != 1 {
+		t.Fatalf("refs after transport release = %d, want router ref", got)
+	}
+	releaseContext(ctx)
+	if got := ctx.refs.Load(); got != 0 {
+		t.Fatalf("refs after router release = %d, want 0", got)
 	}
 }

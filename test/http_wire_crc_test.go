@@ -22,8 +22,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/transport/httpx"
+	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/transport/httpx"
 )
 
 const strictHTTPExchangeCount = 1000
@@ -178,7 +178,7 @@ func TestHTTPWireCRCTraceStrict1000(t *testing.T) {
 					return err
 				}
 				text := "handler failed:" + ctx.Query("seq")
-				resp := strictHTTPResponse{Status: http.StatusInternalServerError, ContentType: "text/plain; charset=utf-8", Body: []byte(text)}
+				resp := strictHTTPResponse{Status: http.StatusInternalServerError, ContentType: "text/plain; charset=utf-8", Body: []byte("internal error")}
 				if err := logs.serverSent.appendResponse(resp); err != nil {
 					return err
 				}
@@ -188,9 +188,7 @@ func TestHTTPWireCRCTraceStrict1000(t *testing.T) {
 
 		assertHTTPExchangesEqual(t, logs.clientSent, logs.serverReceived)
 		assertHTTPExchangesEqual(t, logs.serverSent, logs.clientReceived)
-		assertHTTPResponsesMatchRequests(t, requests, logs.clientReceived.snapshot(), http.StatusInternalServerError, func(req strictHTTPRequest) []byte {
-			return []byte("handler failed:" + strictHTTPQueryValue(req.Target, "seq"))
-		})
+		assertHTTPResponsesBody(t, logs.clientReceived.snapshot(), http.StatusInternalServerError, []byte("internal error"))
 	})
 
 	t.Run("boundary_payloads", func(t *testing.T) {
@@ -643,28 +641,51 @@ func (l *strictHTTPLog) appendRequest(req strictHTTPRequest) error {
 	return l.appendRecord(strictHTTPRequestRecord(req))
 }
 
+func (l *strictHTTPLog) appendRequests(requests []strictHTTPRequest) error {
+	records := make([]strictHTTPRecord, len(requests))
+	for i, req := range requests {
+		records[i] = strictHTTPRequestRecord(req)
+	}
+	return l.appendRecords(records)
+}
+
 func (l *strictHTTPLog) appendResponse(resp strictHTTPResponse) error {
 	return l.appendRecord(strictHTTPResponseRecord(resp))
 }
 
 func (l *strictHTTPLog) appendRecord(record strictHTTPRecord) error {
+	return l.appendRecords([]strictHTTPRecord{record})
+}
+
+func (l *strictHTTPLog) appendRecords(records []strictHTTPRecord) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	record.Index = len(l.records) + 1
-	l.records = append(l.records, record)
+	if len(records) == 0 {
+		return nil
+	}
+
+	var batch bytes.Buffer
+	base := len(l.records)
+	for i := range records {
+		records[i].Index = base + i + 1
+		line, err := json.Marshal(records[i])
+		if err != nil {
+			return err
+		}
+		batch.Write(line)
+		batch.WriteByte('\n')
+	}
 
 	file, err := os.OpenFile(l.path, os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-	line, err := json.Marshal(record)
-	if err != nil {
+	if _, err := file.Write(batch.Bytes()); err != nil {
 		return err
 	}
-	line = append(line, '\n')
-	_, err = file.Write(line)
-	return err
+	l.records = append(l.records, records...)
+	return nil
 }
 
 func (l *strictHTTPRawLog) appendRaw(data []byte) error {
@@ -729,12 +750,12 @@ func writeStrictHTTPRequestsCoalesced(t *testing.T, conn net.Conn, log *strictHT
 	var batch bytes.Buffer
 	for _, req := range requests {
 		data := canonicalHTTPRequest(req)
-		if err := log.appendRequest(req); err != nil {
-			t.Fatalf("append coalesced HTTP client request: %v", err)
-		}
 		if _, err := batch.Write(data); err != nil {
 			t.Fatalf("buffer coalesced HTTP request: %v", err)
 		}
+	}
+	if err := log.appendRequests(requests); err != nil {
+		t.Fatalf("append coalesced HTTP client requests: %v", err)
 	}
 	if err := writeFullForTest(conn, batch.Bytes()); err != nil {
 		t.Fatalf("write coalesced HTTP requests: %v", err)

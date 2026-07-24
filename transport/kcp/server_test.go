@@ -2,13 +2,15 @@ package kcp
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/codec"
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/codec"
+	"github.com/saramand9/kpro/core"
+	transportapi "github.com/saramand9/kpro/transport"
 	kcpgo "github.com/xtaci/kcp-go"
 )
 
@@ -90,6 +92,103 @@ func TestKCPOversizedFrameClosesWithoutDispatch(t *testing.T) {
 	}
 }
 
+func TestKCPHandlerErrorIsObservedAndClosesSessionByDefault(t *testing.T) {
+	wantErr := errors.New("kcp handler failed")
+	observed := make(chan transportapi.HandlerErrorEvent, 1)
+	server, addr, stop := startKCPTestServer(t, Config{
+		Addr:           freeKCPTestAddr(t),
+		ReadTimeout:    time.Second,
+		WriteTimeout:   time.Second,
+		OnHandlerError: func(event transportapi.HandlerErrorEvent) { observed <- event },
+	}, func(core.Context) error { return wantErr })
+	defer stop()
+
+	conn := dialKCPTest(t, addr)
+	defer conn.Close()
+	writeKCPTestMessage(t, conn, core.Message{ID: testMsgEcho, Seq: 17})
+	select {
+	case event := <-observed:
+		if !errors.Is(event.Err, wantErr) || event.Transport != core.TransportKCP || event.MessageID != testMsgEcho || event.Sequence != 17 {
+			t.Fatalf("handler error event = %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("handler error was not observed")
+	}
+	assertKCPConnectionClosed(t, conn)
+	waitForKCPActiveCount(t, server, 0)
+}
+
+func TestKCPHandlerErrorContinuePolicyKeepsSessionUsable(t *testing.T) {
+	wantErr := errors.New("retryable handler failure")
+	observed := make(chan transportapi.HandlerErrorEvent, 1)
+	var calls atomic.Int32
+	server, addr, stop := startKCPTestServer(t, Config{
+		Addr:               freeKCPTestAddr(t),
+		ReadTimeout:        time.Second,
+		WriteTimeout:       time.Second,
+		HandlerErrorPolicy: transportapi.HandlerErrorContinue,
+		OnHandlerError:     func(event transportapi.HandlerErrorEvent) { observed <- event },
+	}, func(ctx core.Context) error {
+		if calls.Add(1) == 1 {
+			return wantErr
+		}
+		msg := ctx.Message()
+		return ctx.Reply(msg.ID, msg.Data)
+	})
+	defer stop()
+
+	conn := dialKCPTest(t, addr)
+	defer conn.Close()
+	writeKCPTestMessage(t, conn, core.Message{ID: testMsgEcho, Seq: 1})
+	select {
+	case event := <-observed:
+		if !errors.Is(event.Err, wantErr) {
+			t.Fatalf("observed error = %v, want %v", event.Err, wantErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("handler error was not observed")
+	}
+	writeKCPTestMessage(t, conn, core.Message{ID: testMsgEcho, Seq: 2, Data: []byte("still open")})
+	if got := readKCPTestMessage(t, conn); got.Seq != 2 || string(got.Data) != "still open" {
+		t.Fatalf("response after handler error = %+v", got)
+	}
+	waitForKCPActiveCount(t, server, 1)
+}
+
+func TestKCPSendQueueFullReturnsOverloadBeforeClosedState(t *testing.T) {
+	server := New(Config{Codec: codec.KProV1()})
+	session := &session{server: server, sendQueue: make(chan []byte), done: make(chan struct{})}
+	// Prevent this focused unit from dereferencing a real KCP session while
+	// retaining the Send path's close-on-overload behavior.
+	session.closeOnce.Do(func() {})
+	err := session.Send(core.Message{ID: testMsgEcho})
+	if !errors.Is(err, core.ErrSendQueueFull) {
+		t.Fatalf("Send() error = %v, want %v", err, core.ErrSendQueueFull)
+	}
+	if errors.Is(err, core.ErrClosed) {
+		t.Fatalf("Send() error = %v, must report overload rather than prior closed state", err)
+	}
+}
+
+func TestKCPRejectsNilHandlerWithoutBinding(t *testing.T) {
+	server := New(Config{Addr: freeKCPTestAddr(t)})
+	err := server.ListenAndServe(context.Background(), nil)
+	if !errors.Is(err, core.ErrNoHandler) {
+		t.Fatalf("ListenAndServe() error = %v, want %v", err, core.ErrNoHandler)
+	}
+	select {
+	case <-server.Ready():
+		t.Fatal("Ready() closed after nil handler startup failure")
+	default:
+	}
+	server.lifecycleMu.Lock()
+	listener := server.ln
+	server.lifecycleMu.Unlock()
+	if listener != nil {
+		t.Fatal("nil handler startup published a KCP listener")
+	}
+}
+
 func startKCPTestServer(t *testing.T, config Config, handler core.Handler) (*Server, string, func()) {
 	t.Helper()
 	server := New(config)
@@ -98,7 +197,17 @@ func startKCPTestServer(t *testing.T, config Config, handler core.Handler) (*Ser
 	go func() {
 		errCh <- server.ListenAndServe(ctx, handler)
 	}()
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-server.Ready():
+	case <-time.After(time.Second):
+		t.Fatal("KCP Ready() did not close")
+	}
+	server.lifecycleMu.Lock()
+	listener := server.ln
+	server.lifecycleMu.Unlock()
+	if listener == nil {
+		t.Fatal("KCP Ready() closed without a published listener")
+	}
 
 	stop := func() {
 		cancel()

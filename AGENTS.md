@@ -5,15 +5,15 @@ implementation work. It is an orientation aid, not a release contract.
 
 ## Project Snapshot
 
-KPro is a Go multi-transport application server experiment. It assembles TCP,
-KCP, QUIC, UDP, WebSocket, HTTP, HTTPS, HTTP/2, HTTP/3, SSE, and gRPC behind
-one server/runtime model while allowing protocol-native handlers where that is
-the better application interface.
+KPro is a pre-1.0 Go multi-transport application framework. It assembles TCP,
+KCP, QUIC, UDP, WebSocket, HTTP, HTTPS, HTTP/2, HTTP/3, SSE, and gRPC behind one
+server/runtime model while allowing protocol-native handlers where that is the
+better application interface.
 
-The repository is pre-1.0: it currently has no release tags and no published
-compatibility guarantee. Pin a reviewed commit for external consumption and
-read [docs/api-stability.md](docs/api-stability.md) before treating exported
-APIs as stable.
+The repository is pre-1.0. `v0.1.0` is the initial developer release, not a v1
+compatibility guarantee. Pin an exact release or reviewed commit and read
+[docs/api-stability.md](docs/api-stability.md) before treating exported APIs as
+stable.
 
 Authentication and authorization are intentionally application or gateway
 responsibilities. Do not add framework-level identity or policy features unless
@@ -88,7 +88,7 @@ gofmt -w <changed-go-files>
 go mod tidy -diff
 go vet ./...
 go test -bench=. -benchmem ./benchmark > benchmark.out
-go run ./cmd/benchguard -budgets benchmark/budgets.json -results benchmark.out
+go run ./cmd/benchguard -budget benchmark/budgets.json -input benchmark.out
 ```
 
 Only run external database integration tests when the required engines and
@@ -106,5 +106,5 @@ limits, transport capacity guards, graceful shutdown behavior, observability
 adapters, event delivery/projector operational controls, scaffolding, and
 benchmark budgets.
 
-Remaining maturity gaps are release tagging, API freeze, workload-specific load
-tests, failure-injection evidence, and production deployment records.
+Remaining maturity gaps are a v1 API freeze, workload-specific load tests,
+failure-injection evidence, and production deployment records.

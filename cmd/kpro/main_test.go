@@ -27,11 +27,55 @@ func TestNewCreatesParseableServiceWithoutOverwriting(t *testing.T) {
 	if !strings.Contains(string(goMod), "module example.com/orders") {
 		t.Fatalf("generated go.mod:\n%s", goMod)
 	}
-	if !strings.Contains(string(goMod), "replace github.com/saramand9/bignet/kpro => ") {
+	if !strings.Contains(string(goMod), "replace github.com/saramand9/kpro => ") {
 		t.Fatalf("generated go.mod has no reproducible local KPro source:\n%s", goMod)
+	}
+	if !strings.Contains(string(goMod), "go 1.25.12") {
+		t.Fatalf("generated go.mod has wrong Go baseline:\n%s", goMod)
 	}
 	if err := execute([]string{"new", target}, &output, &output); err == nil {
 		t.Fatal("second scaffold unexpectedly overwrote a non-empty target")
+	}
+}
+
+func TestReleasedCLIUsesVersionedModuleWithoutLocalReplace(t *testing.T) {
+	previousVersion, previousCommit, previousDate := version, commit, date
+	version, commit, date = "v0.1.0", "release-commit", "2026-07-24"
+	t.Cleanup(func() {
+		version, commit, date = previousVersion, previousCommit, previousDate
+	})
+	t.Chdir(t.TempDir())
+	target := filepath.Join(t.TempDir(), "released")
+	var output bytes.Buffer
+	if err := execute([]string{"new", "--module", "example.com/released", target}, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	goMod, err := os.ReadFile(filepath.Join(target, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(goMod)
+	if !strings.Contains(contents, "require "+kproModulePath+" v0.1.0") {
+		t.Fatalf("generated go.mod does not pin the release:\n%s", contents)
+	}
+	if strings.Contains(contents, "replace ") {
+		t.Fatalf("released scaffold unexpectedly contains a local replace:\n%s", contents)
+	}
+}
+
+func TestNormalizeReleaseVersion(t *testing.T) {
+	for input, want := range map[string]string{
+		"v0.1.0": "v0.1.0",
+		"0.1.0":  "v0.1.0",
+	} {
+		if got, ok := normalizeReleaseVersion(input); !ok || got != want {
+			t.Fatalf("normalizeReleaseVersion(%q) = %q/%v, want %q/true", input, got, ok, want)
+		}
+	}
+	for _, input := range []string{"", "devel", "(devel)", "not-a-version"} {
+		if got, ok := normalizeReleaseVersion(input); ok {
+			t.Fatalf("normalizeReleaseVersion(%q) = %q/true, want invalid", input, got)
+		}
 	}
 }
 
@@ -75,5 +119,19 @@ func TestNewRejectsServiceNameThatCannotBeSafelyRendered(t *testing.T) {
 	}, &output, &output)
 	if err == nil {
 		t.Fatal("unsafe service name was accepted")
+	}
+}
+
+func TestVersionAndDoctorCommands(t *testing.T) {
+	for _, command := range []string{"version", "doctor"} {
+		t.Run(command, func(t *testing.T) {
+			var output bytes.Buffer
+			if err := execute([]string{command}, &output, &output); err != nil {
+				t.Fatalf("%s: %v", command, err)
+			}
+			if output.Len() == 0 {
+				t.Fatalf("%s produced no output", command)
+			}
+		})
 	}
 }

@@ -2,15 +2,35 @@ package tcp
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/codec"
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/codec"
+	"github.com/saramand9/kpro/core"
 )
+
+func TestTCPRejectsNilHandlerWithoutBinding(t *testing.T) {
+	server := New(Config{Addr: freeTCPTestAddr(t)})
+	err := server.ListenAndServe(context.Background(), nil)
+	if !errors.Is(err, core.ErrNoHandler) {
+		t.Fatalf("ListenAndServe() error = %v, want %v", err, core.ErrNoHandler)
+	}
+	select {
+	case <-server.Ready():
+		t.Fatal("Ready() closed after nil handler startup failure")
+	default:
+	}
+	server.lifecycleMu.Lock()
+	listener := server.ln
+	server.lifecycleMu.Unlock()
+	if listener != nil {
+		t.Fatal("nil handler startup published a TCP listener")
+	}
+}
 
 func TestPartialFrameReadTimeoutClosesConnection(t *testing.T) {
 	var handled atomic.Int32
@@ -83,7 +103,17 @@ func startTCPTestServer(t *testing.T, config Config, handler core.Handler) (*Ser
 	go func() {
 		errCh <- server.ListenAndServe(ctx, handler)
 	}()
-	waitForTCPTestServer(t, config.Addr)
+	select {
+	case <-server.Ready():
+	case <-time.After(time.Second):
+		t.Fatal("TCP Ready() did not close")
+	}
+	server.lifecycleMu.Lock()
+	listener := server.ln
+	server.lifecycleMu.Unlock()
+	if listener == nil {
+		t.Fatal("TCP Ready() closed without a published listener")
+	}
 
 	stop := func() {
 		cancel()
@@ -108,22 +138,6 @@ func freeTCPTestAddr(t *testing.T) string {
 	}
 	defer ln.Close()
 	return ln.Addr().String()
-}
-
-func waitForTCPTestServer(t *testing.T, addr string) {
-	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	var lastErr error
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 20*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
-			return
-		}
-		lastErr = err
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("tcp server did not start on %s: %v", addr, lastErr)
 }
 
 func assertTCPConnectionClosed(t *testing.T, conn net.Conn) {

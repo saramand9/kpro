@@ -3,7 +3,7 @@
 
 package health
 
-import "github.com/saramand9/bignet/kpro/transport/httpx"
+import "github.com/saramand9/kpro/transport/httpx"
 
 func health(ctx *httpx.Context) error {
 	return ctx.Text(200, "ok\n")

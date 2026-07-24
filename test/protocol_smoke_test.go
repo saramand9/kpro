@@ -7,8 +7,8 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/saramand9/bignet/kpro/codec"
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/codec"
+	"github.com/saramand9/kpro/core"
 )
 
 func TestKProV1RoundTrip(t *testing.T) {

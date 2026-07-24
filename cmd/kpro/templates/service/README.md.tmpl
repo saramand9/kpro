@@ -2,9 +2,9 @@
 
 Generated with the KPro service template.
 
-KPro is currently pre-release. `go.mod` contains a local `replace` pointing to
-the checkout used to generate this service; keep it valid until a versioned
-module release is available.
+KPro is currently pre-v1. {{if .KProReplace}}`go.mod` contains a local `replace`
+pointing to the checkout used to generate this service.{{else}}`go.mod` pins
+KPro {{.KProVersion}}.{{end}}
 
 ```bash
 go mod tidy

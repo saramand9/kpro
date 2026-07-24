@@ -52,7 +52,16 @@ app.TCP(":8088", tcp.Config{
 	Use(middleware.Recover()).
 	Handle(msgEcho, echo)
 
-log.Fatal(app.ListenAndServe())
+handle, err := app.Start(context.Background())
+if err != nil {
+	log.Fatal(err)
+}
+if err := handle.WaitReady(context.Background()); err != nil {
+	log.Fatal(err)
+}
+if err := handle.Wait(); err != nil {
+	log.Fatal(err)
+}
 ```
 
 ### KCP
@@ -85,8 +94,8 @@ one full frame.
 
 QUIC uses bidirectional QUIC streams as `core.Session` instances. It listens on
 UDP, requires TLS certificates, and runs KPro messages directly over each
-stream. `quictransport.Config.MaxStreams` limits active stream sessions; the
-older `MaxConnections` field is kept as a compatibility alias.
+stream. `quictransport.Config.MaxConnections` caps physical QUIC connections,
+while `MaxStreams` independently caps active stream sessions.
 
 ```go
 app.QUIC(":8444", quictransport.Config{
@@ -110,6 +119,31 @@ app.WebSocket(":8091", "/ws", websocket.Config{
 	Use(middleware.Recover()).
 	Handle(msgEcho, echo)
 ```
+
+When `CheckOrigin` is nil, a browser upgrade that includes `Origin` is accepted
+only when the origin host matches the HTTP `Host`; clients that omit `Origin`
+remain supported. Set `CheckOrigin` when the browser origin and WebSocket host
+intentionally differ, for example behind a gateway with an explicit origin
+allowlist:
+
+```go
+app.WebSocket(":8091", "/ws", websocket.Config{
+	Codec: codec.KProV1(),
+	CheckOrigin: func(r *http.Request) bool {
+		origins := r.Header.Values("Origin")
+		if len(origins) != 1 {
+			return false
+		}
+		origin, err := url.Parse(origins[0])
+		return err == nil && origin.Scheme == "https" &&
+			strings.EqualFold(origin.Host, "app.example.com")
+	},
+})
+```
+
+The callback is the complete policy. Do not use an unconditional `true` for a
+browser-facing endpoint, and do not trust forwarded host/origin headers unless
+the proxy strips untrusted values and supplies its own.
 
 ### HTTP
 
@@ -152,11 +186,19 @@ UDP through QUIC and always requires TLS certificates.
 app.HTTP3(":8443", http3x.Config{
 	CertFile: "server.crt",
 	KeyFile:  "server.key",
+	ShutdownTimeout: 10 * time.Second,
 }).
 	Get("/health", func(ctx *http3x.Context) error {
 		return ctx.Text(200, "ok\n")
 	})
 ```
+
+HTTP/3 shutdown sends GOAWAY and lets accepted requests finish until the
+shutdown context expires; expiry closes the remaining connections and returns
+the context error. Size `ShutdownTimeout` and the platform termination grace
+period from measured request duration, and make handlers observe their request
+context. This graceful request drain is different from message-transport
+shutdown, which does not guarantee reply delivery.
 
 ### SSE
 

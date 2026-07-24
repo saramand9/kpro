@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"github.com/saramand9/bignet/kpro/database/common/lifecycle"
+	"github.com/saramand9/kpro/database/common/lifecycle"
 )
 
 // Client owns a Redis client and exposes capability helpers.
@@ -70,7 +70,8 @@ func (c *Client) Cache(prefix ...string) *CacheView[any] {
 	return NewCache[any](c, prefix...)
 }
 
-// Lock returns a Redis lock helper for key.
+// Lock returns a new single-acquisition Redis lease helper for key. The lease
+// is token-owned but not fenced; see Lock for the correctness boundary.
 func (c *Client) Lock(key string, ttl time.Duration) *Lock {
 	return NewLock(c, key, ttl)
 }
@@ -78,6 +79,11 @@ func (c *Client) Lock(key string, ttl time.Duration) *Lock {
 // Stream returns a Redis stream helper for key.
 func (c *Client) Stream(key string) *Stream {
 	return NewStream(c, key)
+}
+
+// StreamWithOptions returns a Redis stream helper with bounded retention.
+func (c *Client) StreamWithOptions(key string, options StreamOptions) *Stream {
+	return NewStreamWithOptions(c, key, options)
 }
 
 // ZSet returns a Redis sorted-set helper for key.

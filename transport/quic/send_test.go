@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/core"
 )
 
 func TestSendAfterCloseNeverQueues(t *testing.T) {

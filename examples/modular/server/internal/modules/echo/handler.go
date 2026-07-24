@@ -4,8 +4,8 @@
 package echo
 
 import (
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/transport/httpx"
+	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/transport/httpx"
 )
 
 func httpEcho(ctx *httpx.Context) error {

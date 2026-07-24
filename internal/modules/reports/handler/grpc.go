@@ -7,7 +7,7 @@ import (
 	"context"
 	"errors"
 
-	reportservice "github.com/saramand9/bignet/kpro/internal/modules/reports/service"
+	reportservice "github.com/saramand9/kpro/internal/modules/reports/service"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"

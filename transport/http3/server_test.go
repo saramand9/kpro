@@ -13,16 +13,169 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/quic-go/quic-go"
 	qh3 "github.com/quic-go/quic-go/http3"
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/transport/httpx"
 )
+
+func TestHTTP3Disables0RTTUnlessExplicitlyEnabled(t *testing.T) {
+	disabled := New(Config{QUICConfig: &quic.Config{Allow0RTT: true}})
+	if disabled.buildQUICConfig().Allow0RTT {
+		t.Fatal("Allow0RTT = true without explicit HTTP/3 opt-in")
+	}
+	enabled := New(Config{Allow0RTT: true})
+	if !enabled.buildQUICConfig().Allow0RTT {
+		t.Fatal("Allow0RTT = false after explicit HTTP/3 opt-in")
+	}
+}
+
+func TestHTTP3ConfigUsesSafeHTTPDefaults(t *testing.T) {
+	endpoint := New(Config{})
+	if endpoint.config.HandshakeTimeout != DefaultHandshakeTimeout {
+		t.Fatalf("HandshakeTimeout = %v, want %v", endpoint.config.HandshakeTimeout, DefaultHandshakeTimeout)
+	}
+	if endpoint.config.ReadTimeout != DefaultReadTimeout {
+		t.Fatalf("ReadTimeout = %v, want %v", endpoint.config.ReadTimeout, DefaultReadTimeout)
+	}
+	if endpoint.config.WriteTimeout != DefaultWriteTimeout {
+		t.Fatalf("WriteTimeout = %v, want %v", endpoint.config.WriteTimeout, DefaultWriteTimeout)
+	}
+	if endpoint.config.IdleTimeout != DefaultIdleTimeout {
+		t.Fatalf("IdleTimeout = %v, want %v", endpoint.config.IdleTimeout, DefaultIdleTimeout)
+	}
+	if endpoint.config.MaxHeaderBytes != DefaultMaxHeaderBytes {
+		t.Fatalf("MaxHeaderBytes = %d, want %d", endpoint.config.MaxHeaderBytes, DefaultMaxHeaderBytes)
+	}
+	if endpoint.config.MaxBodyBytes != httpx.DefaultMaxBodyBytes {
+		t.Fatalf("MaxBodyBytes = %d, want %d", endpoint.config.MaxBodyBytes, httpx.DefaultMaxBodyBytes)
+	}
+	quicConfig := endpoint.buildQUICConfig()
+	if quicConfig.HandshakeIdleTimeout != DefaultHandshakeTimeout || quicConfig.MaxIdleTimeout != DefaultIdleTimeout {
+		t.Fatalf("QUIC timeouts = handshake %v idle %v", quicConfig.HandshakeIdleTimeout, quicConfig.MaxIdleTimeout)
+	}
+}
+
+func TestHTTP3PropagatesBodyAndRequestDeadlines(t *testing.T) {
+	endpoint := New(Config{
+		MaxBodyBytes: 4,
+		ReadTimeout:  time.Second,
+		WriteTimeout: 2 * time.Second,
+	})
+	endpoint.Post("/limited", func(ctx *Context) error {
+		_, err := ctx.Body()
+		return err
+	})
+	recorder := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	request := httptest.NewRequest(http.MethodPost, "/limited", strings.NewReader("toolong"))
+	request.ContentLength = -1
+	started := time.Now()
+
+	endpoint.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusRequestEntityTooLarge)
+	}
+	if recorder.readDeadline.Before(started.Add(900*time.Millisecond)) || recorder.readDeadline.After(started.Add(1100*time.Millisecond)) {
+		t.Fatalf("read deadline = %v, want about one second after %v", recorder.readDeadline, started)
+	}
+	if recorder.writeDeadline.Before(started.Add(1900*time.Millisecond)) || recorder.writeDeadline.After(started.Add(2100*time.Millisecond)) {
+		t.Fatalf("write deadline = %v, want about two seconds after %v", recorder.writeDeadline, started)
+	}
+}
+
+func TestHTTP3RouteGroupExposesPathParameterAndMiddleware(t *testing.T) {
+	endpoint := New(Config{})
+	var order []string
+	middleware := func(label string) Middleware {
+		return func(next core.InvocationHandler) core.InvocationHandler {
+			return func(invocation core.Invocation) error {
+				order = append(order, label)
+				return next(invocation)
+			}
+		}
+	}
+	endpoint.Group("/api", middleware("group")).Get("/users/{id}", func(ctx *Context) error {
+		order = append(order, "handler:"+ctx.Param("id"))
+		return ctx.Text(http.StatusOK, ctx.Param("id"))
+	}, middleware("route"))
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/users/42", nil)
+	endpoint.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "42" {
+		t.Fatalf("response = %d/%q, want 200/42", recorder.Code, recorder.Body.String())
+	}
+	if got := strings.Join(order, ","); got != "group,route,handler:42" {
+		t.Fatalf("middleware order = %q, want group,route,handler:42", got)
+	}
+}
+
+func TestHTTP3ConnectionLimiterIsAtomic(t *testing.T) {
+	limiter := &connectionLimiter{limit: 1}
+	const contenders = 128
+	start := make(chan struct{})
+	results := make(chan bool, contenders)
+	var wait sync.WaitGroup
+	for index := 0; index < contenders; index++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			results <- limiter.tryAcquire()
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+
+	acquired := 0
+	for result := range results {
+		if result {
+			acquired++
+		}
+	}
+	if acquired != 1 {
+		t.Fatalf("acquired slots = %d, want 1", acquired)
+	}
+	limiter.release()
+	if active := atomic.LoadInt64(&limiter.active); active != 0 {
+		t.Fatalf("active connections = %d, want 0", active)
+	}
+}
+
+func TestHTTP3ReadyStaysOpenOnStartupFailureAndShutdownBeforeStart(t *testing.T) {
+	invalid := New(Config{})
+	if err := invalid.ListenAndServe(context.Background()); err == nil {
+		t.Fatal("ListenAndServe() error = nil, want TLS validation error")
+	}
+	select {
+	case <-invalid.Ready():
+		t.Fatal("Ready() closed after startup failure")
+	default:
+	}
+
+	closed := New(Config{})
+	if err := closed.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	select {
+	case <-closed.Ready():
+		t.Fatal("Ready() closed after shutdown-before-start")
+	default:
+	}
+}
 
 func TestListenAndServeRejectsSecondStart(t *testing.T) {
 	endpoint, baseURL, client, stop := startHTTP3TestServer(t)
@@ -172,6 +325,96 @@ func TestHTTP3MiddlewareUsesHTTP3Transport(t *testing.T) {
 	}
 }
 
+func TestHTTP3ShutdownDrainsActiveRequest(t *testing.T) {
+	endpoint, baseURL, client, stop := startHTTP3TestServer(t)
+	defer stop()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	endpoint.Get("/drain", func(ctx *Context) error {
+		close(entered)
+		<-release
+		return ctx.Text(http.StatusOK, "drained")
+	})
+
+	responseDone := make(chan error, 1)
+	go func() {
+		resp, err := client.Get(baseURL + "/drain")
+		if err != nil {
+			responseDone <- err
+			return
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err == nil && (resp.StatusCode != http.StatusOK || string(body) != "drained") {
+			err = errors.New("unexpected drained response")
+		}
+		responseDone <- err
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("HTTP/3 handler did not start")
+	}
+
+	shutdownDone := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		shutdownDone <- endpoint.Shutdown(ctx)
+	}()
+	select {
+	case err := <-shutdownDone:
+		t.Fatalf("Shutdown returned before active request completed: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	listenerDeadline := time.Now().Add(time.Second)
+	for {
+		endpoint.mu.RLock()
+		listenerClosed := endpoint.listener == nil
+		endpoint.mu.RUnlock()
+		if listenerClosed {
+			break
+		}
+		if time.Now().After(listenerDeadline) {
+			t.Fatal("HTTP/3 shutdown did not close the QUIC listener")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer dialCancel()
+	conn, err := quic.DialAddr(
+		dialCtx,
+		strings.TrimPrefix(baseURL, "https://"),
+		qh3.ConfigureTLSConfig(&tls.Config{InsecureSkipVerify: true}),
+		&quic.Config{HandshakeIdleTimeout: 250 * time.Millisecond},
+	)
+	if err == nil {
+		_ = conn.CloseWithError(0, "test complete")
+		t.Fatal("new QUIC handshake succeeded after HTTP/3 shutdown started")
+	}
+
+	close(release)
+	select {
+	case err := <-responseDone:
+		if err != nil {
+			t.Fatalf("active request failed during shutdown: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("active request did not finish during shutdown")
+	}
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("Shutdown() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Shutdown did not finish after active request")
+	}
+}
+
 func startHTTP3TestServer(t *testing.T) (*Endpoint, string, *http.Client, func()) {
 	t.Helper()
 
@@ -191,8 +434,19 @@ func startHTTP3TestServer(t *testing.T) (*Endpoint, string, *http.Client, func()
 	go func() {
 		errCh <- endpoint.ListenAndServe(ctx)
 	}()
+	select {
+	case <-endpoint.Ready():
+	case <-time.After(2 * time.Second):
+		t.Fatal("HTTP/3 Ready() did not close")
+	}
+	endpoint.mu.RLock()
+	listener := endpoint.listener
+	endpoint.mu.RUnlock()
+	if listener == nil {
+		t.Fatal("HTTP/3 Ready() closed without a published listener")
+	}
 
-	roundTripper := &qh3.RoundTripper{
+	roundTripper := &qh3.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}
 	client := &http.Client{Transport: roundTripper, Timeout: 3 * time.Second}
@@ -212,6 +466,22 @@ func startHTTP3TestServer(t *testing.T) (*Endpoint, string, *http.Client, func()
 		}
 	}
 	return endpoint, "https://" + addr, client, stop
+}
+
+type deadlineRecorder struct {
+	*httptest.ResponseRecorder
+	readDeadline  time.Time
+	writeDeadline time.Time
+}
+
+func (r *deadlineRecorder) SetReadDeadline(deadline time.Time) error {
+	r.readDeadline = deadline
+	return nil
+}
+
+func (r *deadlineRecorder) SetWriteDeadline(deadline time.Time) error {
+	r.writeDeadline = deadline
+	return nil
 }
 
 func waitForHTTP3Server(t *testing.T, client *http.Client, url string) {

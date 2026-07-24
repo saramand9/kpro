@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/core"
 )
 
 func TestReadFrameRejectsUnmaskedClientFrame(t *testing.T) {
@@ -201,7 +201,7 @@ func TestUpgradeRejectsConnectionOverLimitBeforeHijack(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "http://example.test/ws", nil)
 	request.Header.Set("Upgrade", "websocket")
 	request.Header.Set("Connection", "Upgrade")
-	request.Header.Set("Sec-WebSocket-Key", "test-key")
+	request.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
 	request.Header.Set("Sec-WebSocket-Version", "13")
 	response := httptest.NewRecorder()
 	server.serveWS(response, request, nil)
@@ -210,6 +210,160 @@ func TestUpgradeRejectsConnectionOverLimitBeforeHijack(t *testing.T) {
 	}
 	if !bytes.Contains(response.Body.Bytes(), []byte(ErrTooManyConnections.Error())) {
 		t.Fatalf("body = %q, want connection limit error", response.Body.String())
+	}
+}
+
+func TestUpgradeRequestRequiresExactHeaderTokens(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "http://example.test/ws", nil)
+	request.Header.Set("Upgrade", "websocket")
+	request.Header.Set("Connection", "keep-alive, Upgrade")
+	if !isUpgradeRequest(request) {
+		t.Fatal("valid tokenized upgrade request was rejected")
+	}
+	request.Header.Set("Connection", "xupgrade")
+	if isUpgradeRequest(request) {
+		t.Fatal("substring connection token was accepted")
+	}
+}
+
+func TestUpgradeRejectsInvalidRequestLineAndAmbiguousSingletonHeaders(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*http.Request)
+	}{
+		{
+			name: "non GET method",
+			mutate: func(request *http.Request) {
+				request.Method = http.MethodPost
+			},
+		},
+		{
+			name: "HTTP 1.0",
+			mutate: func(request *http.Request) {
+				request.Proto = "HTTP/1.0"
+				request.ProtoMajor = 1
+				request.ProtoMinor = 0
+			},
+		},
+		{
+			name: "duplicate key",
+			mutate: func(request *http.Request) {
+				request.Header.Add("Sec-WebSocket-Key", "MDEyMzQ1Njc4OWFiY2RlZg==")
+			},
+		},
+		{
+			name: "duplicate version",
+			mutate: func(request *http.Request) {
+				request.Header.Add("Sec-WebSocket-Version", "13")
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "http://example.test/ws", nil)
+			request.Header.Set("Upgrade", "websocket")
+			request.Header.Set("Connection", "Upgrade")
+			request.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+			request.Header.Set("Sec-WebSocket-Version", "13")
+			tt.mutate(request)
+
+			response := httptest.NewRecorder()
+			New(Config{}).serveWS(response, request, nil)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
+			}
+		})
+	}
+}
+
+func TestWebSocketKeyValidation(t *testing.T) {
+	if !validWebSocketKey("dGhlIHNhbXBsZSBub25jZQ==") {
+		t.Fatal("valid 16-byte websocket key was rejected")
+	}
+	for _, key := range []string{"", "test-key", "c2hvcnQ="} {
+		if validWebSocketKey(key) {
+			t.Fatalf("invalid websocket key %q was accepted", key)
+		}
+	}
+}
+
+func TestDefaultOriginPolicyRequiresSameHost(t *testing.T) {
+	server := New(Config{})
+	request := httptest.NewRequest(http.MethodGet, "http://example.test/ws", nil)
+	if !server.originAllowed(request) {
+		t.Fatal("non-browser request without Origin was rejected")
+	}
+	request.Header.Set("Origin", "https://example.test")
+	if !server.originAllowed(request) {
+		t.Fatal("same-host Origin was rejected")
+	}
+	request.Header.Set("Origin", "https://attacker.test")
+	if server.originAllowed(request) {
+		t.Fatal("cross-host Origin was accepted")
+	}
+
+	overridden := New(Config{CheckOrigin: func(*http.Request) bool { return true }})
+	if !overridden.originAllowed(request) {
+		t.Fatal("explicit origin policy was not honored")
+	}
+}
+
+func TestSessionRepliesToCloseBeforeClosingConnection(t *testing.T) {
+	server := New(Config{WriteTimeout: time.Second})
+	atomic.StoreInt64(&server.active, 1)
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	session := &session{
+		id:        1,
+		server:    server,
+		raw:       serverConn,
+		reader:    bufio.NewReader(serverConn),
+		sendQueue: make(chan wsFrame, 1),
+		done:      make(chan struct{}),
+	}
+	server.sessions.Store(session.id, session)
+	session.start(func(core.Context) error { return nil })
+
+	closeBody := closePayload(1000, "done")
+	if _, err := clientConn.Write(maskedClientFrame(0x80|opClose, closeBody)); err != nil {
+		t.Fatalf("write close frame: %v", err)
+	}
+	if err := clientConn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var header [2]byte
+	if _, err := io.ReadFull(clientConn, header[:]); err != nil {
+		t.Fatalf("read close reply header: %v", err)
+	}
+	if header[0]&0x0f != opClose {
+		t.Fatalf("reply opcode = %d, want close", header[0]&0x0f)
+	}
+	payload := make([]byte, int(header[1]&0x7f))
+	if _, err := io.ReadFull(clientConn, payload); err != nil {
+		t.Fatalf("read close reply payload: %v", err)
+	}
+	if !bytes.Equal(payload, closeBody) {
+		t.Fatalf("close reply payload = %x, want %x", payload, closeBody)
+	}
+	select {
+	case <-session.Done():
+	case <-time.After(time.Second):
+		t.Fatal("session did not close after close reply")
+	}
+}
+
+func TestClosePayloadValidation(t *testing.T) {
+	if err := validateClosePayload(nil); err != nil {
+		t.Fatalf("empty close payload error = %v", err)
+	}
+	for _, payload := range [][]byte{
+		{0x03},
+		closePayload(1005, "reserved"),
+		{0x03, 0xe8, 0xff},
+	} {
+		if err := validateClosePayload(payload); !errors.Is(err, ErrBadFrame) {
+			t.Fatalf("payload %x error = %v, want %v", payload, err, ErrBadFrame)
+		}
 	}
 }
 
@@ -232,19 +386,18 @@ func TestListenAndServeRejectsSecondStartAndStopsWithNilContext(t *testing.T) {
 	server := New(Config{Addr: addr})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- server.ListenAndServe(nil, nil)
+		errCh <- server.ListenAndServe(nil, func(core.Context) error { return nil })
 	}()
-	deadline := time.Now().Add(time.Second)
-	for {
-		conn, dialErr := net.DialTimeout("tcp", addr, 20*time.Millisecond)
-		if dialErr == nil {
-			_ = conn.Close()
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("WebSocket server did not start: %v", dialErr)
-		}
-		time.Sleep(10 * time.Millisecond)
+	select {
+	case <-server.Ready():
+	case <-time.After(time.Second):
+		t.Fatal("WebSocket Ready() did not close")
+	}
+	server.lifecycleMu.Lock()
+	bound := server.listener != nil
+	server.lifecycleMu.Unlock()
+	if !bound {
+		t.Fatal("WebSocket Ready() closed without a published listener")
 	}
 	if err := server.ListenAndServe(context.Background(), nil); !errors.Is(err, core.ErrAlreadyStarted) {
 		t.Fatalf("second ListenAndServe() error = %v, want %v", err, core.ErrAlreadyStarted)
@@ -259,6 +412,25 @@ func TestListenAndServeRejectsSecondStartAndStopsWithNilContext(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("WebSocket server did not stop")
+	}
+}
+
+func TestWebSocketRejectsNilHandlerWithoutBinding(t *testing.T) {
+	server := New(Config{Addr: "127.0.0.1:0"})
+	err := server.ListenAndServe(context.Background(), nil)
+	if !errors.Is(err, core.ErrNoHandler) {
+		t.Fatalf("ListenAndServe() error = %v, want %v", err, core.ErrNoHandler)
+	}
+	select {
+	case <-server.Ready():
+		t.Fatal("Ready() closed after nil handler startup failure")
+	default:
+	}
+	server.lifecycleMu.Lock()
+	listener := server.listener
+	server.lifecycleMu.Unlock()
+	if listener != nil {
+		t.Fatal("nil handler startup published a WebSocket listener")
 	}
 }
 

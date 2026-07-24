@@ -5,14 +5,14 @@ package main
 
 import (
 	"flag"
-	"github.com/saramand9/bignet/kpro/examples/internal/msgid"
+	"github.com/saramand9/kpro/examples/internal/msgid"
 	"log"
 
-	"github.com/saramand9/bignet/kpro/codec"
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/middleware"
-	"github.com/saramand9/bignet/kpro/server"
-	"github.com/saramand9/bignet/kpro/transport/udp"
+	"github.com/saramand9/kpro/codec"
+	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/middleware"
+	"github.com/saramand9/kpro/server"
+	"github.com/saramand9/kpro/transport/udp"
 )
 
 func main() {

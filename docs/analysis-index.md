@@ -18,9 +18,9 @@ server. The current implementation includes:
 - service scaffolding through `cmd/kpro`;
 - benchmark budget enforcement through `cmd/benchguard`.
 
-The repository does not currently provide release tags, a v1 compatibility
-guarantee, production certification, identity/policy management, telemetry
-backends, or workload-specific capacity promises.
+The repository provides the initial `v0.1.0` developer release, but not a v1
+compatibility guarantee, production certification, identity/policy management,
+telemetry backends, or workload-specific capacity promises.
 
 ## Fast Analysis Route
 
@@ -108,7 +108,7 @@ Benchmark budget check:
 
 ```sh
 go test -bench=. -benchmem ./benchmark > benchmark.out
-go run ./cmd/benchguard -budgets benchmark/budgets.json -results benchmark.out
+go run ./cmd/benchguard -budget benchmark/budgets.json -input benchmark.out
 ```
 
 Database integration compile or execution depends on external engine
@@ -133,10 +133,11 @@ implemented transport or adapter is a production certification.
 
 ## Known Boundaries
 
-- No release tags or v1 compatibility guarantee yet.
+- `v0.1.0` is the initial developer release; there is no v1 compatibility
+  guarantee yet.
 - Authentication and authorization remain outside the framework core.
-- HTTP routing is exact method/path matching; route parameters and groups are
-  not a built-in router feature.
+- HTTP and HTTP/3 routing uses Go `ServeMux` patterns and includes checked
+  registration, path parameters, route groups, and route-local middleware.
 - Prometheus, OTel, Zap, and health helpers are integration points; the
   application owns exporter/backend/sampler/log-retention policy.
 - Performance budgets are regression thresholds for repository benchmarks, not

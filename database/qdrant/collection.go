@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"net/url"
 
-	"github.com/saramand9/bignet/kpro/database/common/readmodels"
+	"github.com/saramand9/kpro/database/common/readmodels"
 )
 
 // CollectionView implements a typed Qdrant vector collection.

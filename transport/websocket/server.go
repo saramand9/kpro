@@ -14,15 +14,18 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
-	"github.com/saramand9/bignet/kpro/codec"
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/transport/internal/serveutil"
-	"github.com/saramand9/bignet/kpro/transport/internal/streamutil"
+	"github.com/saramand9/kpro/codec"
+	"github.com/saramand9/kpro/core"
+	transportapi "github.com/saramand9/kpro/transport"
+	"github.com/saramand9/kpro/transport/internal/serveutil"
+	"github.com/saramand9/kpro/transport/internal/streamutil"
 )
 
 const (
@@ -50,6 +53,7 @@ var (
 	ErrFragmentedControlFrame = errors.New("websocket control frame must not be fragmented")
 	ErrTooManyConnections     = errors.New("websocket connection limit reached")
 	ErrNotAccepting           = errors.New("websocket server is not accepting upgrades")
+	ErrOriginNotAllowed       = errors.New("websocket origin not allowed")
 )
 
 // Config controls WebSocket listener, path, codec, queue, and timeout settings.
@@ -72,6 +76,15 @@ type Config struct {
 	WriteTimeout time.Duration
 	// HandshakeTimeout bounds reading the HTTP upgrade headers.
 	HandshakeTimeout time.Duration
+	// CheckOrigin validates the HTTP Origin header before an upgrade. Nil uses
+	// a same-host policy when Origin is present and permits non-browser clients
+	// that omit Origin. A non-nil callback is the complete policy and should
+	// trust forwarded host/origin data only when a proxy has sanitized it.
+	CheckOrigin func(*http.Request) bool
+	// HandlerErrorPolicy defaults to closing the affected session.
+	HandlerErrorPolicy transportapi.HandlerErrorPolicy
+	// OnHandlerError observes handler failures before the policy is applied.
+	OnHandlerError transportapi.HandlerErrorObserver
 }
 
 // Server upgrades HTTP requests to WebSocket sessions and dispatches KPro messages.
@@ -79,6 +92,7 @@ type Server struct {
 	config    Config
 	rawConfig Config
 	server    *http.Server
+	listener  net.Listener
 
 	lifecycleMu sync.Mutex
 	accepting   bool
@@ -86,14 +100,21 @@ type Server struct {
 	upgrades    sync.WaitGroup
 	upgrading   sync.Map
 
-	nextID   uint64
-	active   int64
-	sessions sync.Map
+	nextID    uint64
+	active    int64
+	sessions  sync.Map
+	ready     chan struct{}
+	readyOnce sync.Once
 }
 
 // New creates a WebSocket transport with normalized defaults.
 func New(config Config) *Server {
-	return &Server{config: normalizeConfig(config), rawConfig: config, accepting: true}
+	return &Server{
+		config:    normalizeConfig(config),
+		rawConfig: config,
+		accepting: true,
+		ready:     make(chan struct{}),
+	}
 }
 
 // NewServer is an alias for New.
@@ -106,6 +127,14 @@ func (s *Server) Name() string {
 	return "websocket"
 }
 
+// Ready is closed once the HTTP upgrade listener is successfully bound and published.
+func (s *Server) Ready() <-chan struct{} {
+	if s == nil {
+		return nil
+	}
+	return s.ready
+}
+
 // ListenAndServe starts the WebSocket HTTP server until ctx is cancelled or serving fails.
 func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error {
 	if err := s.Validate(); err != nil {
@@ -114,19 +143,24 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if err := s.claimStart(); err != nil {
+		return err
+	}
+	if handler == nil {
+		s.rollbackStart()
+		return fmt.Errorf("websocket: %w", core.ErrNoHandler)
+	}
 	server := s.buildHTTPServer(handler)
-	s.lifecycleMu.Lock()
-	if !s.accepting {
-		s.lifecycleMu.Unlock()
+	listener, err := net.Listen("tcp", s.config.Addr)
+	if err != nil {
+		s.rollbackStart()
+		return err
+	}
+	if !s.publishServer(server, listener) {
+		_ = listener.Close()
 		return ErrNotAccepting
 	}
-	if s.started {
-		s.lifecycleMu.Unlock()
-		return core.ErrAlreadyStarted
-	}
-	s.started = true
-	s.server = server
-	s.lifecycleMu.Unlock()
+	s.signalReady()
 	serveDone := make(chan struct{})
 	watcherDone := serveutil.ShutdownOnCancel(ctx, serveDone, func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -134,11 +168,43 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 		_ = s.Shutdown(shutdownCtx)
 	})
 	defer serveutil.FinishContextWatcher(serveDone, watcherDone)
-	err := server.ListenAndServe()
-	if err == http.ErrServerClosed {
+	err = server.Serve(listener)
+	if errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) {
 		return nil
 	}
 	return err
+}
+
+func (s *Server) claimStart() error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if !s.accepting {
+		return ErrNotAccepting
+	}
+	if s.started {
+		return core.ErrAlreadyStarted
+	}
+	s.started = true
+	return nil
+}
+
+func (s *Server) rollbackStart() {
+	s.lifecycleMu.Lock()
+	if s.accepting && s.listener == nil {
+		s.started = false
+	}
+	s.lifecycleMu.Unlock()
+}
+
+func (s *Server) publishServer(server *http.Server, listener net.Listener) bool {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if !s.accepting {
+		return false
+	}
+	s.server = server
+	s.listener = listener
+	return true
 }
 
 func (s *Server) buildHTTPServer(handler core.Handler) *http.Server {
@@ -161,6 +227,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.lifecycleMu.Lock()
 	s.accepting = false
 	server := s.server
+	listener := s.listener
 	s.lifecycleMu.Unlock()
 
 	s.upgrading.Range(func(key, _ interface{}) bool {
@@ -179,8 +246,20 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if server != nil {
 		serverErr = server.Shutdown(ctx)
 	}
+	if listener != nil {
+		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			serverErr = errors.Join(serverErr, err)
+		}
+	}
 	upgradeErr := waitGroupContext(ctx, &s.upgrades)
 	return errors.Join(serverErr, upgradeErr)
+}
+
+func (s *Server) signalReady() {
+	if s == nil || s.ready == nil {
+		return
+	}
+	s.readyOnce.Do(func() { close(s.ready) })
 }
 
 func waitGroupContext(ctx context.Context, group *sync.WaitGroup) error {
@@ -205,9 +284,14 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request, handler core.Ha
 		http.Error(w, ErrBadHandshake.Error(), http.StatusBadRequest)
 		return
 	}
-	key := r.Header.Get("Sec-WebSocket-Key")
-	if key == "" || r.Header.Get("Sec-WebSocket-Version") != "13" {
+	key, keyOK := singleHeaderValue(r.Header, "Sec-WebSocket-Key")
+	version, versionOK := singleHeaderValue(r.Header, "Sec-WebSocket-Version")
+	if !keyOK || !versionOK || !validWebSocketKey(key) || version != "13" {
 		http.Error(w, ErrBadHandshake.Error(), http.StatusBadRequest)
+		return
+	}
+	if !s.originAllowed(r) {
+		http.Error(w, ErrOriginNotAllowed.Error(), http.StatusForbidden)
 		return
 	}
 	if !s.beginUpgrade() {
@@ -242,7 +326,7 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request, handler core.Ha
 			return
 		}
 	}
-	accept := computeAcceptKey(key)
+	accept := computeAcceptKey(strings.TrimSpace(key))
 	_, err = fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", accept)
 	if err != nil {
 		_ = conn.Close()
@@ -325,6 +409,7 @@ type session struct {
 	sendQueue chan wsFrame
 	done      chan struct{}
 	closeOnce sync.Once
+	writeMu   sync.Mutex
 }
 
 func (s *session) ID() uint64 {
@@ -384,7 +469,7 @@ func (s *session) enqueue(frame wsFrame) error {
 		return core.ErrClosed
 	default:
 		_ = s.Close()
-		return core.ErrClosed
+		return core.ErrSendQueueFull
 	}
 }
 
@@ -405,7 +490,11 @@ func (s *session) readLoop(handler core.Handler) {
 		}
 		switch frame.opcode {
 		case opClose:
-			_ = s.enqueue(wsFrame{opcode: opClose})
+			if err := validateClosePayload(frame.payload); err != nil {
+				_ = s.writeWebSocketFrame(opClose, closePayload(1002, "protocol error"))
+				return
+			}
+			_ = s.writeWebSocketFrame(opClose, frame.payload)
 			return
 		case opPing:
 			_ = s.enqueue(wsFrame{opcode: opPong, payload: frame.payload})
@@ -420,6 +509,10 @@ func (s *session) readLoop(handler core.Handler) {
 				fragmentOpcode = frame.opcode
 				fragmentPayload = append(fragmentPayload[:0], frame.payload...)
 				continue
+			}
+			if frame.opcode == opText && !utf8.Valid(frame.payload) {
+				_ = s.writeWebSocketFrame(opClose, closePayload(1007, "invalid text"))
+				return
 			}
 			if err := s.handleMessage(handler, frame.payload); err != nil {
 				return
@@ -436,9 +529,14 @@ func (s *session) readLoop(handler core.Handler) {
 			if !frame.fin {
 				continue
 			}
+			completeOpcode := fragmentOpcode
 			completePayload := fragmentPayload
 			fragmentOpcode = 0
 			fragmentPayload = nil
+			if completeOpcode == opText && !utf8.Valid(completePayload) {
+				_ = s.writeWebSocketFrame(opClose, closePayload(1007, "invalid text"))
+				return
+			}
 			if err := s.handleMessage(handler, completePayload); err != nil {
 				return
 			}
@@ -457,21 +555,30 @@ func (s *session) handleMessage(handler core.Handler, payload []byte) error {
 		_ = s.Send(core.Message{ID: core.MsgPong, Seq: msg.Seq})
 		return nil
 	}
-	_ = handler(core.AcquireContext(s, msg))
-	return nil
+	err = invokeHandler(handler, s, msg)
+	if transportapi.ContinueAfterHandlerError(
+		s.server.config.HandlerErrorPolicy,
+		s.server.config.OnHandlerError,
+		s,
+		msg,
+		err,
+	) {
+		return nil
+	}
+	return err
+}
+
+func invokeHandler(handler core.Handler, session core.Session, msg core.Message) (err error) {
+	ctx := core.AcquireTransportContext(session, msg)
+	defer core.ReleaseTransportContext(ctx)
+	return handler(ctx)
 }
 
 func (s *session) writeLoop() {
 	for {
 		select {
 		case frame := <-s.sendQueue:
-			if s.server.config.WriteTimeout > 0 {
-				if err := s.raw.SetWriteDeadline(time.Now().Add(s.server.config.WriteTimeout)); err != nil {
-					_ = s.Close()
-					return
-				}
-			}
-			if err := writeFrame(s.raw, frame.opcode, frame.payload); err != nil {
+			if err := s.writeWebSocketFrame(frame.opcode, frame.payload); err != nil {
 				_ = s.Close()
 				return
 			}
@@ -483,6 +590,17 @@ func (s *session) writeLoop() {
 			return
 		}
 	}
+}
+
+func (s *session) writeWebSocketFrame(opcode byte, payload []byte) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if s.server.config.WriteTimeout > 0 {
+		if err := s.raw.SetWriteDeadline(time.Now().Add(s.server.config.WriteTimeout)); err != nil {
+			return err
+		}
+	}
+	return writeFrame(s.raw, opcode, payload)
 }
 
 func readFrame(r io.Reader, maxSize int) (wsFrame, error) {
@@ -576,8 +694,80 @@ func writeFrame(w io.Writer, opcode byte, payload []byte) error {
 }
 
 func isUpgradeRequest(r *http.Request) bool {
-	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") &&
-		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
+	return r != nil && r.Method == http.MethodGet && r.ProtoAtLeast(1, 1) &&
+		headerHasToken(r.Header, "Upgrade", "websocket") &&
+		headerHasToken(r.Header, "Connection", "upgrade")
+}
+
+func singleHeaderValue(header http.Header, name string) (string, bool) {
+	values := header.Values(name)
+	if len(values) != 1 {
+		return "", false
+	}
+	return strings.TrimSpace(values[0]), true
+}
+
+func headerHasToken(header http.Header, name, token string) bool {
+	for _, value := range header.Values(name) {
+		for _, candidate := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(candidate), token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func validWebSocketKey(key string) bool {
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(key))
+	return err == nil && len(decoded) == 16
+}
+
+func (s *Server) originAllowed(r *http.Request) bool {
+	if s.config.CheckOrigin != nil {
+		return s.config.CheckOrigin(r)
+	}
+	origins := r.Header.Values("Origin")
+	if len(origins) == 0 {
+		return true
+	}
+	if len(origins) != 1 {
+		return false
+	}
+	origin, err := url.Parse(origins[0])
+	if err != nil || origin.Host == "" {
+		return false
+	}
+	return strings.EqualFold(origin.Host, r.Host)
+}
+
+func validateClosePayload(payload []byte) error {
+	if len(payload) == 0 {
+		return nil
+	}
+	if len(payload) == 1 {
+		return ErrBadFrame
+	}
+	code := binary.BigEndian.Uint16(payload[:2])
+	if !validCloseCode(code) || !utf8.Valid(payload[2:]) {
+		return ErrBadFrame
+	}
+	return nil
+}
+
+func validCloseCode(code uint16) bool {
+	if code >= 3000 && code <= 4999 {
+		return true
+	}
+	return code == 1000 || code == 1001 || code == 1002 || code == 1003 ||
+		code == 1007 || code == 1008 || code == 1009 || code == 1010 ||
+		code == 1011 || code == 1012 || code == 1013 || code == 1014
+}
+
+func closePayload(code uint16, reason string) []byte {
+	payload := make([]byte, 2, 2+len(reason))
+	binary.BigEndian.PutUint16(payload, code)
+	return append(payload, reason...)
 }
 
 func computeAcceptKey(key string) string {

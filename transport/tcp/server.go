@@ -5,16 +5,18 @@ package tcp
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/codec"
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/transport/internal/serveutil"
-	"github.com/saramand9/bignet/kpro/transport/internal/streamutil"
+	"github.com/saramand9/kpro/codec"
+	"github.com/saramand9/kpro/core"
+	transportapi "github.com/saramand9/kpro/transport"
+	"github.com/saramand9/kpro/transport/internal/serveutil"
+	"github.com/saramand9/kpro/transport/internal/streamutil"
 )
 
 const (
@@ -42,6 +44,10 @@ type Config struct {
 	ReadTimeout time.Duration
 	// WriteTimeout is applied before each frame write.
 	WriteTimeout time.Duration
+	// HandlerErrorPolicy defaults to closing the affected session.
+	HandlerErrorPolicy transportapi.HandlerErrorPolicy
+	// OnHandlerError observes handler failures before the policy is applied.
+	OnHandlerError transportapi.HandlerErrorObserver
 }
 
 // Server accepts TCP connections and turns frames into core.Message contexts.
@@ -53,14 +59,21 @@ type Server struct {
 	accepting   bool
 	started     bool
 
-	nextID   uint64
-	active   int64
-	sessions sync.Map
+	nextID    uint64
+	active    int64
+	sessions  sync.Map
+	ready     chan struct{}
+	readyOnce sync.Once
 }
 
 // New creates a TCP transport with normalized defaults.
 func New(config Config) *Server {
-	return &Server{config: normalizeConfig(config), rawConfig: config, accepting: true}
+	return &Server{
+		config:    normalizeConfig(config),
+		rawConfig: config,
+		accepting: true,
+		ready:     make(chan struct{}),
+	}
 }
 
 // NewServer is an alias for New.
@@ -71,6 +84,14 @@ func NewServer(config Config) *Server {
 // Name returns the transport name.
 func (s *Server) Name() string {
 	return "tcp"
+}
+
+// Ready is closed once the TCP listener is successfully bound and published.
+func (s *Server) Ready() <-chan struct{} {
+	if s == nil {
+		return nil
+	}
+	return s.ready
 }
 
 // ListenAndServe accepts TCP connections until ctx is cancelled or the listener fails.
@@ -84,6 +105,10 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 	if err := s.claimStart(); err != nil {
 		return err
 	}
+	if handler == nil {
+		s.rollbackStart()
+		return fmt.Errorf("tcp: %w", core.ErrNoHandler)
+	}
 	ln, err := net.Listen("tcp", s.config.Addr)
 	if err != nil {
 		s.rollbackStart()
@@ -93,6 +118,7 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 		_ = ln.Close()
 		return core.ErrClosed
 	}
+	s.signalReady()
 
 	serveDone := make(chan struct{})
 	watcherDone := serveutil.ShutdownOnCancel(ctx, serveDone, func() {
@@ -214,6 +240,13 @@ func (s *Server) releaseConnectionSlot() {
 	atomic.AddInt64(&s.active, -1)
 }
 
+func (s *Server) signalReady() {
+	if s == nil || s.ready == nil {
+		return
+	}
+	s.readyOnce.Do(func() { close(s.ready) })
+}
+
 type session struct {
 	id        uint64
 	server    *Server
@@ -256,7 +289,7 @@ func (s *session) Send(msg core.Message) error {
 		return core.ErrClosed
 	default:
 		_ = s.Close()
-		return core.ErrClosed
+		return core.ErrSendQueueFull
 	}
 }
 
@@ -295,8 +328,23 @@ func (s *session) readLoop(handler core.Handler) {
 			_ = s.Send(core.Message{ID: core.MsgPong, Seq: msg.Seq})
 			continue
 		}
-		_ = handler(core.AcquireContext(s, msg))
+		err = invokeHandler(handler, s, msg)
+		if !transportapi.ContinueAfterHandlerError(
+			s.server.config.HandlerErrorPolicy,
+			s.server.config.OnHandlerError,
+			s,
+			msg,
+			err,
+		) {
+			return
+		}
 	}
+}
+
+func invokeHandler(handler core.Handler, session core.Session, msg core.Message) (err error) {
+	ctx := core.AcquireTransportContext(session, msg)
+	defer core.ReleaseTransportContext(ctx)
+	return handler(ctx)
 }
 
 func (s *session) writeLoop() {

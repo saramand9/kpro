@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/core"
 )
 
 func TestRecoverConvertsPanicToError(t *testing.T) {

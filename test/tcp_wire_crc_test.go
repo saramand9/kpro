@@ -19,9 +19,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/codec"
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/transport/tcp"
+	"github.com/saramand9/kpro/codec"
+	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/transport/tcp"
 )
 
 const strictWireMessageCount = 1000
@@ -118,7 +118,7 @@ func TestTCPWireCRCTraceStrict1000(t *testing.T) {
 
 		assertWireFramesEqual(t, logs.clientSent, logs.serverReceived)
 		assertWireFramesEqual(t, logs.serverSent, logs.clientReceived)
-		assertStrictErrorResponses(t, messages, logs.clientReceived.snapshot(), core.ErrNoHandler.Error())
+		assertStrictErrorResponses(t, messages, logs.clientReceived.snapshot(), core.PublicErrorMessage(core.ErrNoHandler))
 	})
 
 	t.Run("heartbeat_pong", func(t *testing.T) {
@@ -240,7 +240,7 @@ func TestTCPWireCRCTraceStrict1000(t *testing.T) {
 
 		assertWireFramesEqual(t, logs.clientSent, logs.serverReceived)
 		assertWireFramesEqual(t, logs.serverSent, logs.clientReceived)
-		assertStrictLimitedErrorResponses(t, messages, logs.clientReceived.snapshot(), msgStrictInflight, core.ErrTooManyInflight.Error(), 1)
+		assertStrictLimitedErrorResponses(t, messages, logs.clientReceived.snapshot(), msgStrictInflight, core.PublicErrorMessage(core.ErrTooManyInflight), 1)
 	})
 
 	t.Run("router_closed_errors", func(t *testing.T) {
@@ -257,7 +257,7 @@ func TestTCPWireCRCTraceStrict1000(t *testing.T) {
 
 		assertWireFramesEqual(t, logs.clientSent, logs.serverReceived)
 		assertWireFramesEqual(t, logs.serverSent, logs.clientReceived)
-		assertStrictErrorResponses(t, messages, logs.clientReceived.snapshot(), core.ErrRouterClosed.Error())
+		assertStrictErrorResponses(t, messages, logs.clientReceived.snapshot(), core.PublicErrorMessage(core.ErrRouterClosed))
 	})
 
 	t.Run("multi_connection_echo", func(t *testing.T) {
@@ -1220,7 +1220,7 @@ func assertStrictQueueFullResponsesFor(t *testing.T, sent []core.Message, got []
 			}
 			echoes++
 		case core.MsgError:
-			wantPayload := []byte(core.ErrDispatchQueueFull.Error())
+			wantPayload := []byte(core.PublicErrorMessage(core.ErrDispatchQueueFull))
 			if record.PayloadLen != len(wantPayload) || !strictWirePayloadEqual(record, wantPayload) {
 				t.Fatalf("queue-full error seq=%d has payload_len=%d", record.Seq, record.PayloadLen)
 			}

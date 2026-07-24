@@ -4,7 +4,7 @@ package projector
 import (
 	"context"
 
-	"github.com/saramand9/bignet/kpro/eventing/events"
+	"github.com/saramand9/kpro/eventing/events"
 )
 
 // Projector handles one event stream and updates one or more read models.

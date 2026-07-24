@@ -6,7 +6,7 @@ package events
 import (
 	"time"
 
-	"github.com/saramand9/bignet/kpro/transport/sse"
+	"github.com/saramand9/kpro/transport/sse"
 )
 
 func timeStream(ctx *sse.Context) error {

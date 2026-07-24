@@ -6,9 +6,10 @@ import (
 	"database/sql/driver"
 	"errors"
 	"io"
+	"sync/atomic"
 	"testing"
 
-	"github.com/saramand9/bignet/kpro/database/common/lifecycle"
+	"github.com/saramand9/kpro/database/common/lifecycle"
 )
 
 func init() {
@@ -40,8 +41,13 @@ func (fakeConn) QueryContext(ctx context.Context, query string, args []driver.Na
 
 type fakeTx struct{}
 
-func (fakeTx) Commit() error   { return nil }
-func (fakeTx) Rollback() error { return nil }
+var fakeTxRollbacks atomic.Int32
+
+func (fakeTx) Commit() error { return nil }
+func (fakeTx) Rollback() error {
+	fakeTxRollbacks.Add(1)
+	return nil
+}
 
 type fakeResult int64
 
@@ -106,6 +112,48 @@ func TestOpenExecQueryTxAndHealth(t *testing.T) {
 		return err
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestTxRejectsNilFunction(t *testing.T) {
+	database, err := Open(context.Background(), Config{
+		DriverName: "clickhouse_store_fake",
+		DSN:        "fake",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	if err := database.Tx(context.Background(), nil); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("Tx error=%v, want ErrInvalidConfig", err)
+	}
+}
+
+func TestTxRollsBackWhenFunctionPanics(t *testing.T) {
+	database, err := Open(context.Background(), Config{
+		DriverName: "clickhouse_store_fake",
+		DSN:        "fake",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	fakeTxRollbacks.Store(0)
+	panicValue := errors.New("transaction panic")
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		_ = database.Tx(context.Background(), func(*sql.Tx) error {
+			panic(panicValue)
+		})
+	}()
+	if recovered != panicValue {
+		t.Fatalf("recovered=%v, want transaction panic", recovered)
+	}
+	if got := fakeTxRollbacks.Load(); got != 1 {
+		t.Fatalf("rollbacks=%d, want 1", got)
 	}
 }
 

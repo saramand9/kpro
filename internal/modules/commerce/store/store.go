@@ -9,9 +9,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/saramand9/bignet/kpro/database/common/lifecycle"
-	gormstore "github.com/saramand9/bignet/kpro/database/gorm"
-	"github.com/saramand9/bignet/kpro/internal/modules/commerce"
+	"github.com/saramand9/kpro/database/common/lifecycle"
+	gormstore "github.com/saramand9/kpro/database/gorm"
+	"github.com/saramand9/kpro/internal/modules/commerce"
 	"gorm.io/gorm"
 )
 

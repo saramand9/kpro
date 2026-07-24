@@ -5,8 +5,8 @@ import (
 	"fmt"
 
 	quicgo "github.com/quic-go/quic-go"
-	transportapi "github.com/saramand9/bignet/kpro/transport"
-	"github.com/saramand9/bignet/kpro/transport/internal/configcheck"
+	transportapi "github.com/saramand9/kpro/transport"
+	"github.com/saramand9/kpro/transport/internal/configcheck"
 )
 
 var _ transportapi.Validator = (*Endpoint)(nil)
@@ -20,9 +20,13 @@ func (e *Endpoint) Validate() error {
 		e.Descriptor().Validate(),
 		configcheck.ListenAddress("HTTP/3 listen address", e.config.Addr),
 		configcheck.NonNegativeDuration("HandshakeTimeout", e.rawConfig.HandshakeTimeout),
+		configcheck.NonNegativeDuration("ReadTimeout", e.rawConfig.ReadTimeout),
+		configcheck.NonNegativeDuration("WriteTimeout", e.rawConfig.WriteTimeout),
 		configcheck.NonNegativeDuration("IdleTimeout", e.rawConfig.IdleTimeout),
 		configcheck.NonNegativeDuration("ShutdownTimeout", e.rawConfig.ShutdownTimeout),
 		configcheck.NonNegativeInt("MaxHeaderBytes", e.rawConfig.MaxHeaderBytes),
+		configcheck.NonNegativeInt64("MaxBodyBytes", e.rawConfig.MaxBodyBytes),
+		configcheck.NonNegativeInt("MaxConnections", e.rawConfig.MaxConnections),
 		validateQUICVersions(e.config.QUICConfig),
 	)
 	if e.config.TLSConfig == nil {

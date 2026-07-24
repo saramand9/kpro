@@ -15,8 +15,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/core"
-	"github.com/saramand9/bignet/kpro/transport/internal/serveutil"
+	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/transport/internal/serveutil"
 )
 
 const (
@@ -88,6 +88,7 @@ type Endpoint struct {
 	config         Config
 	rawConfig      Config
 	server         *http.Server
+	listener       net.Listener
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
 
@@ -101,6 +102,8 @@ type Endpoint struct {
 	conns      map[net.Conn]*connState
 	nextConnID uint64
 	active     int64
+	ready      chan struct{}
+	readyOnce  sync.Once
 }
 
 // New creates an SSE endpoint with normalized defaults.
@@ -113,12 +116,18 @@ func New(config Config) *Endpoint {
 		shutdownCancel: shutdownCancel,
 		accepting:      true,
 		conns:          make(map[net.Conn]*connState),
+		ready:          make(chan struct{}),
 	}
 }
 
 // Name returns the transport name.
 func (e *Endpoint) Name() string {
 	return string(core.TransportSSE)
+}
+
+// Ready closes after the SSE listener has been bound and published.
+func (e *Endpoint) Ready() <-chan struct{} {
+	return e.ready
 }
 
 // Use installs middleware on the SSE stream and returns the endpoint.
@@ -161,7 +170,25 @@ func (e *Endpoint) ListenAndServe(ctx context.Context) (serveErr error) {
 		return core.ErrAlreadyStarted
 	}
 	e.started = true
+	e.mu.Unlock()
+	listener, err := net.Listen("tcp", e.config.Addr)
+	if err != nil {
+		e.mu.Lock()
+		if e.accepting && e.listener == nil {
+			e.started = false
+		}
+		e.mu.Unlock()
+		return err
+	}
+	e.mu.Lock()
+	if !e.accepting {
+		e.mu.Unlock()
+		_ = listener.Close()
+		return core.ErrClosed
+	}
 	e.server = server
+	e.listener = listener
+	e.readyOnce.Do(func() { close(e.ready) })
 	e.mu.Unlock()
 	serveDone := make(chan struct{})
 	var shutdownErr error
@@ -175,9 +202,9 @@ func (e *Endpoint) ListenAndServe(ctx context.Context) (serveErr error) {
 		serveErr = errors.Join(serveErr, shutdownErr)
 	}()
 	if e.config.TLS {
-		return ignoreServerClosed(server.ListenAndServeTLS(e.config.CertFile, e.config.KeyFile))
+		return ignoreServerClosed(server.ServeTLS(listener, e.config.CertFile, e.config.KeyFile))
 	}
-	return ignoreServerClosed(server.ListenAndServe())
+	return ignoreServerClosed(server.Serve(listener))
 }
 
 func (e *Endpoint) buildHTTPServer() *http.Server {
@@ -206,8 +233,12 @@ func (e *Endpoint) Shutdown(ctx context.Context) error {
 	e.mu.Lock()
 	e.accepting = false
 	server := e.server
+	listener := e.listener
 	e.mu.Unlock()
 	if server == nil {
+		if listener != nil {
+			return listener.Close()
+		}
 		return nil
 	}
 	return server.Shutdown(ctx)
@@ -313,10 +344,23 @@ func (e *Endpoint) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if streamStarted && streamCtx != nil {
-		_ = streamCtx.Send("error", []byte(err.Error()))
+		_ = streamCtx.Send("error", []byte(core.PublicErrorMessage(err)))
 		return
 	}
-	http.Error(w, err.Error(), http.StatusInternalServerError)
+	http.Error(w, core.PublicErrorMessage(err), httpStatusForError(err))
+}
+
+func httpStatusForError(err error) int {
+	switch core.ErrorKindOf(err) {
+	case core.ErrorKindRateLimited:
+		return http.StatusTooManyRequests
+	case core.ErrorKindPayloadTooLarge:
+		return http.StatusRequestEntityTooLarge
+	case core.ErrorKindOverloaded:
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 func (e *Endpoint) tryAcquireStreamSlot() bool {

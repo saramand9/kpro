@@ -20,9 +20,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/codec"
-	"github.com/saramand9/bignet/kpro/core"
-	wstransport "github.com/saramand9/bignet/kpro/transport/websocket"
+	"github.com/saramand9/kpro/codec"
+	"github.com/saramand9/kpro/core"
+	wstransport "github.com/saramand9/kpro/transport/websocket"
 )
 
 const (
@@ -218,7 +218,7 @@ func TestWebSocketSyncQueueFullFileTraceError(t *testing.T) {
 	sendWebSocketTraced(t, sent, client, msgC)
 
 	first := readWebSocketTraced(t, clientReceived, client)
-	if first.ID != core.MsgError || first.Seq != msgC.Seq || string(first.Data) != core.ErrDispatchQueueFull.Error() {
+	if first.ID != core.MsgError || first.Seq != msgC.Seq || string(first.Data) != core.PublicErrorMessage(core.ErrDispatchQueueFull) {
 		t.Fatalf("expected WebSocket queue-full error for seq=%d, got id=%d seq=%d data=%q", msgC.Seq, first.ID, first.Seq, string(first.Data))
 	}
 	release()
@@ -232,7 +232,7 @@ func TestWebSocketSyncQueueFullFileTraceError(t *testing.T) {
 	expectedHandled := trace.expected("expected_server_handled.ndjson", []core.Message{msgA, msgB})
 	assertTraceFileEqual(t, expectedHandled, handled.path)
 	expectedClientReceived := trace.expected("expected_client_received.ndjson", []core.Message{
-		{ID: core.MsgError, Seq: msgC.Seq, Data: []byte(core.ErrDispatchQueueFull.Error())},
+		{ID: core.MsgError, Seq: msgC.Seq, Data: []byte(core.PublicErrorMessage(core.ErrDispatchQueueFull))},
 		msgA,
 		msgB,
 	})
@@ -259,13 +259,13 @@ func TestWebSocketNoHandlerFileTraceError(t *testing.T) {
 	msg := core.Message{ID: msgWSTraceUnknown, Seq: 1, Data: []byte("unknown")}
 	sendWebSocketTraced(t, sent, client, msg)
 	resp := readWebSocketTraced(t, clientReceived, client)
-	if resp.ID != core.MsgError || resp.Seq != msg.Seq || string(resp.Data) != core.ErrNoHandler.Error() {
+	if resp.ID != core.MsgError || resp.Seq != msg.Seq || string(resp.Data) != core.PublicErrorMessage(core.ErrNoHandler) {
 		t.Fatalf("expected WebSocket no-handler error, got id=%d seq=%d data=%q", resp.ID, resp.Seq, string(resp.Data))
 	}
 
 	assertTraceFileEqual(t, sent.path, received.path)
 	expected := trace.expected("expected_client_received.ndjson", []core.Message{
-		{ID: core.MsgError, Seq: msg.Seq, Data: []byte(core.ErrNoHandler.Error())},
+		{ID: core.MsgError, Seq: msg.Seq, Data: []byte(core.PublicErrorMessage(core.ErrNoHandler))},
 	})
 	assertTraceFileEqual(t, expected, clientReceived.path)
 }

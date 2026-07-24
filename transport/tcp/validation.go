@@ -3,8 +3,8 @@ package tcp
 import (
 	"errors"
 
-	transportapi "github.com/saramand9/bignet/kpro/transport"
-	"github.com/saramand9/bignet/kpro/transport/internal/configcheck"
+	transportapi "github.com/saramand9/kpro/transport"
+	"github.com/saramand9/kpro/transport/internal/configcheck"
 )
 
 var _ transportapi.Validator = (*Server)(nil)
@@ -22,5 +22,6 @@ func (s *Server) Validate() error {
 		configcheck.NonNegativeInt("SendQueueSize", s.rawConfig.SendQueueSize),
 		configcheck.NonNegativeDuration("ReadTimeout", s.rawConfig.ReadTimeout),
 		configcheck.NonNegativeDuration("WriteTimeout", s.rawConfig.WriteTimeout),
+		s.rawConfig.HandlerErrorPolicy.Validate(),
 	)
 }

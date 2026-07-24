@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/core"
+	"github.com/saramand9/kpro/core"
 	"golang.org/x/time/rate"
 )
 
@@ -138,6 +138,152 @@ func TestConnRateLimitRemovesLimiterWhenSessionCloses(t *testing.T) {
 	waitForRateLimitCleanup(t, func() bool {
 		return handler(reusedIDCtx) == nil
 	})
+}
+
+func TestConnRateLimitSeparatesTransportsWithSameConnectionID(t *testing.T) {
+	handler := ConnRateLimit(RateLimitConfig{
+		Rate:  rate.Limit(0.001),
+		Burst: 1,
+	})(func(core.Invocation) error { return nil })
+	tcpDone := make(chan struct{})
+	kcpDone := make(chan struct{})
+	t.Cleanup(func() {
+		close(tcpDone)
+		close(kcpDone)
+	})
+	tcpInvocation := core.NewInvocation(core.InvocationOptions{
+		Transport: core.TransportTCP,
+		ConnID:    1,
+		ConnDone:  tcpDone,
+	})
+	kcpInvocation := core.NewInvocation(core.InvocationOptions{
+		Transport: core.TransportKCP,
+		ConnID:    1,
+		ConnDone:  kcpDone,
+	})
+
+	if err := handler(tcpInvocation); err != nil {
+		t.Fatalf("first TCP call: %v", err)
+	}
+	if err := handler(kcpInvocation); err != nil {
+		t.Fatalf("same id on KCP should use an independent bucket: %v", err)
+	}
+}
+
+func TestConnRateLimitSeparatesEndpointLifetimesWithSameConnectionID(t *testing.T) {
+	handler := ConnRateLimit(RateLimitConfig{
+		Rate:  rate.Limit(0.001),
+		Burst: 1,
+	})(func(core.Invocation) error { return nil })
+	firstDone := make(chan struct{})
+	secondDone := make(chan struct{})
+	t.Cleanup(func() {
+		close(firstDone)
+		close(secondDone)
+	})
+	first := core.NewInvocation(core.InvocationOptions{
+		Transport: core.TransportTCP,
+		ConnID:    1,
+		ConnDone:  firstDone,
+	})
+	second := core.NewInvocation(core.InvocationOptions{
+		Transport: core.TransportTCP,
+		ConnID:    1,
+		ConnDone:  secondDone,
+	})
+
+	if err := handler(first); err != nil {
+		t.Fatalf("first endpoint call: %v", err)
+	}
+	if err := handler(second); err != nil {
+		t.Fatalf("same local id on another endpoint should use an independent bucket: %v", err)
+	}
+}
+
+func TestConnRateLimitSurvivesInvocationContextReplacement(t *testing.T) {
+	connectionDone := make(chan struct{})
+	t.Cleanup(func() { close(connectionDone) })
+	withRequestContext := func(next core.InvocationHandler) core.InvocationHandler {
+		return func(invocation core.Invocation) error {
+			requestCtx, cancel := context.WithCancel(invocation.Context())
+			defer cancel()
+			return next(core.WithInvocationContext(invocation, requestCtx))
+		}
+	}
+	handler := core.Chain(
+		withRequestContext,
+		ConnRateLimit(RateLimitConfig{Rate: rate.Limit(0.001), Burst: 1}),
+	)(func(core.Invocation) error { return nil })
+
+	newRequest := func() core.Invocation {
+		return core.NewInvocation(core.InvocationOptions{
+			Context:   context.Background(),
+			Transport: core.TransportHTTP,
+			ConnID:    1,
+			ConnDone:  connectionDone,
+		})
+	}
+	if err := handler(newRequest()); err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+	// Give an implementation that mistakenly watches the request context time
+	// to delete its bucket before the next request on the same connection.
+	time.Sleep(5 * time.Millisecond)
+	if err := handler(newRequest()); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("second request on same connection = %v, want ErrRateLimited", err)
+	}
+}
+
+func TestConnRateLimitRemovesIdleBucketWithoutConnectionLifetime(t *testing.T) {
+	handler := ConnRateLimit(RateLimitConfig{
+		Rate:        rate.Limit(0.001),
+		Burst:       1,
+		IdleTimeout: time.Millisecond,
+	})(func(core.Invocation) error { return nil })
+	invocation := core.NewInvocation(core.InvocationOptions{
+		Transport: core.TransportTCP,
+		ConnID:    1,
+	})
+
+	if err := handler(invocation); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	if err := handler(invocation); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("second call = %v, want ErrRateLimited", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if err := handler(invocation); err != nil {
+		t.Fatalf("idle bucket should be recreated: %v", err)
+	}
+}
+
+func TestConnRateLimitBoundsBucketCardinality(t *testing.T) {
+	handler := ConnRateLimit(RateLimitConfig{
+		Rate:       rate.Limit(1),
+		Burst:      1,
+		MaxBuckets: 1,
+	})(func(core.Invocation) error { return nil })
+	firstDone := make(chan struct{})
+	secondDone := make(chan struct{})
+	second := core.NewInvocation(core.InvocationOptions{
+		Transport: core.TransportTCP,
+		ConnID:    2,
+		ConnDone:  secondDone,
+	})
+	t.Cleanup(func() { close(secondDone) })
+
+	if err := handler(core.NewInvocation(core.InvocationOptions{
+		Transport: core.TransportTCP,
+		ConnID:    1,
+		ConnDone:  firstDone,
+	})); err != nil {
+		t.Fatalf("first bucket: %v", err)
+	}
+	if err := handler(second); !errors.Is(err, core.ErrOverloaded) {
+		t.Fatalf("new key over bucket bound = %v, want core.ErrOverloaded", err)
+	}
+	close(firstDone)
+	waitForRateLimitCleanup(t, func() bool { return handler(second) == nil })
 }
 
 func TestIPRateLimitSharesBucketAcrossPorts(t *testing.T) {

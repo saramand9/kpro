@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/saramand9/bignet/kpro/database/common/lifecycle"
-	gormstore "github.com/saramand9/bignet/kpro/database/gorm"
+	"github.com/saramand9/kpro/database/common/lifecycle"
+	gormstore "github.com/saramand9/kpro/database/gorm"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"

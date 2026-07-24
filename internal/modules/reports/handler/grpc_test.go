@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	reportservice "github.com/saramand9/bignet/kpro/internal/modules/reports/service"
-	"github.com/saramand9/bignet/kpro/transport/grpcx"
+	reportservice "github.com/saramand9/kpro/internal/modules/reports/service"
+	"github.com/saramand9/kpro/transport/grpcx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
