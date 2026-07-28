@@ -403,9 +403,10 @@ Invoke-RestMethod -Uri http://127.0.0.1:8080/readyz
 Invoke-RestMethod -Uri http://127.0.0.1:8080/echo -Method Post -Body "hello" -ContentType "text/plain"
 ```
 
-`/health` remains a compatibility alias for readiness. When GORM is enabled,
-readiness performs a bounded SQL ping and returns only `ready` or `not_ready`;
-it does not expose the dependency error.
+`/health` remains a compatibility alias for readiness. Readiness requires the
+whole application server to be running. When GORM is enabled, it also performs
+a bounded SQL ping. The probe returns only `ready` or `not_ready` and does not
+expose the dependency error.
 
 ## Examples
 

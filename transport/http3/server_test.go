@@ -73,7 +73,9 @@ func TestHTTP3PropagatesBodyAndRequestDeadlines(t *testing.T) {
 		WriteTimeout: 2 * time.Second,
 	})
 	endpoint.Post("/limited", func(ctx *Context) error {
-		_, err := ctx.Body()
+		// The HTTP/3 facade must preserve the embedded HTTP endpoint's limit
+		// even when a handler reads the protocol-native request directly.
+		_, err := io.ReadAll(ctx.Request().Body)
 		return err
 	})
 	recorder := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}

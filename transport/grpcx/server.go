@@ -176,7 +176,7 @@ func (s *Server) ServeListenerContext(ctx context.Context, ln net.Listener) erro
 	return s.serveClaimed(ctx, ln)
 }
 
-func (s *Server) serveClaimed(ctx context.Context, ln net.Listener) error {
+func (s *Server) serveClaimed(ctx context.Context, ln net.Listener) (serveErr error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -191,18 +191,22 @@ func (s *Server) serveClaimed(ctx context.Context, ln net.Listener) error {
 	s.mu.Unlock()
 
 	serveDone := make(chan struct{})
+	var shutdownErr error
 	watcherDone := serveutil.ShutdownOnCancel(ctx, serveDone, func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), s.shutdownTimeout)
 		defer cancel()
-		_ = s.Shutdown(shutdownCtx)
+		shutdownErr = s.Shutdown(shutdownCtx)
 	})
-	defer serveutil.FinishContextWatcher(serveDone, watcherDone)
+	defer func() {
+		serveutil.FinishContextWatcher(serveDone, watcherDone)
+		serveErr = errors.Join(serveErr, shutdownErr)
+	}()
 
-	err := s.grpc.Serve(ln)
-	if errors.Is(err, grpc.ErrServerStopped) {
+	serveErr = s.grpc.Serve(ln)
+	if errors.Is(serveErr, grpc.ErrServerStopped) {
 		return nil
 	}
-	return err
+	return serveErr
 }
 
 func (s *Server) claimStart() error {

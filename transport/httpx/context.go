@@ -17,6 +17,7 @@ type Context struct {
 	bodyRead    bool
 	bodyErr     error
 	maxBody     int64
+	bodyLimited bool
 	status      int
 	wroteHeader bool
 }
@@ -85,12 +86,13 @@ func (c *Context) Body() ([]byte, error) {
 	if c.r.Body == nil {
 		return nil, nil
 	}
-	if c.maxBody > 0 {
+	if c.maxBody > 0 && !c.bodyLimited {
 		// Install the limiting reader on the request itself so every internal
 		// body consumer shares one budget. Body also caches terminal errors,
 		// preventing repeated calls from applying a fresh budget to the unread
 		// remainder of an oversized or chunked request.
 		c.r.Body = http.MaxBytesReader(c.w, c.r.Body, c.maxBody)
+		c.bodyLimited = true
 	}
 	body, err := io.ReadAll(c.r.Body)
 	if err != nil {

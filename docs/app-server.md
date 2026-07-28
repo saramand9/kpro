@@ -184,6 +184,12 @@ non-hijacked HTTP connections and returns the joined error. Handlers must still
 observe request cancellation; connections explicitly hijacked from `net/http`
 are owned by the hijacking component.
 
+`MaxBodyBytes` is installed on the native request before middleware and route
+handlers run. Reads through `Context.Request().Body` and `Context.Body()` share
+the same endpoint-wide request budget; middleware may impose a stricter limit,
+but cannot make the configured endpoint limit larger. HTTP/3 uses the same
+request-body behavior.
+
 ### HTTPS
 
 HTTPS is HTTP with TLS configuration.
@@ -244,6 +250,16 @@ sseEndpoint.Handle(func(ctx *sse.Context) error {
 })
 ```
 
+`sse.Config.WriteTimeout` bounds the initial stream flush and one
+`Context.Send` call, including its flush, and is renewed for every event; it is
+not a lifetime limit for the stream. A zero value leaves those writes without a
+deadline. The standard `net/http` HTTP/1 and HTTP/2 response writers support
+this control. A custom response writer used in front of the endpoint must
+expose `SetWriteDeadline`, or provide an `Unwrap() http.ResponseWriter` method;
+otherwise a configured timeout makes stream setup or `Send` fail with an error
+matching `http.ErrNotSupported`. Writes made directly to the embedded
+`ResponseWriter` are outside the `Send` deadline contract.
+
 SSE shutdown cancels stream request contexts before draining. If a slow client
 keeps a write blocked through the drain deadline, the endpoint force-closes the
 non-hijacked connection so the write can return.
@@ -266,8 +282,9 @@ go run .\cmd\app -tcp :8088 -kcp :8090 -udp :8089 -ws :8091 -http :8080 -sse :80
 ```
 
 The reference app exposes `/livez`, `/readyz`, and a compatibility `/health`
-alias on HTTP and HTTP/3. Readiness succeeds without an external database; when
-GORM is enabled it performs a bounded SQL ping and returns a generic 503 on
+alias on HTTP and HTTP/3. Readiness succeeds only while the whole application
+server is running. It needs no external database by default; when GORM is
+enabled it also performs a bounded SQL ping and returns a generic 503 on
 failure. SQLite defaults to one open/idle connection, while MySQL/PostgreSQL
 default to 16 open and 8 idle connections with 30-minute lifetime and 5-minute
 idle limits. The `-gorm-max-open-conns`, `-gorm-max-idle-conns`,

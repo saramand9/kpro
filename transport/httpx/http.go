@@ -531,7 +531,16 @@ func (e *Endpoint) serve(w http.ResponseWriter, r *http.Request) {
 }
 
 func serveRoute(w http.ResponseWriter, r *http.Request, maxBody int64, h Handler) {
-	ctx := &Context{w: w, r: r, maxBody: maxBody}
+	// Install the endpoint limit before middleware or handlers can access the
+	// native request. Context.Body recognizes this installed reader, while
+	// middleware.MaxPayload may add a stricter outer limit. This reader keeps
+	// MaxBodyBytes as an absolute budget for every consumer of Request().Body.
+	bodyLimited := false
+	if r != nil && r.Body != nil && maxBody > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+		bodyLimited = true
+	}
+	ctx := &Context{w: w, r: r, maxBody: maxBody, bodyLimited: bodyLimited}
 	if err := h(ctx); err != nil {
 		if ctx.wroteHeader {
 			return
