@@ -163,7 +163,7 @@ func (e *Endpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	e.serveHTTP(w, r)
 }
 
-func (e *Endpoint) ListenAndServe(ctx context.Context) error {
+func (e *Endpoint) ListenAndServe(ctx context.Context) (serveErr error) {
 	if err := e.Validate(); err != nil {
 		return err
 	}
@@ -198,12 +198,16 @@ func (e *Endpoint) ListenAndServe(ctx context.Context) error {
 	defer e.finishServe(server, listener)
 
 	serveDone := make(chan struct{})
+	var shutdownErr error
 	watcherDone := serveutil.ShutdownOnCancel(ctx, serveDone, func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), e.config.ShutdownTimeout)
 		defer cancel()
-		_ = e.Shutdown(shutdownCtx)
+		shutdownErr = e.Shutdown(shutdownCtx)
 	})
-	defer serveutil.FinishContextWatcher(serveDone, watcherDone)
+	defer func() {
+		serveutil.FinishContextWatcher(serveDone, watcherDone)
+		serveErr = errors.Join(serveErr, shutdownErr)
+	}()
 
 	return ignoreServerClosed(server.ServeListener(listener))
 }

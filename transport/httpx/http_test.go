@@ -135,6 +135,48 @@ func TestContextBodyRejectsOversizedRequest(t *testing.T) {
 	}
 }
 
+func TestContextRequestBodyCannotBypassEndpointLimit(t *testing.T) {
+	endpoint := New(Config{MaxBodyBytes: 4})
+	var readErr error
+	endpoint.Post("/echo", func(ctx *Context) error {
+		_, readErr = io.ReadAll(ctx.Request().Body)
+		return readErr
+	})
+
+	resp := executeTestRequest(endpoint, http.MethodPost, "/echo", "hello")
+
+	if resp.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d; body=%q", resp.Code, http.StatusRequestEntityTooLarge, resp.Body.String())
+	}
+	var maxBytesErr *http.MaxBytesError
+	if !errors.As(readErr, &maxBytesErr) {
+		t.Fatalf("Request().Body error = %T %v, want *http.MaxBytesError", readErr, readErr)
+	}
+}
+
+func TestContextBodySharesLimitAfterNativePartialRead(t *testing.T) {
+	endpoint := New(Config{MaxBodyBytes: 4})
+	var bodyErr error
+	endpoint.Post("/echo", func(ctx *Context) error {
+		prefix := make([]byte, 3)
+		if _, err := io.ReadFull(ctx.Request().Body, prefix); err != nil {
+			return err
+		}
+		_, bodyErr = ctx.Body()
+		return bodyErr
+	})
+
+	resp := executeTestRequest(endpoint, http.MethodPost, "/echo", "abcdef")
+
+	if resp.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d; body=%q", resp.Code, http.StatusRequestEntityTooLarge, resp.Body.String())
+	}
+	var maxBytesErr *http.MaxBytesError
+	if !errors.As(bodyErr, &maxBytesErr) {
+		t.Fatalf("Body() error = %T %v, want *http.MaxBytesError", bodyErr, bodyErr)
+	}
+}
+
 func TestContextBodyCachesChunkedOversizeErrorAcrossLengthAndBodyCalls(t *testing.T) {
 	endpoint := New(Config{MaxBodyBytes: 4})
 	var firstErr error

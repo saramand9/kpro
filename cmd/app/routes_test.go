@@ -6,12 +6,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/saramand9/kpro/database/common/lifecycle"
 	"github.com/saramand9/kpro/internal/app/persistence"
 	"github.com/saramand9/kpro/middleware"
+	"github.com/saramand9/kpro/server"
 	http3x "github.com/saramand9/kpro/transport/http3"
 	"github.com/saramand9/kpro/transport/httpx"
 )
@@ -19,6 +21,26 @@ import (
 type testResourceHealth struct {
 	managed bool
 	health  func(context.Context) []lifecycle.Health
+}
+
+type testServingState struct {
+	mu    sync.RWMutex
+	state server.State
+}
+
+func (s *testServingState) State() server.State {
+	if s == nil {
+		return server.StateStopped
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.state
+}
+
+func (s *testServingState) setState(state server.State) {
+	s.mu.Lock()
+	s.state = state
+	s.mu.Unlock()
 }
 
 func (r *testResourceHealth) Managed() bool {
@@ -94,6 +116,84 @@ func TestReferenceReadinessSucceedsWithoutDatabase(t *testing.T) {
 	}
 }
 
+func TestReferenceReadinessRequiresRunningServer(t *testing.T) {
+	serving := &testServingState{state: server.StateStarting}
+	for _, endpoint := range referenceProbeEndpointsWithState(nil, serving) {
+		t.Run(endpoint.name, func(t *testing.T) {
+			assertProbe(t, endpoint.handler, "/livez", http.StatusOK, "alive")
+			assertProbe(t, endpoint.handler, "/readyz", http.StatusServiceUnavailable, "not_ready")
+
+			serving.setState(server.StateRunning)
+			assertProbe(t, endpoint.handler, "/readyz", http.StatusOK, "ready")
+
+			serving.setState(server.StateDraining)
+			assertProbe(t, endpoint.handler, "/readyz", http.StatusServiceUnavailable, "not_ready")
+		})
+		serving.setState(server.StateStarting)
+	}
+}
+
+func TestReferenceReadinessRechecksServerStateAfterResourceHealth(t *testing.T) {
+	checkStarted := make(chan struct{})
+	releaseCheck := make(chan struct{})
+	resources := &testResourceHealth{
+		managed: true,
+		health: func(context.Context) []lifecycle.Health {
+			close(checkStarted)
+			<-releaseCheck
+			return []lifecycle.Health{{Status: lifecycle.StatusOK}}
+		},
+	}
+	serving := &testServingState{state: server.StateRunning}
+	endpoint := httpx.New(httpx.Config{})
+	endpoint.Get("/readyz", readinessHandler(resources, serving))
+
+	response := httptest.NewRecorder()
+	requestDone := make(chan struct{})
+	go func() {
+		endpoint.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+		close(requestDone)
+	}()
+	select {
+	case <-checkStarted:
+	case <-time.After(time.Second):
+		t.Fatal("readiness resource check did not start")
+	}
+	serving.setState(server.StateDraining)
+	close(releaseCheck)
+	select {
+	case <-requestDone:
+	case <-time.After(time.Second):
+		t.Fatal("readiness request did not finish")
+	}
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readiness status = %d, want %d; body=%q", response.Code, http.StatusServiceUnavailable, response.Body.String())
+	}
+}
+
+func TestReferenceAppMiddlewareMeasuresHTTP(t *testing.T) {
+	app, err := server.NewChecked(server.Config{Name: "metrics-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metrics := middleware.NewMetrics()
+	installAppMiddleware(app, metrics)
+	endpoint := httpx.New(httpx.Config{})
+	app.MountRunner(endpoint)
+	registerHTTPRoutes(endpoint, metrics, appServices{}, nil, &testServingState{state: server.StateRunning})
+
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/echo", strings.NewReader("hello"))
+	endpoint.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("POST /echo status = %d, want %d; body=%q", response.Code, http.StatusOK, response.Body.String())
+	}
+	snapshot := metrics.Snapshot()
+	if snapshot.Started != 1 || snapshot.Completed != 1 || snapshot.Errors != 0 || snapshot.Inflight != 0 {
+		t.Fatalf("HTTP metrics snapshot = %#v, want one successful completed invocation", snapshot)
+	}
+}
+
 func TestReferenceReadinessUsesDatabasePing(t *testing.T) {
 	resources, err := persistence.Open(context.Background(), persistence.Config{
 		SQL: persistence.SQLConfig{Driver: "sqlite", DSN: ":memory:"},
@@ -135,7 +235,7 @@ func TestResourcesReadyBoundsHealthCheck(t *testing.T) {
 	}
 
 	endpoint := httpx.New(httpx.Config{})
-	endpoint.Get("/readyz", readinessHandlerWithTimeout(resources, 20*time.Millisecond))
+	endpoint.Get("/readyz", readinessHandlerWithTimeout(resources, &testServingState{state: server.StateRunning}, 20*time.Millisecond))
 	response := assertProbe(t, endpoint, "/readyz", http.StatusServiceUnavailable, "not_ready")
 	if strings.Contains(response, internalError) || strings.Contains(response, "database.internal") {
 		t.Fatalf("timed-out readiness response leaked resource error: %q", response)
@@ -148,11 +248,15 @@ type namedHTTPHandler struct {
 }
 
 func referenceProbeEndpoints(resources appResourceHealth) []namedHTTPHandler {
+	return referenceProbeEndpointsWithState(resources, &testServingState{state: server.StateRunning})
+}
+
+func referenceProbeEndpointsWithState(resources appResourceHealth, serving appServingState) []namedHTTPHandler {
 	metrics := middleware.NewMetrics()
 	httpEndpoint := httpx.New(httpx.Config{})
-	registerHTTPRoutes(httpEndpoint, metrics, appServices{}, resources)
+	registerHTTPRoutes(httpEndpoint, metrics, appServices{}, resources, serving)
 	http3Endpoint := http3x.New(http3x.Config{})
-	registerHTTP3Routes(http3Endpoint, metrics, resources)
+	registerHTTP3Routes(http3Endpoint, metrics, resources, serving)
 	return []namedHTTPHandler{
 		{name: "http", handler: httpEndpoint},
 		{name: "http3", handler: http3Endpoint},

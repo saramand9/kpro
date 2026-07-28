@@ -112,19 +112,20 @@ func run() (returnErr error) {
 		app.Manage(resources)
 	}
 	metrics := middleware.NewMetrics()
+	installAppMiddleware(app, metrics)
 
 	tcpEndpoint := app.Mount(tcp.New(tcp.Config{
 		Addr:         *tcpAddr,
 		Codec:        codec.KProV1(),
 		MaxFrameSize: 64 * 1024,
-	})).Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024))
+	})).Use(middleware.MaxPayload(64 * 1024))
 	registerMessageRoutes(tcpEndpoint, services)
 
 	kcpEndpoint := app.Mount(kcp.New(kcp.Config{
 		Addr:         *kcpAddr,
 		Codec:        codec.KProV1(),
 		MaxFrameSize: 64 * 1024,
-	})).Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024))
+	})).Use(middleware.MaxPayload(64 * 1024))
 	registerMessageRoutes(kcpEndpoint, services)
 
 	if *quicAddr != "" {
@@ -138,7 +139,7 @@ func run() (returnErr error) {
 			MaxStreams:   *quicMaxStreams,
 			CertFile:     *quicCert,
 			KeyFile:      *quicKey,
-		})).Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024))
+		})).Use(middleware.MaxPayload(64 * 1024))
 		registerMessageRoutes(quicEndpoint, services)
 	}
 
@@ -146,13 +147,13 @@ func run() (returnErr error) {
 		Addr:          *udpAddr,
 		Codec:         codec.KProV1(),
 		MaxPacketSize: 2048,
-	})).Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(1500))
+	})).Use(middleware.MaxPayload(1500))
 	registerMessageRoutes(udpEndpoint, services)
 
 	wsEndpoint := app.Mount(websocket.New(websocket.Config{
 		Addr: *wsAddr,
 		Path: "/ws",
-	})).Use(middleware.Recover(), metrics.Middleware(), middleware.MaxPayload(64*1024))
+	})).Use(middleware.MaxPayload(64 * 1024))
 	registerMessageRoutes(wsEndpoint, services)
 
 	httpEndpoint := httpx.New(httpx.Config{
@@ -164,7 +165,7 @@ func run() (returnErr error) {
 		MaxBodyBytes:    1 << 20,
 	})
 	app.MountRunner(httpEndpoint)
-	registerHTTPRoutes(httpEndpoint, metrics, services, resources)
+	registerHTTPRoutes(httpEndpoint, metrics, services, resources, app)
 
 	if *http3Addr != "" {
 		if *http3Cert == "" || *http3Key == "" {
@@ -176,7 +177,7 @@ func run() (returnErr error) {
 			KeyFile:  *http3Key,
 		})
 		app.MountRunner(http3Endpoint)
-		registerHTTP3Routes(http3Endpoint, metrics, resources)
+		registerHTTP3Routes(http3Endpoint, metrics, resources, app)
 	}
 
 	sseEndpoint := sse.New(sse.Config{Addr: *sseAddr, Path: "/events"})

@@ -75,8 +75,9 @@ connections and returns the joined graceful/force-close error; active request
 contexts are canceled and blocked network I/O is released by that hard close.
 SSE cancels stream request contexts before attempting the same bounded drain and
 force-close fallback. Go cannot terminate user code that permanently ignores
-its context. A connection explicitly hijacked through `net/http` is no longer
-owned by the server and must be tracked and closed by the hijacking component.
+its context, including a gRPC handler that ignores its RPC context. A
+connection explicitly hijacked through `net/http` is no longer owned by the
+server and must be tracked and closed by the hijacking component.
 
 Message transport shutdown is a bounded stop, not a reply-delivery barrier. It
 closes acceptance, session, and writer paths; outbound sends and replies are
@@ -90,6 +91,11 @@ work, sends GOAWAY, and waits for active requests/connections to finish until
 the shutdown context expires. On expiry, remaining connections are forced
 closed and the context error is returned. Test this with the deployed client
 implementations; a client must react to GOAWAY correctly for a clean drain.
+
+When serving-context cancellation initiates shutdown, HTTP/3, gRPC, and
+WebSocket return any graceful-shutdown failure joined with the serving result.
+Callers can therefore use `errors.Is`/`errors.As` to distinguish a clean stop
+from a drain deadline or another shutdown failure.
 
 Operational consequences:
 
@@ -105,6 +111,11 @@ Operational consequences:
 HTTP invocation contexts follow the request deadline and disconnect behavior of
 `net/http`. SSE request contexts additionally cancel when the endpoint begins
 shutdown, so long-lived handlers should select on `Context.Done()` and return.
+SSE `WriteTimeout` covers the initial stream flush and is renewed around each
+`Context.Send` write and flush rather than limiting the lifetime of the HTTP
+response. Its zero value disables those per-write deadlines; direct writes to
+the embedded response writer are outside the `Send` deadline contract.
+
 Message invocations can also follow a session's optional
 `core.SessionLifecycle.Done` signal. Message handlers read the
 middleware-updated cancellation, deadline, trace, and values from
@@ -262,7 +273,7 @@ Use production-like encryption, codecs, middleware, schemas, indexes, logging, a
 | WebSocket | `MaxConnections`, `MaxMessage`, `SendQueueSize`, `HandshakeTimeout`, `ReadTimeout`, `WriteTimeout`, `CheckOrigin` | upgraded sessions, HTTP upgrade/origin policy, reassembled messages, and slow peers |
 | HTTP/HTTPS | `ReadTimeout`, `WriteTimeout`, `IdleTimeout`, `ShutdownTimeout`, `MaxBodyBytes` | requests, bodies, keep-alive residence, drain |
 | HTTP/3 | `MaxConnections`, `MaxBodyBytes`, `MaxHeaderBytes`, handshake/read/write/idle/shutdown timeouts, TLS and QUIC settings | physical connections, request bodies, streams, headers, drain; `Allow0RTT` is a replay-sensitive opt-in, not a capacity control |
-| SSE | `MaxStreams`, `HandshakeTimeout`, `IdleTimeout`, `WriteTimeout`, `ShutdownTimeout` | active streams, request headers, keep-alive residence, long-lived writers, and drain |
+| SSE | `MaxStreams`, `HandshakeTimeout`, `IdleTimeout`, `WriteTimeout`, `ShutdownTimeout` | active streams, request headers, keep-alive residence, initial stream flush, per-event `Send` writes and flushes, and drain |
 | gRPC | `WithShutdownTimeout` and selected `grpc.ServerOption` limits | RPC/message/connection behavior and drain |
 | SQL pools | max open/idle connections, connection lifetime/idle time | database concurrency and connection churn |
 

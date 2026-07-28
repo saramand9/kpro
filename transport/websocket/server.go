@@ -93,6 +93,8 @@ type Server struct {
 	rawConfig Config
 	server    *http.Server
 	listener  net.Listener
+	// shutdownTimeout bounds cancellation-triggered graceful shutdown.
+	shutdownTimeout time.Duration
 
 	lifecycleMu sync.Mutex
 	accepting   bool
@@ -110,10 +112,11 @@ type Server struct {
 // New creates a WebSocket transport with normalized defaults.
 func New(config Config) *Server {
 	return &Server{
-		config:    normalizeConfig(config),
-		rawConfig: config,
-		accepting: true,
-		ready:     make(chan struct{}),
+		config:          normalizeConfig(config),
+		rawConfig:       config,
+		accepting:       true,
+		ready:           make(chan struct{}),
+		shutdownTimeout: 5 * time.Second,
 	}
 }
 
@@ -136,7 +139,7 @@ func (s *Server) Ready() <-chan struct{} {
 }
 
 // ListenAndServe starts the WebSocket HTTP server until ctx is cancelled or serving fails.
-func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error {
+func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) (serveErr error) {
 	if err := s.Validate(); err != nil {
 		return err
 	}
@@ -162,17 +165,21 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 	}
 	s.signalReady()
 	serveDone := make(chan struct{})
+	var shutdownErr error
 	watcherDone := serveutil.ShutdownOnCancel(ctx, serveDone, func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), s.shutdownTimeout)
 		defer cancel()
-		_ = s.Shutdown(shutdownCtx)
+		shutdownErr = s.Shutdown(shutdownCtx)
 	})
-	defer serveutil.FinishContextWatcher(serveDone, watcherDone)
-	err = server.Serve(listener)
-	if errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) {
+	defer func() {
+		serveutil.FinishContextWatcher(serveDone, watcherDone)
+		serveErr = errors.Join(serveErr, shutdownErr)
+	}()
+	serveErr = server.Serve(listener)
+	if errors.Is(serveErr, http.ErrServerClosed) || errors.Is(serveErr, net.ErrClosed) {
 		return nil
 	}
-	return err
+	return serveErr
 }
 
 func (s *Server) claimStart() error {
