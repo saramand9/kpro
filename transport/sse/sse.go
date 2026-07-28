@@ -43,7 +43,9 @@ type Config struct {
 	CertFile string
 	// KeyFile is the TLS key path used when TLS is true.
 	KeyFile string
-	// WriteTimeout is passed to net/http.Server.
+	// WriteTimeout bounds the initial stream flush and each Context.Send write
+	// and flush. Zero disables these per-write deadlines. It does not limit the
+	// lifetime of the SSE stream.
 	WriteTimeout time.Duration
 	// MaxStreams caps active SSE handlers across all HTTP connections.
 	MaxStreams int
@@ -217,7 +219,6 @@ func (e *Endpoint) buildHTTPServer() *http.Server {
 		Addr:              e.config.Addr,
 		Handler:           mux,
 		ReadHeaderTimeout: e.config.HandshakeTimeout,
-		WriteTimeout:      e.config.WriteTimeout,
 		IdleTimeout:       e.config.IdleTimeout,
 		ConnContext:       e.connContext,
 		ConnState:         e.trackConnState,
@@ -323,8 +324,7 @@ func remoteFromConn(conn net.Conn) string {
 
 func (e *Endpoint) serve(w http.ResponseWriter, r *http.Request) {
 	handler, middlewares := e.snapshot()
-	flusher, ok := w.(http.Flusher)
-	if !ok {
+	if !supportsSSEFlush(w) {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
@@ -336,25 +336,34 @@ func (e *Endpoint) serve(w http.ResponseWriter, r *http.Request) {
 	streamCtx := &Context{
 		ResponseWriter: w,
 		Request:        r,
-		flusher:        flusher,
 		middlewares:    middlewares,
 		tls:            e.config.TLS,
 		connID:         sessionIDFromRemote(r.RemoteAddr),
 		remote:         r.RemoteAddr,
+		writeTimeout:   e.config.WriteTimeout,
 	}
 	if state := sseConnStateFromContext(r.Context()); state != nil {
 		streamCtx.connID = state.id
 		streamCtx.remote = state.remote
 		streamCtx.connDone = state.Done()
 	}
-	streamStarted := false
+	headersCommitted := false
+	streamReady := false
 	run := func() error {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
-		w.WriteHeader(http.StatusOK)
-		flusher.Flush()
-		streamStarted = true
+		if err := streamCtx.withWriteDeadline(func(controller *http.ResponseController) error {
+			w.WriteHeader(http.StatusOK)
+			headersCommitted = true
+			if err := controller.Flush(); err != nil {
+				return fmt.Errorf("sse flush stream headers: %w", err)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		streamReady = true
 		if handler == nil {
 			return nil
 		}
@@ -379,11 +388,32 @@ func (e *Endpoint) serve(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		return
 	}
-	if streamStarted && streamCtx != nil {
+	if streamReady && streamCtx != nil {
 		_ = streamCtx.Send("error", []byte(core.PublicErrorMessage(err)))
 		return
 	}
+	if headersCommitted {
+		// A failed initial flush already committed the response and often means
+		// the peer is no longer writable. Do not retry on the same connection.
+		return
+	}
 	http.Error(w, core.PublicErrorMessage(err), httpStatusForError(err))
+}
+
+func supportsSSEFlush(w http.ResponseWriter) bool {
+	for depth := 0; depth < 32 && w != nil; depth++ {
+		switch candidate := w.(type) {
+		case interface{ FlushError() error }:
+			return true
+		case http.Flusher:
+			return true
+		case interface{ Unwrap() http.ResponseWriter }:
+			w = candidate.Unwrap()
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 func httpStatusForError(err error) int {
@@ -526,15 +556,15 @@ func (e errorsText) Error() string {
 type Context struct {
 	http.ResponseWriter
 	Request *http.Request
-	flusher http.Flusher
 	mu      sync.Mutex
 
-	middlewares []core.Middleware
-	tls         bool
-	connID      uint64
-	remote      string
-	connDone    <-chan struct{}
-	values      map[string]any
+	middlewares  []core.Middleware
+	tls          bool
+	connID       uint64
+	remote       string
+	connDone     <-chan struct{}
+	values       map[string]any
+	writeTimeout time.Duration
 }
 
 // Done returns the request cancellation channel.
@@ -543,27 +573,46 @@ func (c *Context) Done() <-chan struct{} {
 }
 
 // Send writes one SSE event and flushes the stream.
-func (c *Context) Send(event string, data []byte) error {
+func (c *Context) Send(event string, data []byte) (err error) {
 	if err := c.applyPacketLimiter(); err != nil {
 		return err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if event != "" {
-		if _, err := fmt.Fprintf(c.ResponseWriter, "event: %s\n", event); err != nil {
+	return c.withWriteDeadline(func(controller *http.ResponseController) error {
+		if event != "" {
+			if _, err := fmt.Fprintf(c.ResponseWriter, "event: %s\n", event); err != nil {
+				return err
+			}
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if _, err := fmt.Fprintf(c.ResponseWriter, "data: %s\n", line); err != nil {
+				return err
+			}
+		}
+		if _, err := fmt.Fprint(c.ResponseWriter, "\n"); err != nil {
 			return err
 		}
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if _, err := fmt.Fprintf(c.ResponseWriter, "data: %s\n", line); err != nil {
-			return err
+		if err := controller.Flush(); err != nil {
+			return fmt.Errorf("sse flush event: %w", err)
 		}
+		return nil
+	})
+}
+
+func (c *Context) withWriteDeadline(write func(*http.ResponseController) error) (err error) {
+	controller := http.NewResponseController(c.ResponseWriter)
+	if c.writeTimeout > 0 {
+		if err := controller.SetWriteDeadline(time.Now().Add(c.writeTimeout)); err != nil {
+			return fmt.Errorf("sse set write deadline: %w", err)
+		}
+		defer func() {
+			if clearErr := controller.SetWriteDeadline(time.Time{}); clearErr != nil {
+				err = errors.Join(err, fmt.Errorf("sse clear write deadline: %w", clearErr))
+			}
+		}()
 	}
-	if _, err := fmt.Fprint(c.ResponseWriter, "\n"); err != nil {
-		return err
-	}
-	c.flusher.Flush()
-	return nil
+	return write(controller)
 }
 
 func (c *Context) applyPacketLimiter() error {

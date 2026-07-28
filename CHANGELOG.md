@@ -36,6 +36,18 @@ upgrading between minor versions.
 
 ### Fixed
 
+- HTTP and HTTP/3 now install `MaxBodyBytes` on the native request before
+  middleware and handlers run, so reading `Request().Body` cannot bypass the
+  endpoint limit and all consumers share one request budget.
+- Cancellation-triggered shutdown failures from HTTP/3, gRPC, and WebSocket
+  serving are now returned to the caller and remain discoverable through
+  `errors.Is`/`errors.As` instead of being silently discarded.
+- SSE `WriteTimeout` now bounds the initial stream flush and each
+  `Context.Send` write and flush, renewing the deadline per event instead of
+  expiring the whole long-lived response.
+- The reference app applies recovery and metrics middleware to every mounted
+  transport and reports readiness only while the whole server is running and
+  its configured resources are healthy.
 - Router handler and panic paths no longer discard failures while sending the
   safe `MsgError` response; observers receive the response failure and rejected
   dispatches retain both errors through `errors.Is`/`errors.As`.
@@ -44,6 +56,12 @@ upgrading between minor versions.
   shutdown error for the caller.
 - The reference app no longer reports readiness while an enabled SQL resource
   is unhealthy, and it no longer leaves the SQL pool unbounded by default.
+
+### Security
+
+- Upgraded `google.golang.org/grpc` to v1.82.1 to address GO-2026-6061; the
+  required protobuf, genproto, and OpenTelemetry dependency versions move with
+  that security update.
 
 ## [0.1.0] - 2026-07-24
 

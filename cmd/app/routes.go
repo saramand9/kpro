@@ -25,6 +25,10 @@ type appResourceHealth interface {
 	Health(context.Context) []lifecycle.Health
 }
 
+type appServingState interface {
+	State() server.State
+}
+
 type probeResponse struct {
 	Status string `json:"status"`
 }
@@ -36,10 +40,14 @@ func registerMessageRoutes(endpoint *server.Endpoint, services appServices) {
 	}
 }
 
-func registerHTTPRoutes(endpoint *httpx.Endpoint, metrics *middleware.Metrics, services appServices, resources appResourceHealth) {
-	endpoint.Get("/health", readinessHandler(resources))
+func installAppMiddleware(app *server.Server, metrics *middleware.Metrics) {
+	app.Use(middleware.Recover(), metrics.Middleware())
+}
+
+func registerHTTPRoutes(endpoint *httpx.Endpoint, metrics *middleware.Metrics, services appServices, resources appResourceHealth, serving appServingState) {
+	endpoint.Get("/health", readinessHandler(resources, serving))
 	endpoint.Get("/livez", livenessHandler)
-	endpoint.Get("/readyz", readinessHandler(resources))
+	endpoint.Get("/readyz", readinessHandler(resources, serving))
 	endpoint.Get("/metrics", func(ctx *httpx.Context) error {
 		return ctx.JSON(200, metrics.Snapshot())
 	})
@@ -61,10 +69,10 @@ func registerHTTPRoutes(endpoint *httpx.Endpoint, metrics *middleware.Metrics, s
 	}
 }
 
-func registerHTTP3Routes(endpoint *http3x.Endpoint, metrics *middleware.Metrics, resources appResourceHealth) {
-	endpoint.Get("/health", readinessHandler(resources))
+func registerHTTP3Routes(endpoint *http3x.Endpoint, metrics *middleware.Metrics, resources appResourceHealth, serving appServingState) {
+	endpoint.Get("/health", readinessHandler(resources, serving))
 	endpoint.Get("/livez", livenessHandler)
-	endpoint.Get("/readyz", readinessHandler(resources))
+	endpoint.Get("/readyz", readinessHandler(resources, serving))
 	endpoint.Get("/metrics", func(ctx *http3x.Context) error {
 		return ctx.JSON(http.StatusOK, metrics.Snapshot())
 	})
@@ -81,16 +89,19 @@ func livenessHandler(ctx *httpx.Context) error {
 	return ctx.JSON(http.StatusOK, probeResponse{Status: "alive"})
 }
 
-func readinessHandler(resources appResourceHealth) httpx.Handler {
-	return readinessHandlerWithTimeout(resources, appReadinessTimeout)
+func readinessHandler(resources appResourceHealth, serving appServingState) httpx.Handler {
+	return readinessHandlerWithTimeout(resources, serving, appReadinessTimeout)
 }
 
-func readinessHandlerWithTimeout(resources appResourceHealth, timeout time.Duration) httpx.Handler {
+func readinessHandlerWithTimeout(resources appResourceHealth, serving appServingState, timeout time.Duration) httpx.Handler {
 	return func(ctx *httpx.Context) error {
-		if resourcesReady(ctx.Context(), resources, timeout) {
-			return ctx.JSON(http.StatusOK, probeResponse{Status: "ready"})
+		if serving == nil || serving.State() != server.StateRunning {
+			return ctx.JSON(http.StatusServiceUnavailable, probeResponse{Status: "not_ready"})
 		}
-		return ctx.JSON(http.StatusServiceUnavailable, probeResponse{Status: "not_ready"})
+		if !resourcesReady(ctx.Context(), resources, timeout) || serving.State() != server.StateRunning {
+			return ctx.JSON(http.StatusServiceUnavailable, probeResponse{Status: "not_ready"})
+		}
+		return ctx.JSON(http.StatusOK, probeResponse{Status: "ready"})
 	}
 }
 
