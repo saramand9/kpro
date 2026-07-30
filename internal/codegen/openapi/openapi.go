@@ -59,13 +59,14 @@ type Field struct {
 }
 
 type Operation struct {
-	ID         string
-	Method     string
-	Path       string
-	Parameters []Parameter
-	Request    *TypeRef
-	Response   *TypeRef
-	Status     int
+	ID              string
+	Method          string
+	Path            string
+	Parameters      []Parameter
+	Request         *TypeRef
+	RequestRequired bool
+	Response        *TypeRef
+	Status          int
 }
 
 type Parameter struct {
@@ -326,16 +327,43 @@ func lowerOperation(path, method string, source *openapi3.Operation, parameters 
 		}
 	}
 	if source.RequestBody != nil {
-		request, err := mediaSchema(source.RequestBody.Value, "request body")
+		if method == "GET" {
+			return Operation{}, fmt.Errorf("%w: GET operation %q has a request body", ErrUnsupported, op.ID)
+		}
+		if source.RequestBody.Ref != "" || source.RequestBody.Value == nil {
+			return Operation{}, fmt.Errorf("%w: %s %s requestBody references are not supported", ErrUnsupported, method, path)
+		}
+		if !source.RequestBody.Value.Required {
+			return Operation{}, fmt.Errorf("%w: %s %s optional request body", ErrUnsupported, method, path)
+		}
+		request, err := requestSchema(source.RequestBody.Value, method+" "+path+" request body")
 		if err != nil {
 			return Operation{}, err
 		}
 		op.Request = request
+		op.RequestRequired = true
+	} else if method == "POST" || method == "PUT" || method == "PATCH" {
+		return Operation{}, fmt.Errorf("%w: %s %s requires a request body", ErrUnsupported, method, path)
 	}
 	if source.Responses == nil {
 		return Operation{}, fmt.Errorf("openapi: %s %s has no responses", method, path)
 	}
 	responses := source.Responses.Map()
+	for status := range responses {
+		if status == "2XX" {
+			return Operation{}, fmt.Errorf("%w: wildcard success response %q", ErrUnsupported, status)
+		}
+		code, err := strconv.Atoi(status)
+		if err == nil && code >= 200 && code < 300 && code != 200 && code != 201 && code != 202 && code != 204 {
+			return Operation{}, fmt.Errorf("%w: success response %d", ErrUnsupported, code)
+		}
+	}
+	response204 := responses["204"]
+	if response204 != nil && response204.Value != nil && len(response204.Value.Content) != 0 {
+		return Operation{}, fmt.Errorf("%w: response 204 must not declare content", ErrUnsupported)
+	}
+	var selectedResponse *TypeRef
+	var selectedStatus int
 	for _, status := range []int{200, 201, 202} {
 		response := responses[strconv.Itoa(status)]
 		if response == nil || response.Value == nil {
@@ -348,14 +376,41 @@ func lowerOperation(path, method string, source *openapi3.Operation, parameters 
 		if value == nil || value.Name == "" {
 			return Operation{}, fmt.Errorf("%w: response %d must reference a local component schema", ErrUnsupported, status)
 		}
-		op.Status, op.Response = status, value
+		if selectedResponse != nil {
+			return Operation{}, fmt.Errorf("%w: %s %s declares multiple success responses", ErrUnsupported, method, path)
+		}
+		selectedStatus, selectedResponse = status, value
+	}
+	if selectedResponse != nil {
+		if response204 != nil && response204.Value != nil {
+			return Operation{}, fmt.Errorf("%w: %s %s declares multiple success responses", ErrUnsupported, method, path)
+		}
+		op.Status, op.Response = selectedStatus, selectedResponse
 		return op, nil
 	}
-	if response := responses["204"]; response != nil && response.Value != nil {
+	if response204 != nil && response204.Value != nil {
 		op.Status = 204
 		return op, nil
 	}
 	return Operation{}, fmt.Errorf("%w: %s %s needs a 200, 201, 202 JSON component response or 204", ErrUnsupported, method, path)
+}
+
+func requestSchema(value *openapi3.RequestBody, location string) (*TypeRef, error) {
+	if value == nil || len(value.Content) != 1 {
+		return nil, fmt.Errorf("%w: %s must contain only application/json", ErrUnsupported, location)
+	}
+	media := value.Content["application/json"]
+	if media == nil || media.Schema == nil {
+		return nil, fmt.Errorf("%w: %s must use application/json with a schema", ErrUnsupported, location)
+	}
+	typeRef, _, _, err := lowerSchema(media.Schema, location)
+	if err != nil {
+		return nil, err
+	}
+	if typeRef.Name == "" {
+		return nil, fmt.Errorf("%w: %s must reference a local component schema", ErrUnsupported, location)
+	}
+	return &typeRef, nil
 }
 
 func mediaSchema(value interface{}, location string) (*TypeRef, error) {
@@ -368,8 +423,8 @@ func mediaSchema(value interface{}, location string) (*TypeRef, error) {
 	default:
 		return nil, fmt.Errorf("openapi: internal: unexpected %T", value)
 	}
-	if content == nil {
-		return nil, nil
+	if len(content) != 1 {
+		return nil, fmt.Errorf("%w: %s must contain only application/json", ErrUnsupported, location)
 	}
 	media := content["application/json"]
 	if media == nil || media.Schema == nil {
