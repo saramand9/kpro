@@ -41,7 +41,7 @@ func printUsage(output io.Writer) {
 	fmt.Fprintln(output, "Usage:")
 	fmt.Fprintln(output, "  kpro new <directory> [--module example.com/service] [--name service] [--profile minimal|http-api] [--kpro-replace path]")
 	fmt.Fprintln(output, "  kpro validate [--config kpro.gen.yaml] [--root dir]")
-	fmt.Fprintln(output, "  kpro generate [--config kpro.gen.yaml] [--root dir] [--check] [--dry-run]")
+	fmt.Fprintln(output, "  kpro generate [--config kpro.gen.yaml] [--root dir] [--check] [--dry-run] [--allow-plugins]")
 	fmt.Fprintln(output, "  kpro version")
 	fmt.Fprintln(output, "  kpro doctor")
 }

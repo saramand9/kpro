@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -12,6 +13,12 @@ import (
 	"github.com/saramand9/kpro/internal/codegen"
 	"github.com/saramand9/kpro/internal/codegen/manifest"
 )
+
+type pluginPlannerFunc func(context.Context, manifest.Manifest, manifest.Source, []byte) (codegen.Plan, error)
+
+func (f pluginPlannerFunc) Plan(ctx context.Context, value manifest.Manifest, source manifest.Source, content []byte) (codegen.Plan, error) {
+	return f(ctx, value, source, content)
+}
 
 const testCodegenManifest = `apiVersion: kpro.dev/codegen/v1alpha1
 module: example.com/orders
@@ -226,6 +233,288 @@ func TestGenerateUsesConfigScopedLockAndRejectsOutsideConfig(t *testing.T) {
 	err := execute([]string{"validate", "--root", root, "--config", outside}, &output, &output)
 	if err == nil || !strings.Contains(err.Error(), "must be inside root") {
 		t.Fatalf("outside config error = %v", err)
+	}
+}
+
+func TestPluginValidateDoesNotExecuteAndGenerateRequiresAuthorization(t *testing.T) {
+	root := t.TempDir()
+	value := pluginCodegenManifest("tools/missing-plugin")
+	if err := os.WriteFile(filepath.Join(root, defaultCodegenConfig), []byte(value), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := 0
+	previousFactory := newPluginHost
+	newPluginHost = func(string, []string) pluginPlanner {
+		calls++
+		return pluginPlannerFunc(func(context.Context, manifest.Manifest, manifest.Source, []byte) (codegen.Plan, error) {
+			return codegen.Plan{}, errors.New("must not run")
+		})
+	}
+	t.Cleanup(func() { newPluginHost = previousFactory })
+
+	var output bytes.Buffer
+	if err := execute([]string{"validate", "--root", root}, &output, &output); err != nil {
+		t.Fatalf("validate plugin manifest: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("validate constructed %d plugin hosts", calls)
+	}
+
+	output.Reset()
+	err := execute([]string{"generate", "--root", root}, &output, &output)
+	if err == nil || !strings.Contains(err.Error(), "--allow-plugins") {
+		t.Fatalf("generate without authorization error = %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("unauthorized generate constructed %d plugin hosts", calls)
+	}
+}
+
+func TestGenerateAuthorizedPluginPreservesExecutionModes(t *testing.T) {
+	root := t.TempDir()
+	value := pluginCodegenManifest("tools/test-plugin")
+	if err := os.WriteFile(filepath.Join(root, defaultCodegenConfig), []byte(value), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "api"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "tools"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sourceContent := []byte("plugin contract bytes\n")
+	if err := os.WriteFile(filepath.Join(root, "api", "orders.openapi.yaml"), sourceContent, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pluginFilename := filepath.Join(root, "tools", "test-plugin")
+	if err := os.WriteFile(pluginFilename, []byte("test seam executable placeholder"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := codegen.BuildPlan(codegen.File{
+		Path:      "internal/plugin/plugin.gen.go",
+		Content:   []byte("package plugin\n\nconst Generated = true\n"),
+		Ownership: codegen.Generated,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls int
+	var gotCommand string
+	var gotArgs []string
+	previousFactory := newPluginHost
+	newPluginHost = func(command string, args []string) pluginPlanner {
+		gotCommand = command
+		gotArgs = append([]string(nil), args...)
+		return pluginPlannerFunc(func(ctx context.Context, _ manifest.Manifest, source manifest.Source, content []byte) (codegen.Plan, error) {
+			calls++
+			if ctx == nil {
+				t.Fatal("plugin context is nil")
+			}
+			if source.ID != "public-api" {
+				t.Fatalf("plugin source = %#v", source)
+			}
+			if !bytes.Equal(content, sourceContent) {
+				t.Fatalf("plugin source content = %q", content)
+			}
+			return plan, nil
+		})
+	}
+	t.Cleanup(func() { newPluginHost = previousFactory })
+
+	generated := filepath.Join(root, "internal", "plugin", "plugin.gen.go")
+	var output bytes.Buffer
+	if err := execute([]string{"generate", "--root", root, "--allow-plugins", "--dry-run"}, &output, &output); err != nil {
+		t.Fatalf("plugin dry-run: %v", err)
+	}
+	if _, err := os.Stat(generated); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("plugin dry-run wrote output: %v", err)
+	}
+	if !strings.Contains(output.String(), "create internal/plugin/plugin.gen.go") {
+		t.Fatalf("plugin dry-run output = %q", output.String())
+	}
+
+	output.Reset()
+	if err := execute([]string{"generate", "--root", root, "--allow-plugins"}, &output, &output); err != nil {
+		t.Fatalf("plugin apply: %v", err)
+	}
+	if _, err := os.Stat(generated); err != nil {
+		t.Fatalf("plugin apply output: %v", err)
+	}
+	output.Reset()
+	if err := execute([]string{"generate", "--root", root, "--allow-plugins", "--check"}, &output, &output); err != nil {
+		t.Fatalf("plugin check: %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("plugin Plan calls = %d, want 3", calls)
+	}
+	wantCommand, err := filepath.Abs(pluginFilename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotCommand != wantCommand {
+		t.Fatalf("plugin command = %q, want %q", gotCommand, wantCommand)
+	}
+	if len(gotArgs) != 1 || gotArgs[0] != "--strict" {
+		t.Fatalf("plugin args = %#v", gotArgs)
+	}
+}
+
+func TestValidateRejectsEscapingPluginCommand(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, defaultCodegenConfig), []byte(pluginCodegenManifest("../outside-plugin")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	err := execute([]string{"validate", "--root", root}, &output, &output)
+	if err == nil || !strings.Contains(err.Error(), "unsafe command") {
+		t.Fatalf("escaping plugin command error = %v", err)
+	}
+}
+
+func TestResolvePluginCommandRejectsSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside-plugin")
+	if err := os.WriteFile(outside, []byte("outside"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tools := filepath.Join(root, "tools")
+	if err := os.MkdirAll(tools, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(tools, "plugin")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+	_, err := resolvePluginCommand(root, "tools/plugin")
+	if err == nil || !strings.Contains(err.Error(), "outside root") {
+		t.Fatalf("symlink escape error = %v", err)
+	}
+}
+
+func TestResolvePluginCommandUsesPATHForPlainName(t *testing.T) {
+	want, err := exec.LookPath("go")
+	if err != nil {
+		t.Skipf("go is unavailable on PATH: %v", err)
+	}
+	want, err = filepath.Abs(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolvePluginCommand(t.TempDir(), "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("resolved PATH command = %q, want %q", got, want)
+	}
+}
+
+func TestGenerateBuiltInSourceDoesNotConstructPluginHost(t *testing.T) {
+	root := t.TempDir()
+	writeOpenAPICodegenProject(t, root)
+	previousFactory := newPluginHost
+	newPluginHost = func(string, []string) pluginPlanner {
+		t.Fatal("built-in generator constructed a plugin host")
+		return nil
+	}
+	t.Cleanup(func() { newPluginHost = previousFactory })
+
+	var output bytes.Buffer
+	if err := execute([]string{"generate", "--root", root, "--dry-run"}, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func pluginCodegenManifest(command string) string {
+	return strings.Replace(
+		testCodegenManifest,
+		"    package: internal/modules/orders",
+		"    package: internal/modules/orders\n    plugin:\n      command: "+command+"\n      args: [--strict]",
+		1,
+	)
+}
+
+func TestGenerateMessageApplyAndCheck(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "api"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	value := `apiVersion: kpro.dev/codegen/v1alpha1
+module: example.com/generated
+service: generated
+sources:
+  - id: session-messages
+    kind: message
+    path: api/messages.yaml
+    package: internal/messages
+`
+	contract := `apiVersion: kpro.dev/message/v1alpha1
+service: orders
+encoding: json
+messages:
+  - id: 100
+    name: create-order
+    dispatch: sync
+    request:
+      fields:
+        - name: order-id
+          type: string
+          required: true
+    response:
+      fields:
+        - name: accepted
+          type: bool
+          required: true
+`
+	if err := os.WriteFile(filepath.Join(root, defaultCodegenConfig), []byte(value), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "api", "messages.yaml"), []byte(contract), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	if err := execute([]string{"generate", "--root", root}, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"internal/messages/types/messages_orders.gen.go",
+		"internal/messages/contract/service_orders.gen.go",
+		"internal/messages/kpromessage/routes_orders.gen.go",
+		"internal/messages/service/orders.go",
+		codegen.DefaultLockFile,
+	} {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(name))); err != nil {
+			t.Fatalf("message output %q: %v", name, err)
+		}
+	}
+	output.Reset()
+	if err := execute([]string{"generate", "--root", root, "--check"}, &output, &output); err != nil {
+		t.Fatalf("check message outputs: %v", err)
+	}
+}
+
+func TestGenerateOpenAPIRejectsSymlinkSourceEscape(t *testing.T) {
+	root := t.TempDir()
+	writeOpenAPICodegenProject(t, root)
+	outside := filepath.Join(t.TempDir(), "outside.openapi.yaml")
+	if err := os.WriteFile(outside, []byte(testOpenAPISpec), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(root, "api", "orders.openapi.yaml")
+	if err := os.Remove(source); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, source); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+
+	var output bytes.Buffer
+	err := execute([]string{"generate", "--root", root}, &output, &output)
+	if err == nil || !strings.Contains(err.Error(), "outside root") {
+		t.Fatalf("symlink source escape error = %v", err)
 	}
 }
 func TestGenerateProtoWithInstalledToolchain(t *testing.T) {
