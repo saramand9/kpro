@@ -54,6 +54,15 @@ type Source struct {
 	Kind    SourceKind `yaml:"kind"`
 	Path    string     `yaml:"path"`
 	Package string     `yaml:"package"`
+	Plugin  *Plugin    `yaml:"plugin,omitempty"`
+}
+
+// Plugin selects an external generator for one source. Command is either a
+// plain executable name resolved through PATH at generation time, or a safe
+// project-relative path. Arguments are passed directly without a shell.
+type Plugin struct {
+	Command string   `yaml:"command"`
+	Args    []string `yaml:"args,omitempty"`
 }
 
 // Load reads, strictly decodes, normalizes, and validates a manifest.
@@ -132,6 +141,9 @@ func (m Manifest) Validate() error {
 		if err := validatePackagePath(source.Package); err != nil {
 			return fmt.Errorf("%s has invalid package %q: %w", prefix, source.Package, err)
 		}
+		if err := validatePlugin(source.Plugin); err != nil {
+			return fmt.Errorf("%s has invalid plugin: %w", prefix, err)
+		}
 	}
 	return nil
 }
@@ -149,7 +161,39 @@ func (m *Manifest) normalize() {
 		if normalized, err := codegen.SafeRelativePath(strings.TrimSpace(m.Sources[i].Package)); err == nil {
 			m.Sources[i].Package = normalized
 		}
+		if m.Sources[i].Plugin != nil {
+			m.Sources[i].Plugin.Command = strings.TrimSpace(m.Sources[i].Plugin.Command)
+			if strings.ContainsAny(m.Sources[i].Plugin.Command, `/\`) {
+				if normalized, err := codegen.SafeRelativePath(m.Sources[i].Plugin.Command); err == nil {
+					m.Sources[i].Plugin.Command = normalized
+				}
+			}
+		}
 	}
+}
+
+func validatePlugin(plugin *Plugin) error {
+	if plugin == nil {
+		return nil
+	}
+	if plugin.Command == "" {
+		return errors.New("command cannot be empty")
+	}
+	if strings.IndexByte(plugin.Command, 0) >= 0 {
+		return errors.New("command cannot contain NUL")
+	}
+	if _, err := codegen.SafeRelativePath(plugin.Command); err != nil {
+		return fmt.Errorf("unsafe command %q: %w", plugin.Command, err)
+	}
+	for i, argument := range plugin.Args {
+		if argument == "" {
+			return fmt.Errorf("args[%d] cannot be empty", i)
+		}
+		if strings.IndexByte(argument, 0) >= 0 {
+			return fmt.Errorf("args[%d] cannot contain NUL", i)
+		}
+	}
+	return nil
 }
 
 func validatePackagePath(value string) error {
