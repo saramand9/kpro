@@ -12,6 +12,7 @@ import (
 	"github.com/saramand9/kpro/internal/codegen"
 	"github.com/saramand9/kpro/internal/codegen/manifest"
 	openapigen "github.com/saramand9/kpro/internal/codegen/openapi"
+	"github.com/saramand9/kpro/internal/codegen/protogen"
 )
 
 const defaultCodegenConfig = "kpro.gen.yaml"
@@ -32,6 +33,7 @@ func (f sourceGeneratorFunc) Plan(root string, value manifest.Manifest, source m
 
 var sourceGenerators = map[manifest.SourceKind]sourceGenerator{
 	manifest.KindOpenAPI: sourceGeneratorFunc(planOpenAPI),
+	manifest.KindProto:   sourceGeneratorFunc(planProto),
 }
 
 type codegenInput struct {
@@ -185,6 +187,13 @@ func planOpenAPI(root string, value manifest.Manifest, source manifest.Source) (
 	})
 }
 
+func planProto(root string, value manifest.Manifest, source manifest.Source) (codegen.Plan, error) {
+	files, err := (protogen.Generator{Root: root}).Plan(value, source)
+	if err != nil {
+		return codegen.Plan{}, err
+	}
+	return codegen.BuildPlan(files...)
+}
 func printGenerationResult(output io.Writer, lockFile string, result codegen.Result) {
 	for _, path := range result.Created {
 		fmt.Fprintf(output, "create %s\n", path)
