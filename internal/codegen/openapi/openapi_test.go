@@ -55,6 +55,108 @@ components:
           items: { type: string }
 `
 
+const crudSpec = `openapi: 3.0.3
+info:
+  title: CRUD Pets
+  version: 1.0.0
+paths:
+  /pets:
+    post:
+      operationId: createPet
+      parameters:
+        - name: source
+          in: query
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PetInput' }
+      responses:
+        '201':
+          description: created pet
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Pet' }
+  /pets/{id}:
+    get:
+      operationId: getPet
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: pet
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Pet' }
+    put:
+      operationId: updatePet
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PetInput' }
+      responses:
+        '200':
+          description: updated pet
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Pet' }
+    patch:
+      operationId: patchPet
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PetPatch' }
+      responses:
+        '200':
+          description: patched pet
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Pet' }
+    delete:
+      operationId: deletePet
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '204': { description: deleted }
+components:
+  schemas:
+    Pet:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+    PetInput:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+    PetPatch:
+      type: object
+      properties:
+        name: { type: string }
+`
+
 func TestBuildPlanDeterministicAndCompiles(t *testing.T) {
 	doc, err := Parse([]byte(sampleSpec))
 	if err != nil {
@@ -132,13 +234,13 @@ components:
 		t.Fatalf("duplicate operationId error = %v", err)
 	}
 
-	post := strings.Replace(sampleSpec, "    get:\n      operationId: health", "    post:\n      operationId: health", 1)
-	doc, err := Parse([]byte(post))
+	head := strings.Replace(sampleSpec, "    get:\n      operationId: health", "    head:\n      operationId: health", 1)
+	doc, err := Parse([]byte(head))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err = BuildPlan(doc, Options{Module: "example.com/generated"}); !errors.Is(err, ErrUnsupported) {
-		t.Fatalf("POST error = %v", err)
+		t.Fatalf("HEAD error = %v", err)
 	}
 
 	inline := strings.Replace(sampleSpec, "schema: { $ref: '#/components/schemas/Pet' }", "schema: { type: string }", 1)
@@ -241,5 +343,205 @@ paths: {}
         '200':`, 1)
 	if _, err = Parse([]byte(callback)); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("callback error = %v, want ErrUnsupported", err)
+	}
+}
+
+func TestCRUDGeneratedRoutesCompileAndBind(t *testing.T) {
+	doc, err := Parse([]byte(crudSpec))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	for _, operation := range doc.Operations {
+		if operation.Request != nil && !operation.RequestRequired {
+			t.Fatalf("operation %s lost required request state", operation.ID)
+		}
+	}
+	plan, err := BuildPlan(doc, Options{Module: "example.com/generated"})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	root, err := filepath.Abs("../../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	for _, file := range plan.Files {
+		target := filepath.Join(dir, filepath.FromSlash(file.Path))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, file.Content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	generatedTest := `package kprohttp
+
+import (
+    "context"
+    "net/http"
+    "net/http/httptest"
+    "strings"
+    "testing"
+
+    contract "example.com/generated/internal/openapi/contract"
+    types "example.com/generated/internal/openapi/types"
+    "github.com/saramand9/kpro/transport/httpx"
+)
+
+type recordingAPI struct {
+    source string
+    id int64
+    name string
+}
+
+var _ contract.API = (*recordingAPI)(nil)
+
+func (api *recordingAPI) CreatePet(_ context.Context, params contract.CreatePetParams, request types.PetInput) (types.Pet, error) {
+    api.source, api.name = params.Source, request.Name
+    return types.Pet{Id: 1, Name: request.Name}, nil
+}
+func (api *recordingAPI) GetPet(_ context.Context, params contract.GetPetParams) (types.Pet, error) {
+    api.id = params.Id
+    return types.Pet{Id: params.Id, Name: "found"}, nil
+}
+func (api *recordingAPI) UpdatePet(_ context.Context, params contract.UpdatePetParams, request types.PetInput) (types.Pet, error) {
+    api.id, api.name = params.Id, request.Name
+    return types.Pet{Id: params.Id, Name: request.Name}, nil
+}
+func (api *recordingAPI) PatchPet(_ context.Context, params contract.PatchPetParams, request types.PetPatch) (types.Pet, error) {
+    api.id = params.Id
+    if request.Name != nil { api.name = *request.Name }
+    return types.Pet{Id: params.Id, Name: api.name}, nil
+}
+func (api *recordingAPI) DeletePet(_ context.Context, params contract.DeletePetParams) error {
+    api.id = params.Id
+    return nil
+}
+
+func request(endpoint *httpx.Endpoint, method, target, contentType, body string) *httptest.ResponseRecorder {
+    req := httptest.NewRequest(method, target, strings.NewReader(body))
+    if contentType != "" { req.Header.Set("Content-Type", contentType) }
+    recorder := httptest.NewRecorder()
+    endpoint.ServeHTTP(recorder, req)
+    return recorder
+}
+
+func TestGeneratedBindings(t *testing.T) {
+    var typedNil *recordingAPI
+    if err := Register(httpx.New(httpx.Config{}), typedNil); err == nil {
+        t.Fatal("Register accepted a typed-nil API")
+    }
+    api := &recordingAPI{}
+    endpoint := httpx.New(httpx.Config{})
+    if err := Register(endpoint, api); err != nil { t.Fatal(err) }
+
+    response := request(endpoint, http.MethodPost, "/pets?source=import", "application/json; charset=utf-8", ` + "`" + `{"name":"Milo"}` + "`" + `)
+    if response.Code != http.StatusCreated || api.source != "import" || api.name != "Milo" {
+        t.Fatalf("POST = status %d source %q name %q", response.Code, api.source, api.name)
+    }
+    response = request(endpoint, http.MethodPut, "/pets/7", "application/json", ` + "`" + `{"name":"Otis"}` + "`" + `)
+    if response.Code != http.StatusOK || api.id != 7 || api.name != "Otis" {
+        t.Fatalf("PUT = status %d id %d name %q", response.Code, api.id, api.name)
+    }
+    response = request(endpoint, http.MethodPatch, "/pets/8", "application/json", ` + "`" + `{"name":"Pip"}` + "`" + `)
+    if response.Code != http.StatusOK || api.id != 8 || api.name != "Pip" {
+        t.Fatalf("PATCH = status %d id %d name %q", response.Code, api.id, api.name)
+    }
+    response = request(endpoint, http.MethodPatch, "/pets/10", "application/json", ` + "`" + `{}` + "`" + `)
+    if response.Code != http.StatusOK || api.id != 10 || api.name != "Pip" {
+        t.Fatalf("empty PATCH = status %d id %d name %q", response.Code, api.id, api.name)
+    }
+    response = request(endpoint, http.MethodDelete, "/pets/9", "", "")
+    if response.Code != http.StatusNoContent || api.id != 9 {
+        t.Fatalf("DELETE = status %d id %d", response.Code, api.id)
+    }
+    response = request(endpoint, http.MethodPost, "/pets?source=import", "application/json", ` + "`" + `{"name":` + "`" + `)
+    if response.Code != http.StatusBadRequest { t.Fatalf("invalid JSON status = %d", response.Code) }
+    response = request(endpoint, http.MethodPost, "/pets?source=import", "text/plain", ` + "`" + `{"name":"Milo"}` + "`" + `)
+    if response.Code != http.StatusUnsupportedMediaType { t.Fatalf("content type status = %d", response.Code) }
+
+    limited := httpx.New(httpx.Config{MaxBodyBytes: 8})
+    if err := Register(limited, &recordingAPI{}); err != nil { t.Fatal(err) }
+    response = request(limited, http.MethodPost, "/pets?source=import", "application/json", ` + "`" + `{"name":"too long"}` + "`" + `)
+    if response.Code != http.StatusRequestEntityTooLarge { t.Fatalf("oversize status = %d body %q", response.Code, response.Body.String()) }
+}
+`
+	testPath := filepath.Join(dir, "internal", "openapi", "kprohttp", "routes_test.go")
+	if err := os.WriteFile(testPath, []byte(generatedTest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mod := "module example.com/generated\n\ngo 1.25.12\n\nrequire github.com/saramand9/kpro v0.0.0\n\nreplace github.com/saramand9/kpro => " + filepath.ToSlash(root) + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(mod), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("go", "test", "./...")
+	command.Dir = dir
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("generated CRUD packages/tests fail: %v\n%s", err, output)
+	}
+}
+
+func TestRequestBodySubsetRejectsOptionalAndInlineSchemas(t *testing.T) {
+	missing := strings.Replace(crudSpec, "      requestBody:\n        required: true\n        content:\n          application/json:\n            schema: { $ref: '#/components/schemas/PetInput' }\n", "", 1)
+	if _, err := Parse([]byte(missing)); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("missing POST request error = %v", err)
+	}
+	optional := strings.Replace(crudSpec, "      requestBody:\n        required: true", "      requestBody:\n        required: false", 1)
+	if _, err := Parse([]byte(optional)); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("optional request error = %v", err)
+	}
+	inline := strings.Replace(crudSpec, "schema: { $ref: '#/components/schemas/PetInput' }", "schema: { type: object, properties: { name: { type: string } } }", 1)
+	if _, err := Parse([]byte(inline)); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("inline request error = %v", err)
+	}
+	getBody := strings.Replace(sampleSpec, "      responses:\n        '200':", "      requestBody:\n        required: true\n        content:\n          application/json:\n            schema: { $ref: '#/components/schemas/Pet' }\n      responses:\n        '200':", 1)
+	if _, err := Parse([]byte(getBody)); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("GET body error = %v", err)
+	}
+}
+
+func TestResponseRepresentationsAreStrict(t *testing.T) {
+	extraRepresentation := strings.Replace(sampleSpec, `            application/json:
+              schema: { $ref: '#/components/schemas/Pet' }`, `            application/json:
+              schema: { $ref: '#/components/schemas/Pet' }
+            application/xml:
+              schema: { $ref: '#/components/schemas/Pet' }`, 1)
+	if _, err := Parse([]byte(extraRepresentation)); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("extra response representation error = %v", err)
+	}
+
+	contentOnNoContent := strings.Replace(sampleSpec, `        '204': { description: healthy }`, `        '204':
+          description: healthy
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Pet' }`, 1)
+	if _, err := Parse([]byte(contentOnNoContent)); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("204 content error = %v", err)
+	}
+
+	multipleSuccess := strings.Replace(sampleSpec, `        '204': { description: healthy }`, `        '200':
+          description: healthy payload
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Pet' }
+        '204': { description: healthy }`, 1)
+	if _, err := Parse([]byte(multipleSuccess)); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("multiple success responses error = %v", err)
+	}
+
+	unsupportedSuccess := strings.Replace(sampleSpec, `              schema: { $ref: '#/components/schemas/Pet' }`, `              schema: { $ref: '#/components/schemas/Pet' }
+        '206':
+          description: partial pet
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Pet' }`, 1)
+	if _, err := Parse([]byte(unsupportedSuccess)); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("unsupported success response error = %v", err)
+	}
+
+	wildcardSuccess := strings.Replace(sampleSpec, `'200':`, `'2XX':`, 1)
+	if _, err := Parse([]byte(wildcardSuccess)); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("wildcard success response error = %v", err)
 	}
 }
