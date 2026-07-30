@@ -2,6 +2,8 @@ module github.com/saramand9/kpro
 
 go 1.25.12
 
+replace github.com/mattn/go-sqlite3 => ./internal/sqlite3shim
+
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.32.0
 	github.com/alicebob/miniredis/v2 v2.33.0
