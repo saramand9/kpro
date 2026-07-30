@@ -1,0 +1,104 @@
+// This file is created once by kpro and is safe to edit.
+
+package kproapp
+
+import (
+	"fmt"
+{{if .HasQUIC}}	"os"
+{{end}}	"time"
+
+	"github.com/saramand9/kpro/server"
+{{if .HasKCP}}	"github.com/saramand9/kpro/transport/kcp"
+{{end}}{{if .HasQUIC}}	"github.com/saramand9/kpro/transport/quic"
+{{end}}{{if .HasTCP}}	"github.com/saramand9/kpro/transport/tcp"
+{{end}}{{if .HasUDP}}	"github.com/saramand9/kpro/transport/udp"
+{{end}}{{if .HasWebSocket}}	"github.com/saramand9/kpro/transport/websocket"
+{{end}}	kpromessage "{{.Module}}/{{.MessagePackage}}/kpromessage"
+	messageservice "{{.Module}}/{{.MessagePackage}}/service"
+)
+
+func mountMessage(app *server.Server) error {
+	service := &messageservice.{{.ServiceExported}}Service{}
+{{if .HasTCP}}	tcpEndpoint, err := app.MountChecked(tcp.New(tcp.Config{
+		Addr:            ":8088",
+		MaxFrameSize:    64 << 10,
+		MaxConnections: 1000,
+		SendQueueSize:  64,
+		ReadTimeout:    90 * time.Second,
+		WriteTimeout:   5 * time.Second,
+	}))
+	if err != nil {
+		return fmt.Errorf("mount TCP endpoint: %w", err)
+	}
+	if err := kpromessage.Register{{.ServiceExported}}(tcpEndpoint, service); err != nil {
+		return fmt.Errorf("register generated Message API on TCP: %w", err)
+	}
+{{end}}{{if .HasKCP}}
+	kcpEndpoint, err := app.MountChecked(kcp.New(kcp.Config{
+		Addr:            ":8090",
+		MaxFrameSize:    64 << 10,
+		MaxConnections: 1000,
+		SendQueueSize:  64,
+		ReadTimeout:    90 * time.Second,
+		WriteTimeout:   5 * time.Second,
+	}))
+	if err != nil {
+		return fmt.Errorf("mount KCP endpoint: %w", err)
+	}
+	if err := kpromessage.Register{{.ServiceExported}}(kcpEndpoint, service); err != nil {
+		return fmt.Errorf("register generated Message API on KCP: %w", err)
+	}
+{{end}}{{if .HasQUIC}}
+	quicEndpoint, err := app.MountChecked(quic.New(quic.Config{
+		Addr:                 ":8444",
+		MaxFrameSize:         64 << 10,
+		MaxStreams:           1000,
+		MaxConnections:       1000,
+		SendQueueSize:        64,
+		ReadTimeout:          90 * time.Second,
+		WriteTimeout:         5 * time.Second,
+		HandshakeIdleTimeout: 5 * time.Second,
+		IdleTimeout:          30 * time.Second,
+		CertFile:             os.Getenv("KPRO_QUIC_CERT_FILE"),
+		KeyFile:              os.Getenv("KPRO_QUIC_KEY_FILE"),
+	}))
+	if err != nil {
+		return fmt.Errorf("mount QUIC endpoint: %w", err)
+	}
+	if err := kpromessage.Register{{.ServiceExported}}(quicEndpoint, service); err != nil {
+		return fmt.Errorf("register generated Message API on QUIC: %w", err)
+	}
+{{end}}{{if .HasUDP}}
+	udpEndpoint, err := app.MountChecked(udp.New(udp.Config{
+		Addr:               ":8089",
+		MaxPacketSize:      2048,
+		MaxSessions:        1000,
+		SendQueueSize:      64,
+		SessionIdleTimeout: 90 * time.Second,
+		CleanupInterval:    30 * time.Second,
+	}))
+	if err != nil {
+		return fmt.Errorf("mount UDP endpoint: %w", err)
+	}
+	if err := kpromessage.Register{{.ServiceExported}}(udpEndpoint, service); err != nil {
+		return fmt.Errorf("register generated Message API on UDP: %w", err)
+	}
+{{end}}{{if .HasWebSocket}}
+	websocketEndpoint, err := app.MountChecked(websocket.New(websocket.Config{
+		Addr:             ":8091",
+		Path:             "/ws",
+		MaxMessage:       64 << 10,
+		MaxConnections:  1000,
+		SendQueueSize:    64,
+		ReadTimeout:      90 * time.Second,
+		WriteTimeout:     5 * time.Second,
+		HandshakeTimeout: 5 * time.Second,
+	}))
+	if err != nil {
+		return fmt.Errorf("mount WebSocket endpoint: %w", err)
+	}
+	if err := kpromessage.Register{{.ServiceExported}}(websocketEndpoint, service); err != nil {
+		return fmt.Errorf("register generated Message API on WebSocket: %w", err)
+	}
+{{end}}	return nil
+}

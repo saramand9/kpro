@@ -15,7 +15,7 @@ server. The current implementation includes:
 - transport capacity limits and shutdown gates;
 - optional health, Prometheus, OTel, and Zap packages;
 - GORM-backed transactional delivery/outbox and projector controls;
-- service scaffolding through `cmd/kpro`;
+- unified service scaffolding and contract code generation through `cmd/kpro`;
 - benchmark budget enforcement through `cmd/benchguard`.
 
 The repository provides the initial `v0.1.0` developer release, but not a v1
@@ -29,14 +29,18 @@ Use this route for a general project assessment:
 1. Read [README.md](../README.md) for status, architecture, and supported
    transports.
 2. Read [project-map.md](project-map.md) for package ownership and runtime flow.
-3. Read [golden-path.md](golden-path.md) for recommended application assembly.
-4. Read [dependency-boundaries.md](dependency-boundaries.md) before changing
+3. Read [framework-quality-assessment.md](framework-quality-assessment.md) for
+   the current scored baseline, evidence gaps, and reassessment rules.
+4. Read [golden-path.md](golden-path.md) for recommended application assembly.
+5. Read [code-generation.md](code-generation.md) for the unified `service`
+   profile, generated ownership, and OpenAPI, protobuf, and Message backends.
+6. Read [dependency-boundaries.md](dependency-boundaries.md) before changing
    server/transport imports or introducing another module.
-5. Read [production-readiness.md](production-readiness.md) for built-in versus
+7. Read [production-readiness.md](production-readiness.md) for built-in versus
    external production work.
-6. Read [api-stability.md](api-stability.md) before evaluating public API
+8. Read [api-stability.md](api-stability.md) before evaluating public API
    maturity.
-7. Check [benchmark/budgets.json](../benchmark/budgets.json) and
+9. Check [benchmark/budgets.json](../benchmark/budgets.json) and
    [benchmark/RESULTS.md](../benchmark/RESULTS.md) before making performance
    claims.
 
@@ -76,7 +80,7 @@ Use this route for eventing/data analysis:
 | Streaming/native RPC | `transport/sse/`, `transport/grpcx/` |
 | Observability | `observability/healthx/`, `observability/prometheusx/`, `observability/otelx/`, `observability/zapx/` |
 | Event delivery | `eventing/delivery/`, `eventing/projector/` |
-| Scaffolding | `cmd/kpro/`, `cmd/kpro/templates/service/` |
+| Scaffolding, incremental API additions, and code generation | `cmd/kpro/`, `cmd/kpro/service_project.go`, `cmd/kpro/templates/profiles/service/`, `cmd/kpro/templates/service-project/`, `internal/codegen/`, `docs/code-generation.md` |
 | Performance budgets | `benchmark/`, `cmd/benchguard/` |
 
 ## Checks To Reuse
@@ -134,6 +138,10 @@ When evaluating the project, separate these categories:
 This separation is important because KPro deliberately avoids claiming that an
 implemented transport or adapter is a production certification.
 
+Use [framework-quality-assessment.md](framework-quality-assessment.md) when a
+numeric score is required. Preserve its baseline commit, evidence gaps, and
+gate rules rather than replacing the score with an unversioned impression.
+
 ## Known Boundaries
 
 - `v0.1.0` is the initial developer release; there is no v1 compatibility
@@ -152,5 +160,6 @@ implemented transport or adapter is a production certification.
 
 Do not commit editor indexes, `gopls` caches, local search databases, generated
 temporary analysis dumps, or machine-specific benchmark output. Keep durable
-analysis in this document, [project-map.md](project-map.md), or the relevant
-guide.
+analysis in this document,
+[framework-quality-assessment.md](framework-quality-assessment.md),
+[project-map.md](project-map.md), or the relevant guide.

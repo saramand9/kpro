@@ -12,6 +12,15 @@ upgrading between minor versions.
 
 ### Added
 
+- `kpro new --profile service` composes repeatable HTTP, gRPC, and Message APIs
+  in one generated application; Message scaffolds support explicit TCP, KCP,
+  QUIC, UDP, and WebSocket transport selections.
+- `kpro add --api grpc` extends a current unified `service` project through a
+  dry-run-capable, compare-and-swap transaction. It adds the protobuf contract,
+  manifest source, endpoint assembly, generated bindings, and generation lock
+  without rewriting the developer-owned process entry point.
+- A repeatable framework quality assessment records the current technical
+  scores, evidence, limitations, and reassessment rules.
 - `server.MountNative` and `server.MountNativeChecked` preserve concrete native
   runner types while mounting them through the dependency-neutral lifecycle.
 - A source-level dependency boundary test prevents `server` production code
@@ -21,6 +30,13 @@ upgrading between minor versions.
 
 ### Changed
 
+- The unified `service` scaffold replaces the pre-release `http-api` profile.
+  Generation now runs in a sibling staging directory, publishes only after all
+  bindings succeed, and preflights the required protobuf tools for gRPC.
+- Unified service scaffolds record API and Message-transport selections in
+  `kpro.service.yaml`; a stable `cmd/<service>/main.go` delegates endpoint
+  assembly to `internal/kproapp`, so later supported additions do not patch
+  application startup code.
 - `server` no longer imports every built-in protocol. Applications now create
   selected transports in their own packages and attach message transports with
   `Server.Mount` or native runners with `MountNative`/`MountRunner`. This is a
@@ -69,6 +85,7 @@ Initial developer release of the KPro application framework.
 
 ### Added
 
+
 - Explicit server/router lifecycle states and bounded shutdown behavior.
 - Global and per-session router admission limits with reject/wait policies and
   runtime snapshots.
@@ -99,6 +116,7 @@ Initial developer release of the KPro application framework.
   automation.
 
 ### Changed
+
 
 - `Server` is now one-shot. Configuration freezes when startup or shutdown
   claims the lifecycle; late `Mount`, `MountRunner`, `Manage`, and `Use` calls

@@ -1,0 +1,14 @@
+apiVersion: kpro.dev/message/v1alpha1
+service: "{{.ServiceExported}}"
+encoding: json
+messages:
+  - id: 100
+    name: health
+    dispatch: sync
+    request:
+      fields: []
+    response:
+      fields:
+        - name: status
+          type: string
+          required: true

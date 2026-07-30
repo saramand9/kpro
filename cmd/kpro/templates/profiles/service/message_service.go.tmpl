@@ -1,0 +1,17 @@
+// This file is created once by kpro and is safe to edit.
+package service
+
+import (
+	"github.com/saramand9/kpro/core"
+	contract "{{.Module}}/internal/messageapi/contract"
+	types "{{.Module}}/internal/messageapi/types"
+)
+
+// {{.ServiceExported}}Service implements the generated Message contract.
+type {{.ServiceExported}}Service struct{}
+
+var _ contract.{{.ServiceExported}}Service = (*{{.ServiceExported}}Service)(nil)
+
+func (*{{.ServiceExported}}Service) Health(core.Context, types.HealthRequest) (types.HealthResponse, error) {
+	return types.HealthResponse{Status: "ready"}, nil
+}

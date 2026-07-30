@@ -11,9 +11,7 @@ import (
 
 	"github.com/saramand9/kpro/middleware"
 	"github.com/saramand9/kpro/server"
-	"github.com/saramand9/kpro/transport/httpx"
-	"{{.Module}}/internal/api/kprohttp"
-	apiservice "{{.Module}}/internal/api/service"
+	kproapp "{{.Module}}/internal/kproapp"
 )
 
 func main() {
@@ -36,23 +34,11 @@ func run() (returnErr error) {
 		defer cancelShutdown()
 		returnErr = errors.Join(returnErr, app.Shutdown(shutdownCtx))
 	}()
-	app.Use(middleware.Recover(), middleware.MaxPayload(1<<20))
-
-	httpEndpoint, err := server.MountNativeChecked(app, httpx.New(httpx.Config{
-		Addr:              ":8080",
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		ShutdownTimeout:   10 * time.Second,
-		MaxHeaderBytes:    1 << 20,
-		MaxBodyBytes:      1 << 20,
-	}))
-	if err != nil {
-		return fmt.Errorf("mount HTTP endpoint: %w", err)
+	if err := app.UseChecked(middleware.Recover(), middleware.MaxPayload(1<<20)); err != nil {
+		return fmt.Errorf("install application middleware: %w", err)
 	}
-	if err := kprohttp.Register(httpEndpoint, &apiservice.API{}); err != nil {
-		return fmt.Errorf("register generated HTTP routes: %w", err)
+	if err := kproapp.Mount(app); err != nil {
+		return fmt.Errorf("mount service endpoints: %w", err)
 	}
 
 	baseCtx, cancelRun := context.WithCancel(context.Background())

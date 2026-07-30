@@ -63,9 +63,13 @@ func TestBuildPlanIsDeterministicAndOwnershipAware(t *testing.T) {
 
 	adapter := fileContent(t, files, "internal/messages/kpromessage/routes_orders.gen.go")
 	for _, required := range []string{
-		"func RegisterOrders(router *core.Router, service contract.OrdersService) error",
-		"router.HandleSyncChecked(types.CreateOrderMessageID",
-		"router.HandleAsyncChecked(types.OrderNotifyMessageID",
+		"type OrdersRegistrar interface",
+		"HandleSyncChecked(uint32, core.Handler) error",
+		"HandleAsyncChecked(uint32, core.Handler) error",
+		"func RegisterOrders(registrar OrdersRegistrar, service contract.OrdersService) error",
+		"registrar.HandleSyncChecked(types.CreateOrderMessageID",
+		"registrar.HandleAsyncChecked(types.OrderNotifyMessageID",
+		`fmt.Errorf("message registrar is nil")`,
 		"type OrdersBindingError struct",
 		"decoder.DisallowUnknownFields()",
 		"ctx.Reply(types.CreateOrderMessageID, payload)",
@@ -78,6 +82,7 @@ func TestBuildPlanIsDeterministicAndOwnershipAware(t *testing.T) {
 		"transport/httpx",
 		"google.golang.org/grpc",
 		"grpc.ServiceRegistrar",
+		"github.com/saramand9/kpro/server",
 	} {
 		if strings.Contains(adapter, unrelated) {
 			t.Errorf("message adapter contains unrelated native binding %q", unrelated)
@@ -220,6 +225,7 @@ import (
 	"time"
 
 	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/server"
 	types "example.com/orders/internal/messages/types"
 )
 
@@ -317,5 +323,65 @@ func TestGeneratedRegistrationRejectsTypedNilService(t *testing.T) {
 	}
 }
 
-var _ context.Context
+func TestGeneratedRegistrationRejectsTypedNilRegistrar(t *testing.T) {
+	var router *core.Router
+	if err := RegisterOrders(router, &ordersImplementation{}); err == nil {
+		t.Fatal("RegisterOrders accepted a typed nil registrar")
+	}
+}
+
+type fakeMessageServer struct {
+	handler core.Handler
+}
+
+func (*fakeMessageServer) Name() string { return "fake" }
+func (transport *fakeMessageServer) ListenAndServe(_ context.Context, handler core.Handler) error {
+	transport.handler = handler
+	return nil
+}
+func (*fakeMessageServer) Shutdown(context.Context) error { return nil }
+
+func TestGeneratedRegistrationAcceptsServerEndpoint(t *testing.T) {
+	app := server.New()
+	transport := &fakeMessageServer{}
+	endpoint := app.Mount(transport)
+	defer endpoint.Shutdown(context.Background())
+	if err := RegisterOrders(endpoint, &ordersImplementation{}); err != nil {
+		t.Fatalf("RegisterOrders(*server.Endpoint): %v", err)
+	}
+	if err := endpoint.ListenAndServe(context.Background()); err != nil {
+		t.Fatalf("endpoint.ListenAndServe(): %v", err)
+	}
+	if transport.handler == nil {
+		t.Fatal("message transport did not receive the endpoint handler")
+	}
+
+	session := &testSession{sent: make(chan core.Message, 1), done: make(chan struct{})}
+	ctx := core.NewContext(session, core.Message{
+		ID: types.CreateOrderMessageID,
+		Seq: 23,
+		Data: []byte("{\"orderId\":\"A-1\"}"),
+	})
+	if err := transport.handler(ctx); err != nil {
+		t.Fatalf("endpoint handler: %v", err)
+	}
+	select {
+	case response := <-session.sent:
+		if response.ID != types.CreateOrderMessageID || response.Seq != 23 {
+			t.Fatalf("endpoint response = %#v", response)
+		}
+		if string(response.Data) != "{\"accepted\":true}" {
+			t.Fatalf("endpoint response data = %s", response.Data)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for endpoint handler response")
+	}
+
+	if err := RegisterOrders(endpoint, &ordersImplementation{}); !errors.Is(err, core.ErrHandlerAlreadyRegistered) {
+		t.Fatalf("duplicate registration error = %v, want ErrHandlerAlreadyRegistered", err)
+	}
+}
+
+var _ OrdersRegistrar = (*core.Router)(nil)
+var _ OrdersRegistrar = (*server.Endpoint)(nil)
 `

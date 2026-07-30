@@ -8,7 +8,9 @@ Start with the quickstart and golden path. The remaining guides separate impleme
 | --- | --- |
 | [Analysis Index](analysis-index.md) | Reopen the repository quickly, find critical code paths, and reuse validation commands. |
 | [Project Map](project-map.md) | Understand package ownership, runtime flow, extension points, and evidence files. |
-| [10-Minute Quick Start](quickstart.md) | Run a checked HTTP example or scaffold a starter with middleware and graceful shutdown. |
+| [Framework Quality Assessment](framework-quality-assessment.md) | Reuse the quality dimensions, current scores, evidence, gaps, and reassessment rules. |
+| [10-Minute Quick Start](quickstart.md) | Run a checked HTTP example or scaffold a unified HTTP, gRPC, or Message service. |
+| [Code Generation](code-generation.md) | Create or extend a unified service and generate checked bindings from OpenAPI, protobuf, or Message contracts. |
 | [Recommended Golden Path](golden-path.md) | Choose a protocol, structure an application, validate startup, own observability/lifecycle, and grow safely. |
 | [Observability Example](../examples/observability/main.go) | Run bounded health and Prometheus endpoints with Zap, OTel wiring, and a custom runner descriptor. |
 | [Examples](../examples/README.md) | Run standalone and modular examples for each implemented protocol. |
