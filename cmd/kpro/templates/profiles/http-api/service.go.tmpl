@@ -13,14 +13,16 @@ type API struct{}
 
 var _ contract.API = (*API)(nil)
 
+func kproString(value string) *string { return &value }
+
 func (*API) Liveness(context.Context) (types.HealthResponse, error) {
 	return types.HealthResponse{Status: "alive"}, nil
 }
 
 func (*API) Readiness(context.Context) (types.HealthResponse, error) {
-	return types.HealthResponse{Status: "ready", Dependencies: "none"}, nil
+	return types.HealthResponse{Status: "ready", Dependencies: kproString("none")}, nil
 }
 
 func (*API) Health(context.Context) (types.HealthResponse, error) {
-	return types.HealthResponse{Status: "ready", Dependencies: "none"}, nil
+	return types.HealthResponse{Status: "ready", Dependencies: kproString("none")}, nil
 }
