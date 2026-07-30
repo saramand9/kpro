@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -225,6 +226,59 @@ func TestGenerateUsesConfigScopedLockAndRejectsOutsideConfig(t *testing.T) {
 	err := execute([]string{"validate", "--root", root, "--config", outside}, &output, &output)
 	if err == nil || !strings.Contains(err.Error(), "must be inside root") {
 		t.Fatalf("outside config error = %v", err)
+	}
+}
+func TestGenerateProtoWithInstalledToolchain(t *testing.T) {
+	for _, tool := range []string{"protoc", "protoc-gen-go", "protoc-gen-go-grpc"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("optional protobuf CLI integration: %s is unavailable: %v", tool, err)
+		}
+	}
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "api"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	value := `apiVersion: kpro.dev/codegen/v1alpha1
+module: example.com/generated
+service: generated
+sources:
+  - id: public-rpc
+    kind: proto
+    path: api/greeter.proto
+    package: internal/gen
+`
+	contract := `syntax = "proto3";
+package generated.v1;
+option go_package = "example.com/generated/internal/gen";
+service Greeter { rpc Hello(Request) returns (Reply); }
+message Request { string name = 1; }
+message Reply { string message = 1; }
+`
+	if err := os.WriteFile(filepath.Join(root, defaultCodegenConfig), []byte(value), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "api", "greeter.proto"), []byte(contract), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	if err := execute([]string{"generate", "--root", root}, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"internal/gen/greeter.pb.go",
+		"internal/gen/greeter_grpc.pb.go",
+		"internal/gen/kpro_public_rpc_grpc.gen.go",
+		"internal/gen/kpro_public_rpc_service.go",
+		codegen.DefaultLockFile,
+	} {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(name))); err != nil {
+			t.Fatalf("protobuf output %q: %v", name, err)
+		}
+	}
+	output.Reset()
+	if err := execute([]string{"generate", "--root", root, "--check"}, &output, &output); err != nil {
+		t.Fatalf("check protobuf outputs: %v", err)
 	}
 }
 func writeOpenAPICodegenProject(t *testing.T, root string) {
