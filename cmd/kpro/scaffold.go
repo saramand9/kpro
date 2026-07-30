@@ -2,10 +2,13 @@
 package main
 
 import (
+	"bytes"
 	"embed"
 	"errors"
 	"flag"
 	"fmt"
+	"go/format"
+	"go/token"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,12 +18,13 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/saramand9/kpro/internal/codegen"
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
 )
 
-//go:embed templates/service/*
+//go:embed templates/service/* templates/profiles/*
 var templateFiles embed.FS
 
 var serviceNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
@@ -37,22 +41,35 @@ var (
 )
 
 type scaffoldData struct {
-	Module      string
-	ServiceName string
-	KProModule  string
-	KProVersion string
-	KProReplace string
+	Module            string
+	ServiceName       string
+	ServiceIdentifier string
+	KProModule        string
+	KProVersion       string
+	KProReplace       string
 }
 
-var scaffoldTemplates = []struct {
+type scaffoldTemplate struct {
 	source string
 	target string
 	mode   os.FileMode
-}{
+}
+
+var serviceScaffoldTemplates = []scaffoldTemplate{
 	{source: "templates/service/go.mod.tmpl", target: "go.mod", mode: 0o644},
 	{source: "templates/service/main.go.tmpl", target: "main.go", mode: 0o644},
 	{source: "templates/service/README.md.tmpl", target: "README.md", mode: 0o644},
 	{source: "templates/service/gitignore.tmpl", target: ".gitignore", mode: 0o644},
+}
+
+var httpAPIScaffoldTemplates = []scaffoldTemplate{
+	{source: "templates/profiles/http-api/go.mod.tmpl", target: "go.mod", mode: 0o644},
+	{source: "templates/profiles/http-api/main.go.tmpl", target: "cmd/{{.ServiceName}}/main.go", mode: 0o644},
+	{source: "templates/profiles/http-api/service.go.tmpl", target: "internal/api/service/api.go", mode: 0o644},
+	{source: "templates/profiles/http-api/openapi.yaml.tmpl", target: "api/openapi.yaml", mode: 0o644},
+	{source: "templates/profiles/http-api/kpro.gen.yaml.tmpl", target: "kpro.gen.yaml", mode: 0o644},
+	{source: "templates/profiles/http-api/README.md.tmpl", target: "README.md", mode: 0o644},
+	{source: "templates/profiles/http-api/gitignore.tmpl", target: ".gitignore", mode: 0o644},
 }
 
 func scaffoldNew(args []string, stdout, stderr io.Writer) error {
@@ -61,6 +78,7 @@ func scaffoldNew(args []string, stdout, stderr io.Writer) error {
 	modulePath := flags.String("module", "", "Go module path (default example.com/<directory>)")
 	serviceName := flags.String("name", "", "service name (default directory name)")
 	kproReplace := flags.String("kpro-replace", "", "local KPro checkout (auto-detected from the current directory)")
+	profile := flags.String("profile", "", "project profile (supported: minimal, http-api)")
 	parseArgs := args
 	// Accept both the natural `new <directory> --module ...` form and Go's
 	// conventional `new --module ... <directory>` form.
@@ -71,7 +89,16 @@ func scaffoldNew(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if flags.NArg() != 1 {
-		return errors.New("usage: kpro new <directory> [--module example.com/service] [--name service] [--kpro-replace path]")
+		return errors.New("usage: kpro new <directory> [--module example.com/service] [--name service] [--kpro-replace path] [--profile minimal|http-api]")
+	}
+	var templates []scaffoldTemplate
+	switch *profile {
+	case "", "minimal":
+		templates = serviceScaffoldTemplates
+	case "http-api":
+		templates = httpAPIScaffoldTemplates
+	default:
+		return fmt.Errorf("unsupported project profile %q (supported: minimal, http-api)", *profile)
 	}
 	target, err := filepath.Abs(flags.Arg(0))
 	if err != nil {
@@ -113,15 +140,21 @@ func scaffoldNew(args []string, stdout, stderr io.Writer) error {
 		quotedReplace = strconv.Quote(filepath.ToSlash(replacePath))
 	}
 	data := scaffoldData{
-		Module:      *modulePath,
-		ServiceName: *serviceName,
-		KProModule:  kproModulePath,
-		KProVersion: kproVersion,
-		KProReplace: quotedReplace,
+		Module:            *modulePath,
+		ServiceName:       *serviceName,
+		ServiceIdentifier: goIdentifier(*serviceName),
+		KProModule:        kproModulePath,
+		KProVersion:       kproVersion,
+		KProReplace:       quotedReplace,
 	}
-	for _, file := range scaffoldTemplates {
+	for _, file := range templates {
 		if err := renderTemplate(target, file.source, file.target, file.mode, data); err != nil {
 			return err
+		}
+	}
+	if *profile == "http-api" {
+		if err := runGenerate([]string{"--root", target}, io.Discard, io.Discard); err != nil {
+			return fmt.Errorf("generate http-api bindings: %w", err)
 		}
 	}
 	if replacePath != "" {
@@ -129,10 +162,32 @@ func scaffoldNew(args []string, stdout, stderr io.Writer) error {
 	} else {
 		fmt.Fprintf(stdout, "created %s\nusing KPro %s\n", *serviceName, kproVersion)
 	}
-	fmt.Fprintf(stdout, "\nnext:\n  cd %s\n  go mod tidy\n  go run .\n", target)
+	runTarget := "."
+	if *profile == "http-api" {
+		runTarget = "./cmd/" + *serviceName
+	}
+	fmt.Fprintf(stdout, "\nnext:\n  cd %s\n  go mod tidy\n  go run %s\n", target, runTarget)
 	return nil
 }
 
+func goIdentifier(value string) string {
+	var builder strings.Builder
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || character == '_' {
+			builder.WriteRune(character)
+		} else {
+			builder.WriteByte('_')
+		}
+	}
+	identifier := builder.String()
+	if identifier == "" || identifier[0] >= '0' && identifier[0] <= '9' {
+		identifier = "service_" + identifier
+	}
+	if token.Lookup(identifier).IsKeyword() {
+		identifier += "_service"
+	}
+	return identifier
+}
 func resolveKProReplace(configured string) (string, error) {
 	if configured != "" {
 		path, err := filepath.Abs(configured)
@@ -250,18 +305,54 @@ func renderTemplate(root, source, target string, mode os.FileMode, data scaffold
 	if err != nil {
 		return fmt.Errorf("parse embedded template %s: %w", source, err)
 	}
-	path := filepath.Join(root, target)
+	target, err = renderString(target, data)
+	if err != nil {
+		return fmt.Errorf("render target %s: %w", target, err)
+	}
+	target, err = codegen.SafeRelativePath(target)
+	if err != nil {
+		return fmt.Errorf("unsafe template target %q: %w", target, err)
+	}
+	path := filepath.Join(root, filepath.FromSlash(target))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create parent directory for %s: %w", target, err)
+	}
+	var rendered bytes.Buffer
+	if err := parsed.Execute(&rendered, data); err != nil {
+		return fmt.Errorf("render %s: %w", target, err)
+	}
+	content := rendered.Bytes()
+	if strings.EqualFold(filepath.Ext(target), ".go") {
+		content, err = format.Source(content)
+		if err != nil {
+			return fmt.Errorf("gofmt %s: %w", target, err)
+		}
+	}
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
 		return fmt.Errorf("create %s: %w", target, err)
 	}
-	executeErr := parsed.Execute(file, data)
+	_, writeErr := file.Write(content)
 	closeErr := file.Close()
-	if executeErr != nil {
-		return fmt.Errorf("render %s: %w", target, executeErr)
+	if writeErr != nil {
+		_ = os.Remove(path)
+		return fmt.Errorf("write %s: %w", target, writeErr)
 	}
 	if closeErr != nil {
+		_ = os.Remove(path)
 		return fmt.Errorf("close %s: %w", target, closeErr)
 	}
 	return nil
+}
+
+func renderString(value string, data scaffoldData) (string, error) {
+	parsed, err := template.New("target").Option("missingkey=error").Parse(value)
+	if err != nil {
+		return "", err
+	}
+	var rendered strings.Builder
+	if err := parsed.Execute(&rendered, data); err != nil {
+		return "", err
+	}
+	return rendered.String(), nil
 }
