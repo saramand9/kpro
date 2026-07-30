@@ -1,0 +1,26 @@
+// Package service contains the application-owned HTTP API implementation.
+package service
+
+import (
+	"context"
+
+	"{{.Module}}/internal/api/contract"
+	"{{.Module}}/internal/api/types"
+)
+
+// API implements the generated HTTP contract.
+type API struct{}
+
+var _ contract.API = (*API)(nil)
+
+func (*API) Liveness(context.Context) (types.HealthResponse, error) {
+	return types.HealthResponse{Status: "alive"}, nil
+}
+
+func (*API) Readiness(context.Context) (types.HealthResponse, error) {
+	return types.HealthResponse{Status: "ready", Dependencies: "none"}, nil
+}
+
+func (*API) Health(context.Context) (types.HealthResponse, error) {
+	return types.HealthResponse{Status: "ready", Dependencies: "none"}, nil
+}

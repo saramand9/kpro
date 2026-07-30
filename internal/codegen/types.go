@@ -64,7 +64,7 @@ const (
 const (
 	// DefaultLockFile is relative to Options.Root and intentionally has no
 	// platform-specific path separator.
-	DefaultLockFile = ".kpro-codegen.lock.json"
+	DefaultLockFile = "kpro.gen.lock.json"
 	lockVersion     = 1
 )
 

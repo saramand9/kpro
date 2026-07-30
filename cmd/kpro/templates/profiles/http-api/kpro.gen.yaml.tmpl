@@ -1,0 +1,8 @@
+apiVersion: kpro.dev/codegen/v1alpha1
+module: {{.Module}}
+service: {{.ServiceIdentifier}}
+sources:
+  - id: http-api
+    kind: openapi
+    path: api/openapi.yaml
+    package: internal/api

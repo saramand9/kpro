@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/saramand9/kpro/internal/codegen"
 )
 
 func TestNewCreatesParseableServiceWithoutOverwriting(t *testing.T) {
@@ -153,5 +155,117 @@ func TestVersionAndDoctorCommands(t *testing.T) {
 				t.Fatalf("%s produced no output", command)
 			}
 		})
+	}
+}
+
+func TestNewMinimalProfileMatchesDefaultScaffold(t *testing.T) {
+	root := t.TempDir()
+	defaultTarget := filepath.Join(root, "default")
+	minimalTarget := filepath.Join(root, "minimal")
+	var output bytes.Buffer
+	if err := execute([]string{"new", "--module", "example.com/orders", "--name", "orders", defaultTarget}, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	if err := execute([]string{"new", "--module", "example.com/orders", "--name", "orders", "--profile", "minimal", minimalTarget}, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"go.mod", "main.go", "README.md", ".gitignore"} {
+		want, err := os.ReadFile(filepath.Join(defaultTarget, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := os.ReadFile(filepath.Join(minimalTarget, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("minimal profile changed %s", name)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(defaultTarget, "cmd")); !os.IsNotExist(err) {
+		t.Fatalf("default scaffold unexpectedly created cmd: %v", err)
+	}
+}
+
+func TestNewHTTPAPIProfileCreatesModularParseableProject(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "orders-api")
+	var output bytes.Buffer
+	if err := execute([]string{"new", "--module", "example.com/orders", "--name", "orders-api", "--profile", "http-api", target}, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"go.mod",
+		"api/openapi.yaml",
+		"kpro.gen.yaml",
+		"cmd/orders-api/main.go",
+		"internal/api/types/types.gen.go",
+		"internal/api/contract/contract.gen.go",
+		"internal/api/kprohttp/routes.gen.go",
+		"internal/api/service/api.go",
+		codegen.DefaultLockFile,
+	} {
+		if _, err := os.Stat(filepath.Join(target, name)); err != nil {
+			t.Fatalf("http-api scaffold missing %s: %v", name, err)
+		}
+	}
+	mainContents, err := os.ReadFile(filepath.Join(target, "cmd", "orders-api", "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"server.NewChecked", "server.MountNativeChecked", "kprohttp.Register", "ReadHeaderTimeout: 5 * time.Second", "MaxHeaderBytes:    1 << 20", "MaxBodyBytes:      1 << 20"} {
+		if !strings.Contains(string(mainContents), expected) {
+			t.Fatalf("http-api main.go does not contain %q", expected)
+		}
+	}
+	err = filepath.Walk(target, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil || info.IsDir() || filepath.Ext(path) != ".go" {
+			return walkErr
+		}
+		_, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.AllErrors)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("parse generated Go project: %v", err)
+	}
+	manifest, err := os.ReadFile(filepath.Join(target, "kpro.gen.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(manifest), "service: orders_api") {
+		t.Fatalf("generated manifest has unsafe service identifier:\n%s", manifest)
+	}
+	output.Reset()
+	if err := execute([]string{"generate", "--root", target, "--check"}, &output, &output); err != nil {
+		t.Fatalf("generated profile is not current: %v", err)
+	}
+	service, err := os.ReadFile(filepath.Join(target, "internal", "api", "service", "api.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(service), `Status: "alive"`) {
+		t.Fatalf("http-api service starter was replaced:\n%s", service)
+	}
+}
+
+func TestNewHTTPAPIProfileNormalizesKeywordServiceName(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "keyword-service")
+	var output bytes.Buffer
+	if err := execute([]string{"new", "--module", "example.com/keyword", "--name", "type", "--profile", "http-api", target}, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	value, err := os.ReadFile(filepath.Join(target, "kpro.gen.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(value), "service: type_service") {
+		t.Fatalf("keyword service identifier was not normalized:\n%s", value)
+	}
+}
+
+func TestNewRejectsUnknownProfile(t *testing.T) {
+	var output bytes.Buffer
+	err := execute([]string{"new", "--profile", "grpc-api", filepath.Join(t.TempDir(), "unknown")}, &output, &output)
+	if err == nil || !strings.Contains(err.Error(), "unsupported project profile") {
+		t.Fatalf("unknown profile error = %v", err)
 	}
 }
