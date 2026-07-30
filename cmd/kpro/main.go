@@ -22,6 +22,10 @@ func execute(args []string, stdout, stderr io.Writer) error {
 	switch args[0] {
 	case "new":
 		return runNew(args[1:], stdout, stderr)
+	case "validate":
+		return runValidate(args[1:], stdout, stderr)
+	case "generate":
+		return runGenerate(args[1:], stdout, stderr)
 	case "version":
 		return runVersion(args[1:], stdout, stderr)
 	case "doctor":
@@ -35,7 +39,9 @@ func printUsage(output io.Writer) {
 	fmt.Fprintln(output, "KPro developer tools")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "Usage:")
-	fmt.Fprintln(output, "  kpro new <directory> [--module example.com/service] [--name service] [--kpro-replace path]")
+	fmt.Fprintln(output, "  kpro new <directory> [--module example.com/service] [--name service] [--profile minimal|http-api] [--kpro-replace path]")
+	fmt.Fprintln(output, "  kpro validate [--config kpro.gen.yaml] [--root dir]")
+	fmt.Fprintln(output, "  kpro generate [--config kpro.gen.yaml] [--root dir] [--check] [--dry-run]")
 	fmt.Fprintln(output, "  kpro version")
 	fmt.Fprintln(output, "  kpro doctor")
 }

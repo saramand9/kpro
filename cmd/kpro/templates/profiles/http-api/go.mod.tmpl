@@ -1,0 +1,10 @@
+module {{.Module}}
+
+go 1.25.12
+
+require {{.KProModule}} {{.KProVersion}}
+
+{{if .KProReplace}}
+// KPro is pre-release and currently consumed from a local checkout.
+replace {{.KProModule}} => {{.KProReplace}}
+{{end}}
