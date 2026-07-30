@@ -158,6 +158,67 @@ func TestVersionAndDoctorCommands(t *testing.T) {
 	}
 }
 
+func TestDoctorReportsAvailableProtoGenerationTools(t *testing.T) {
+	paths := map[string]string{
+		"protoc":             filepath.Join("tools", "protoc"),
+		"protoc-gen-go":      filepath.Join("tools", "protoc-gen-go"),
+		"protoc-gen-go-grpc": filepath.Join("tools", "protoc-gen-go-grpc"),
+	}
+	var output bytes.Buffer
+	err := runDoctorWithLookPath(nil, &output, &output, func(name string) (string, error) {
+		path, ok := paths[name]
+		if !ok {
+			t.Fatalf("unexpected tool lookup %q", name)
+		}
+		return path, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := output.String()
+	if !strings.Contains(contents, "proto generation tools (required only when generating proto sources):") {
+		t.Fatalf("doctor does not scope tools to proto generation:\n%s", contents)
+	}
+	for name, path := range paths {
+		if !strings.Contains(contents, name+": available: "+path) {
+			t.Fatalf("doctor does not report %s as available:\n%s", name, contents)
+		}
+	}
+	if !strings.HasSuffix(contents, "status: ok\n") {
+		t.Fatalf("doctor did not retain successful status:\n%s", contents)
+	}
+}
+
+func TestDoctorTreatsMissingProtoGenerationToolsAsOptional(t *testing.T) {
+	var lookedUp []string
+	var output bytes.Buffer
+	err := runDoctorWithLookPath(nil, &output, &output, func(name string) (string, error) {
+		lookedUp = append(lookedUp, name)
+		return "", os.ErrNotExist
+	})
+	if err != nil {
+		t.Fatalf("optional tools made doctor fail: %v", err)
+	}
+	wantTools := []string{"protoc", "protoc-gen-go", "protoc-gen-go-grpc"}
+	if len(lookedUp) != len(wantTools) {
+		t.Fatalf("looked up tools = %v, want %v", lookedUp, wantTools)
+	}
+	for index, want := range wantTools {
+		if lookedUp[index] != want {
+			t.Fatalf("looked up tools = %v, want %v", lookedUp, wantTools)
+		}
+	}
+	contents := output.String()
+	for _, name := range wantTools {
+		if !strings.Contains(contents, name+": optional missing") {
+			t.Fatalf("doctor does not report %s as optionally missing:\n%s", name, contents)
+		}
+	}
+	if !strings.HasSuffix(contents, "status: ok\n") {
+		t.Fatalf("doctor did not retain successful status:\n%s", contents)
+	}
+}
+
 func TestNewMinimalProfileMatchesDefaultScaffold(t *testing.T) {
 	root := t.TempDir()
 	defaultTarget := filepath.Join(root, "default")

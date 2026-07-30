@@ -43,11 +43,33 @@ the same KPro checkout:
 ```sh
 go run ./cmd/kpro doctor
 go run ./cmd/kpro version
-go run ./cmd/kpro new ../hello-kpro --module example.com/hello-kpro --name hello-kpro
+go run ./cmd/kpro new ../hello-kpro \
+  --module example.com/hello-kpro \
+  --name hello-kpro \
+  --profile minimal
 cd ../hello-kpro
 go mod tidy
 go run .
 ```
+
+`minimal` is the default profile and writes the small hand-authored service
+used below. For a contract-first HTTP project with an OpenAPI document,
+generation manifest, checked bindings, create-once service implementation, and
+content-addressed generation lock, use:
+
+```sh
+go run ./cmd/kpro new ../hello-api \
+  --module example.com/hello-api \
+  --name hello-api \
+  --profile http-api
+cd ../hello-api
+go mod tidy
+go run ./cmd/hello-api
+```
+
+See [Code Generation](code-generation.md) for the manifest, ownership rules,
+supported OpenAPI, protobuf, and message subsets, plugin trust boundary, and
+the `validate`/`generate --check` workflow.
 
 The tagged `v0.1.0` CLI generates a service for the `v0.1.0` API and remains
 usable with the documentation at that tag. It predates `server.MountNative`;
@@ -56,10 +78,12 @@ requires the organization's normal Git credentials and `GOPRIVATE`
 configuration. The target must be missing or empty; the command refuses to
 overwrite a non-empty directory.
 
-`doctor` prints the Go runtime, platform, main module, and available VCS
-revision. `version` prints build metadata; a checkout run reports development
-values, while release artifacts receive version, commit, and build time from
-the release pipeline.
+`doctor` prints the Go runtime, platform, main module, available VCS revision,
+and the availability of the three optional protobuf generation tools. Missing
+protobuf tools are reported as optional and do not make the general framework
+diagnostic fail. `version` prints build metadata; a checkout run reports
+development values, while release artifacts receive version, commit, and build
+time from the release pipeline.
 
 The source-mode tool detects the current KPro checkout and writes a quoted local
 `replace` into the generated `go.mod`; `--kpro-replace <checkout>` selects one

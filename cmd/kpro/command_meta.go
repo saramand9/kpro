@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os/exec"
 	"runtime"
 	"runtime/debug"
 )
@@ -24,6 +25,12 @@ func runVersion(args []string, stdout, stderr io.Writer) error {
 }
 
 func runDoctor(args []string, stdout, stderr io.Writer) error {
+	return runDoctorWithLookPath(args, stdout, stderr, exec.LookPath)
+}
+
+type doctorLookPathFunc func(string) (string, error)
+
+func runDoctorWithLookPath(args []string, stdout, stderr io.Writer, lookPath doctorLookPathFunc) error {
 	flags := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	if err := flags.Parse(args); err != nil {
@@ -45,6 +52,15 @@ func runDoctor(args []string, stdout, stderr io.Writer) error {
 				break
 			}
 		}
+	}
+	fmt.Fprintln(stdout, "proto generation tools (required only when generating proto sources):")
+	for _, tool := range []string{"protoc", "protoc-gen-go", "protoc-gen-go-grpc"} {
+		path, err := lookPath(tool)
+		if err != nil {
+			fmt.Fprintf(stdout, "%s: optional missing\n", tool)
+			continue
+		}
+		fmt.Fprintf(stdout, "%s: available: %s\n", tool, path)
 	}
 	fmt.Fprintln(stdout, "status: ok")
 	return nil
