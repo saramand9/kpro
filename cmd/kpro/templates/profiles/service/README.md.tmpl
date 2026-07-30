@@ -1,0 +1,32 @@
+# {{.ServiceName}}
+
+Generated with KPro's unified `service` profile.
+
+API and Message-transport selection is declared in `kpro.service.yaml`.
+Contracts live under `api/`, generated bindings under `internal/`, and
+application-owned implementations beside those bindings. Process lifecycle
+stays in `cmd/{{.ServiceName}}`; endpoint assembly is generated under
+`internal/kproapp`.
+
+```bash
+go mod tidy
+kpro validate
+kpro generate --check
+go run ./cmd/{{.ServiceName}}
+```
+
+The create-once files `internal/kproapp/http.go`, `grpc.go`, and `message.go`
+contain protocol-native defaults whenever their API is selected. They are safe
+to edit. `internal/kproapp/endpoints.gen.go` is generator-owned and is refreshed
+from `kpro.service.yaml`.
+
+HTTP defaults to `:8080`, gRPC to `:9090`, and Message transports use their
+documented scaffold ports. Protobuf regeneration requires `protoc`,
+`protoc-gen-go`, and `protoc-gen-go-grpc` on `PATH`; pin their versions in CI.
+QUIC requires reviewed TLS material through `KPRO_QUIC_CERT_FILE` and
+`KPRO_QUIC_KEY_FILE`; the scaffold never creates or commits a private key.
+
+Generated files are replaced only while they still match the generation lock;
+create-once implementation and mount files remain safe to edit. Review all
+timeout, capacity, TLS, authentication, persistence, and observability settings
+for the target workload before deployment.

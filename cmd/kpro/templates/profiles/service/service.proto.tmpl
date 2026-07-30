@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package kpro.service.v1;
+
+option go_package = "{{.Module}}/internal/grpcapi;grpcapi";
+
+service {{.ServiceExported}} {
+  rpc Health({{.ServiceExported}}HealthRequest) returns ({{.ServiceExported}}HealthResponse);
+}
+
+message {{.ServiceExported}}HealthRequest {}
+
+message {{.ServiceExported}}HealthResponse {
+  string status = 1;
+}

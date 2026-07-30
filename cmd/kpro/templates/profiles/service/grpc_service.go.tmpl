@@ -1,0 +1,18 @@
+// This file is created once by kpro and is safe to edit.
+package grpcapi
+
+import "context"
+
+// KProGrpcApi{{.ServiceExported}}Service is the application-owned gRPC implementation.
+type KProGrpcApi{{.ServiceExported}}Service struct {
+	Unimplemented{{.ServiceExported}}Server
+}
+
+var _ {{.ServiceExported}}Server = (*KProGrpcApi{{.ServiceExported}}Service)(nil)
+
+func (*KProGrpcApi{{.ServiceExported}}Service) Health(
+	context.Context,
+	*{{.ServiceExported}}HealthRequest,
+) (*{{.ServiceExported}}HealthResponse, error) {
+	return &{{.ServiceExported}}HealthResponse{Status: "ready"}, nil
+}

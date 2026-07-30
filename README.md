@@ -39,8 +39,9 @@ that revision, and validate the framework against the target workload.
 
 Developer and operational support currently includes checked server
 construction and component preflight validation, transport capability
-descriptors, `cmd/kpro` service scaffolding, optional OTel/Prometheus/Zap/health
-packages, and CI-enforced Router/HTTP microbenchmark budgets. OTel exporters,
+descriptors, `cmd/kpro` service scaffolding and contract code generation,
+optional OTel/Prometheus/Zap/health packages, and CI-enforced Router/HTTP
+microbenchmark budgets. OTel exporters,
 telemetry backends, deployment sizing, and workload-specific validation remain
 application or platform responsibilities.
 
@@ -50,7 +51,9 @@ application or platform responsibilities.
 | --- | --- |
 | Re-enter project analysis quickly | [Analysis Index](docs/analysis-index.md) |
 | Understand package ownership and runtime flow | [Project Map](docs/project-map.md) |
-| Run or scaffold a minimal service | [10-Minute Quick Start](docs/quickstart.md) |
+| Review the current scored framework quality baseline | [Framework Quality Assessment](docs/framework-quality-assessment.md) |
+| Run an example or scaffold a unified HTTP, gRPC, or Message service | [10-Minute Quick Start](docs/quickstart.md) |
+| Add gRPC to a service or generate checked contract bindings | [Code Generation](docs/code-generation.md) |
 | Add health, Prometheus, Zap, and OTel wiring | [Observability Example](examples/observability/main.go) |
 | Choose protocols and application structure | [Recommended Golden Path](docs/golden-path.md) |
 | Understand compile-time dependency boundaries | [Dependency Boundaries](docs/dependency-boundaries.md) |
@@ -63,8 +66,27 @@ The current documentation tracks unreleased `main`. Create a starter service
 from this checkout; source mode adds a local `replace` to the generated module:
 
 ```sh
-go run ./cmd/kpro new ../hello-kpro --module example.com/hello-kpro --name hello-kpro
+go run ./cmd/kpro new ../hello-kpro --module example.com/hello-kpro \
+  --name hello-kpro --profile service --api http
 ```
+
+Current unified `service` projects can add gRPC later without rewriting the
+application entry point:
+
+```sh
+go run ./cmd/kpro add --root ../hello-kpro --api grpc
+cd ../hello-kpro
+go mod tidy
+go test ./...
+kpro generate --check
+```
+
+`add` requires the protobuf tools reported by `kpro doctor`, updates the
+service selection, manifest, protobuf contract, generated outputs, and lock as
+one checked transaction, and is a no-op when gRPC is already present. It does
+not edit `cmd/<service>/main.go` or run `go mod tidy`. See
+[Code Generation](docs/code-generation.md#add-grpc-to-a-service) for supported
+project versions and safety behavior.
 
 The tagged `v0.1.0` CLI and documentation remain internally consistent but
 predate the dependency-neutral mounting API. Do not combine source examples

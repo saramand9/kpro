@@ -19,53 +19,178 @@ requirements instead of silently publishing an unprotected route.
 
 ## Start a project
 
-`kpro new` has two profiles:
+`kpro new` keeps the compact hand-written `minimal` profile and provides one
+unified contract-first `service` profile. Select one or more API models by
+repeating `--api`:
 
 ```sh
-# Small hand-written HTTP service. This is also the default profile.
+# Small hand-written HTTP service. This remains the default profile.
 kpro new ../orders \
   --module example.com/orders \
   --name orders \
   --profile minimal
 
-# Contract-first HTTP service with a manifest, OpenAPI contract, generated
-# bindings, and an application-owned service implementation.
-kpro new ../orders-api \
-  --module example.com/orders-api \
-  --name orders-api \
-  --profile http-api
+# Contract-first HTTP service.
+kpro new ../orders \
+  --module example.com/orders \
+  --name orders \
+  --profile service \
+  --api http
+
+# One process exposing HTTP, gRPC, and a KPro Message API over two transports.
+kpro new ../orders \
+  --module example.com/orders \
+  --name orders \
+  --profile service \
+  --api http \
+  --api grpc \
+  --api message \
+  --transport tcp \
+  --transport websocket
 ```
 
-Both commands require a missing or empty target directory. When the CLI is run
-from a KPro checkout, it records that checkout as a local `replace` in the new
-module. `--kpro-replace <checkout>` selects one explicitly. A release-built CLI
-pins its release when no replacement is supplied.
+The supported API values are `http`, `grpc`, and `message`. The supported
+Message transports are `tcp`, `kcp`, `quic`, `udp`, and `websocket`. A Message
+API requires at least one explicit `--transport`; transports are invalid
+without `--api message`. API and transport flags are repeatable, their order
+does not affect the generated layout, and duplicate or unknown values are
+errors.
+
+The old `http-api` profile has been removed. Its replacement is
+`--profile service --api http`; add further `--api` selections instead of
+choosing another protocol-specific profile.
+
+Both profiles require a missing or empty target directory. When publishing into
+an existing empty directory, KPro preserves its Unix permission bits, but
+replaces the directory itself; platform-specific ACLs and other metadata are
+not guaranteed to be retained. When the CLI is run from a KPro checkout, it
+records that checkout as a local `replace` in the new module.
+`--kpro-replace <checkout>` selects one explicitly. A release-built CLI pins
+its release when no replacement is supplied.
 
 The `minimal` profile writes a compact runnable service and no generation
-manifest. The `http-api` profile writes:
+manifest. The `service` profile writes only the contracts and packages selected
+by its API flags:
 
 ```text
-api/openapi.yaml                 version-controlled API contract
-kpro.gen.yaml                    generation manifest
-kpro.gen.lock.json               content-addressed generation lock
-internal/api/types/              generated transport-neutral types
-internal/api/contract/           generated application interface
-internal/api/kprohttp/           generated checked HTTP registration
-internal/api/service/api.go      create-once application implementation
-cmd/<service>/main.go            process assembly
+api/http/openapi.yaml                    HTTP contract, when selected
+api/grpc/service.proto                   gRPC contract, when selected
+api/message/messages.yaml                Message contract, when selected
+kpro.service.yaml                        selected APIs and Message transports
+kpro.gen.yaml                            generation manifest
+kpro.gen.lock.json                       content-addressed generation lock
+internal/httpapi/                        HTTP types, contract, adapter, service
+internal/grpcapi/                        protobuf, gRPC adapter, service
+internal/messageapi/                     Message types, contract, adapter, service
+internal/kproapp/endpoints.gen.go         generated selected-endpoint assembly
+internal/kproapp/{http,grpc,message}.go   create-once endpoint configuration
+cmd/<service>/main.go                    stable process entry point
 ```
 
-The profile runs generation once before it returns. From the generated project:
+`kpro.service.yaml` is the versioned endpoint-selection input, separate from
+the contract-source manifest. For example:
+
+```yaml
+apiVersion: kpro.dev/service/v1alpha1
+apis:
+  - http
+  - message
+transports:
+  - tcp
+```
+
+Generation cross-checks these selections against the canonical manifest
+sources and renders `internal/kproapp/endpoints.gen.go`. The corresponding
+protocol files under `internal/kproapp` are create-once application code, while
+`cmd/<service>/main.go` can stay focused on process lifecycle.
+
+The service profile runs generation once before it returns. A gRPC selection
+therefore requires `protoc`, `protoc-gen-go`, and `protoc-gen-go-grpc` on
+`PATH`; the CLI checks them before publishing the target project. From the
+generated project:
 
 ```sh
 go mod tidy
 kpro validate
 kpro generate --check
-go run ./cmd/orders-api
+go run ./cmd/orders
 ```
+
+Each selected Message transport owns a separate mounted endpoint and receives
+the generated registration independently. QUIC additionally requires
+`KPRO_QUIC_CERT_FILE` and `KPRO_QUIC_KEY_FILE` before the generated service can
+start; the scaffold does not generate or commit a private key.
 
 If `kpro` is not installed, use the CLI from the pinned KPro checkout in the
 same way the repository examples do.
+
+## Add gRPC to a service
+
+A project initially created as an HTTP-only unified service can gain a gRPC
+endpoint without regenerating or patching its process entry point:
+
+```sh
+# Preview the complete change without writing.
+kpro add --api grpc --dry-run
+
+# Apply it in the current project.
+kpro add --api grpc
+
+# Or select another project root and manifest.
+kpro add --api grpc --root ../orders --config kpro.gen.yaml
+```
+
+The current `add` command supports `--api grpc` only. It requires a project
+created by the current unified `service` profile, including a valid
+`kpro.service.yaml`. The existing generation state must have no pending output
+creates, updates, or removals. Normal edits to create-once application
+scaffolds are allowed even when only their recorded lock hashes have drifted;
+users do not need to run `generate` first to accept those edits. The command
+intentionally rejects the removed protocol-specific profile and older projects
+that assemble endpoints directly in `cmd/<service>/main.go`; it does not guess
+at a migration for application-owned startup code.
+
+Before writing, the command checks `protoc`, `protoc-gen-go`, and
+`protoc-gen-go-grpc`, validates the existing service configuration and
+manifest, and stages the complete desired generation plan outside the project.
+It then commits the following related changes as one compare-and-swap
+transaction:
+
+- the gRPC selection in `kpro.service.yaml`;
+- the `grpc-api` source in the selected generation manifest;
+- `api/grpc/service.proto`;
+- the generated protobuf, gRPC adapter, and selected-endpoint assembly files;
+- the create-once gRPC service and endpoint configuration when absent; and
+- the selected manifest's generation lock, including refreshed hashes for
+  preserved create-once application files.
+
+A preflight or generation failure, a modified generator-owned file, or a
+compare-and-swap conflict is detected before project files are changed. A
+failure while installing staged files triggers rollback; when rollback
+succeeds, no partial project update remains. In the extreme case that rollback
+cannot restore a target, the error reports the exact retained backup path for
+manual recovery.
+
+Once all target files have been installed, the project update is successful. If
+a superseded backup cannot then be removed, the command reports a warning and
+retains that backup instead of misreporting the completed project update as a
+failure. Application-owned create-once files are not overwritten; accepted
+scaffold hash drift is recorded in the refreshed lock within the same
+transaction. `cmd/<service>/main.go` remains byte-for-byte unchanged because it
+already delegates endpoint mounting to `internal/kproapp.Mount`.
+
+The command does not run `go mod tidy`; dependency selection remains an
+explicit, reviewable application change. After applying the addition, run:
+
+```sh
+go mod tidy
+go test ./...
+kpro generate --check
+```
+
+Running the same add again after a successful addition is a byte-preserving
+no-op. `--dry-run` performs the same preflight and staging work but makes no
+project writes.
 
 ## Manifest
 
@@ -76,18 +201,18 @@ apiVersion: kpro.dev/codegen/v1alpha1
 module: example.com/orders
 service: orders
 sources:
-  - id: public-http
+  - id: http-api
     kind: openapi
-    path: api/openapi.yaml
-    package: internal/api
-  - id: internal-rpc
+    path: api/http/openapi.yaml
+    package: internal/httpapi
+  - id: grpc-api
     kind: proto
-    path: api/orders.proto
-    package: internal/rpc
-  - id: session-messages
+    path: api/grpc/service.proto
+    package: internal/grpcapi
+  - id: message-api
     kind: message
-    path: api/messages.yaml
-    package: internal/messages
+    path: api/message/messages.yaml
+    package: internal/messageapi
 ```
 
 `module` is the generated application's Go module path. `service` is a Go
@@ -115,8 +240,10 @@ kpro generate --root ../orders --config config/public.yaml --check
 
 The commands have distinct purposes:
 
-- `validate` strictly parses and validates the manifest. It does not load every
-  contract, invoke `protoc`, or execute a configured plugin.
+- `validate` strictly parses and validates the manifest. For a unified service,
+  it also validates `kpro.service.yaml` and cross-checks its selections against
+  the manifest. It does not load every contract, invoke `protoc`, or execute a
+  configured plugin.
 - `generate` plans every source and then applies the complete virtual file
   plan.
 - `generate --dry-run` performs the same planning and safety checks and reports
@@ -168,10 +295,10 @@ version-control review.
 An OpenAPI source uses:
 
 ```yaml
-- id: public-http
+- id: http-api
   kind: openapi
-  path: api/openapi.yaml
-  package: internal/api
+  path: api/http/openapi.yaml
+  package: internal/httpapi
 ```
 
 The current backend deliberately accepts a small OpenAPI 3.0.3 subset and
@@ -227,10 +354,10 @@ security implementation.
 A protobuf source uses:
 
 ```yaml
-- id: internal-rpc
+- id: grpc-api
   kind: proto
-  path: api/orders.proto
-  package: internal/rpc
+  path: api/grpc/service.proto
+  package: internal/grpcapi
 ```
 
 Generation requires the standard tools to be installed and available on
@@ -243,8 +370,10 @@ protoc-gen-go-grpc
 ```
 
 `kpro doctor` reports each tool as available or `optional missing`; missing
-protobuf tools do not fail the diagnostic because other profiles and source
-kinds do not need them.
+protobuf tools do not fail the general diagnostic because HTTP, Message, and
+non-protobuf source generation do not need them. They are required when
+`kpro new --profile service` selects `--api grpc`; that command checks all
+three tools before publishing the new project.
 
 The source must use a `.proto` extension and declare at least one gRPC service.
 KPro runs `protoc` in a temporary output directory, collects the standard
@@ -262,18 +391,18 @@ package to protobuf or gRPC.
 Pin `protoc` and both Go plugin versions in the application's development and
 CI environment. `generate --check` invokes them and compares their planned
 output, so inconsistent tool versions can produce a legitimate generated diff.
-KPro's backend unit tests and OpenAPI scaffold smoke test do not require those
-external executables.
+Hermetic backend tests can inject the tool runner, but creating, regenerating,
+or checking a real gRPC service project requires the pinned executables.
 
 ## KPro message backend
 
 A message source uses:
 
 ```yaml
-- id: session-messages
+- id: message-api
   kind: message
-  path: api/messages.yaml
-  package: internal/messages
+  path: api/message/messages.yaml
+  package: internal/messageapi
 ```
 
 The contract is strict YAML or JSON:
@@ -313,8 +442,8 @@ Every field must state `required`; optional generated fields are pointers.
 Message IDs must be unique and cannot use `0`, heartbeat `1`, pong `2`, or the
 framework error ID `0xffffffff`.
 
-`dispatch: sync` uses checked synchronous Router registration and preserves the
-safer per-session ordering model. `dispatch: async` uses checked asynchronous
+`dispatch: sync` uses checked synchronous registration and preserves the safer
+per-session ordering model. `dispatch: async` uses checked asynchronous
 registration; select it only when handlers are concurrency-safe and replies may
 complete out of order.
 
@@ -324,11 +453,36 @@ JSON and sent with the request's message ID and sequence number. Omitting
 `response` suppresses the generated success reply; normal Router error handling
 still applies when the service returns an error.
 
-The adapter targets `core.Router`, so the same generated registration works
-with KPro's TCP, KCP, QUIC, UDP, and WebSocket message transports. It does not
-generate HTTP, SSE, or gRPC bindings. Nested payload objects, arrays, maps,
-enums, alternate encodings, and other schema features are outside this first
-contract version.
+The adapter declares a service-specific small interface such as
+`OrdersRegistrar`, containing only:
+
+```go
+HandleSyncChecked(uint32, core.Handler) error
+HandleAsyncChecked(uint32, core.Handler) error
+```
+
+Both `*core.Router` and `*server.Endpoint` satisfy that interface. The
+recommended server assembly path is to register the generated service directly
+on its mounted message endpoint:
+
+```go
+endpoint := app.Mount(tcp.New(tcp.Config{
+	Addr:  ":8088",
+	Codec: codec.KProV1(),
+}))
+
+if err := kpromessage.RegisterOrders(endpoint, service); err != nil {
+	return err
+}
+```
+
+Applications that own a `*core.Router` directly can still pass that router to
+`RegisterOrders`. The generated adapter is compatible with KPro's TCP, KCP,
+QUIC, UDP, and WebSocket message endpoints, but registration is endpoint-local:
+register the service separately on every mounted endpoint that should expose
+it. The backend does not generate HTTP, SSE, or gRPC bindings. Nested payload
+objects, arrays, maps, enums, alternate encodings, and other schema features
+are outside this first contract version.
 
 ## External generator plugins
 

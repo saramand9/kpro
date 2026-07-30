@@ -1,0 +1,33 @@
+// This file is created once by kpro and is safe to edit.
+
+package kproapp
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/saramand9/kpro/server"
+	"github.com/saramand9/kpro/transport/httpx"
+	kprohttp "{{.Module}}/{{.HTTPPackage}}/kprohttp"
+	httpservice "{{.Module}}/{{.HTTPPackage}}/service"
+)
+
+func mountHTTP(app *server.Server) error {
+	endpoint, err := server.MountNativeChecked(app, httpx.New(httpx.Config{
+		Addr:              ":8080",
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		ShutdownTimeout:   10 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+		MaxBodyBytes:      1 << 20,
+	}))
+	if err != nil {
+		return fmt.Errorf("mount HTTP endpoint: %w", err)
+	}
+	if err := kprohttp.Register(endpoint, &httpservice.API{}); err != nil {
+		return fmt.Errorf("register generated HTTP API: %w", err)
+	}
+	return nil
+}
