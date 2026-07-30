@@ -10,7 +10,10 @@ Run the checked-in [quickstart](quickstart.md) when evaluating KPro. To start a
 separate application from this checkout:
 
 ```sh
-go run ./cmd/kpro new ../orders --module example.com/orders --name orders
+go run ./cmd/kpro new ../orders \
+  --module example.com/orders \
+  --name orders \
+  --profile minimal
 ```
 
 The target must be missing or empty. The source-mode generator auto-detects
@@ -21,6 +24,22 @@ minor release; its examples must not be mixed with the tagged `v0.1.0` module or
 CLI. The generated service already includes checked construction and explicit
 example HTTP limits. Review those values for the workload, then add real health
 checks and follow the production checklist.
+
+`minimal` is the default profile. When the HTTP contract should drive the Go
+types and checked route registration, start with the `http-api` profile:
+
+```sh
+go run ./cmd/kpro new ../orders-api \
+  --module example.com/orders-api \
+  --name orders-api \
+  --profile http-api
+```
+
+That profile creates an OpenAPI contract, generation manifest, generated
+bindings, create-once service implementation, and a content-addressed lock.
+Follow [Code Generation](code-generation.md) for regeneration, supported
+contract subsets, protobuf tooling, message bindings, and external-plugin
+trust boundaries.
 
 ## 2. Start with the protocol your contract requires
 
@@ -235,6 +254,12 @@ cancellation initiates shutdown. The complete lifecycle pattern is in
 
 For TCP, KCP, QUIC, UDP, and WebSocket routes, start with `HandleSync`. It preserves per-session execution order and is the safer default when operations mutate session or aggregate state.
 
+For a contract-first message API, KPro can generate the Router registration,
+JSON request/response types, and create-once service implementation from a
+`kpro.dev/message/v1alpha1` document. The same generated adapter works across
+those five Router-based transports; it does not generate HTTP, SSE, or gRPC
+bindings. See [Code Generation](code-generation.md#kpro-message-backend).
+
 Use `HandleAsync` only when all of the following are true:
 
 - concurrent execution is safe;
@@ -270,8 +295,19 @@ and Windows. These repository gates are a baseline; the application must scan
 its complete dependency graph and built image and retain its own coverage and
 test evidence.
 
+Applications using code generation should commit the contract, manifest,
+generated files, create-once scaffolds, and manifest-scoped lock together.
+Run `kpro generate --check` in CI with the same pinned KPro CLI, protobuf tools,
+and any explicitly authorized plugin executables used by developers.
+
 ## 8. Add production integrations at application boundaries
 
-Authentication and authorization are intentionally outside this golden path. Integrate them as middleware or in an upstream gateway and test fail-closed behavior. Prometheus exposition is opt-in, OTel export remains application-configured, and every telemetry backend, retention policy, alert, and access policy remains an operational integration.
+Authentication and authorization are intentionally outside this golden path.
+Integrate them as middleware or in an upstream gateway and test fail-closed
+behavior. OpenAPI generation rejects security requirements rather than
+pretending to implement them; generated route registration is not an access
+control layer. Prometheus exposition is opt-in, OTel export remains
+application-configured, and every telemetry backend, retention policy, alert,
+and access policy remains an operational integration.
 
 Before deployment, complete the [Production Readiness Checklist](production-readiness.md), document the assumptions used for sizing, and record the load-test result that supports each operational limit.
