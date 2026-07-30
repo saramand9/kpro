@@ -1,0 +1,12 @@
+apiVersion: kpro.dev/service/v1alpha1
+apis:
+{{if .HasHTTP}}  - http
+{{end}}{{if .HasGRPC}}  - grpc
+{{end}}{{if .HasMessage}}  - message
+transports:
+{{if .HasTCP}}  - tcp
+{{end}}{{if .HasKCP}}  - kcp
+{{end}}{{if .HasQUIC}}  - quic
+{{end}}{{if .HasUDP}}  - udp
+{{end}}{{if .HasWebSocket}}  - websocket
+{{end}}{{end}}

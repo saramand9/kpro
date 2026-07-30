@@ -61,10 +61,31 @@ func runValidate(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	project, configured, err := loadConfiguredServiceProject(input.root)
+	if err != nil {
+		return err
+	}
+	if configured {
+		if _, err := buildServiceAssemblyPlan(project, input.manifest); err != nil {
+			return err
+		}
+	}
 
 	fmt.Fprintf(stdout, "validated manifest: %s\n", input.config)
 	for _, source := range input.manifest.Sources {
 		fmt.Fprintf(stdout, "source %s: %s %s -> %s\n", source.ID, source.Kind, source.Path, source.Package)
+	}
+	if configured {
+		fmt.Fprintf(
+			stdout,
+			"validated service assembly: %s (APIs: %s",
+			filepath.Join(input.root, defaultServiceProjectFile),
+			strings.Join(project.APIs, ", "),
+		)
+		if len(project.Transports) != 0 {
+			fmt.Fprintf(stdout, "; transports: %s", strings.Join(project.Transports, ", "))
+		}
+		fmt.Fprintln(stdout, ")")
 	}
 	return nil
 }
@@ -199,6 +220,21 @@ func buildGenerationPlan(root string, value manifest.Manifest, allowPlugins bool
 		outputs, err := sourcePlan.OrderedFiles()
 		if err != nil {
 			return codegen.Plan{}, fmt.Errorf("generate source %q: %w", source.ID, err)
+		}
+		files = append(files, outputs...)
+	}
+	project, configured, err := loadConfiguredServiceProject(root)
+	if err != nil {
+		return codegen.Plan{}, err
+	}
+	if configured {
+		assemblyPlan, err := buildServiceAssemblyPlan(project, value)
+		if err != nil {
+			return codegen.Plan{}, err
+		}
+		outputs, err := assemblyPlan.OrderedFiles()
+		if err != nil {
+			return codegen.Plan{}, fmt.Errorf("build service assembly: %w", err)
 		}
 		files = append(files, outputs...)
 	}

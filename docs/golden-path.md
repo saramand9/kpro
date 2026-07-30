@@ -6,8 +6,42 @@ KPro provides the assembly and transport primitives described here. It does not 
 
 ## 1. Create a reviewable starting point
 
-Run the checked-in [quickstart](quickstart.md) when evaluating KPro. To start a
-separate application from this checkout:
+Run the checked-in [quickstart](quickstart.md) when evaluating KPro. For a new
+contract-first HTTP application, use the unified `service` profile:
+
+```sh
+go run ./cmd/kpro new ../orders \
+  --module example.com/orders \
+  --name orders \
+  --profile service \
+  --api http
+```
+
+The same profile can assemble multiple API models into one process. Repeat
+`--api` rather than selecting a protocol-specific profile:
+
+```sh
+go run ./cmd/kpro new ../orders \
+  --module example.com/orders \
+  --name orders \
+  --profile service \
+  --api http \
+  --api grpc \
+  --api message \
+  --transport tcp \
+  --transport websocket
+```
+
+`--api` accepts `http`, `grpc`, and `message`. A Message API requires at least
+one explicit, repeatable `--transport`; the supported values are `tcp`, `kcp`,
+`quic`, `udp`, and `websocket`. Each chosen Message transport receives its own
+endpoint and registration. A gRPC selection requires `protoc`,
+`protoc-gen-go`, and `protoc-gen-go-grpc` on `PATH`. QUIC requires application
+TLS certificate and private-key paths at runtime.
+
+The old `http-api` profile has been removed; use
+`--profile service --api http`. The hand-written `minimal` profile remains for
+a small HTTP service that deliberately does not use contract generation:
 
 ```sh
 go run ./cmd/kpro new ../orders \
@@ -21,25 +55,35 @@ this checkout and records it as a quoted local replacement; pass
 `--kpro-replace <checkout>` when running the tool elsewhere. Current `main`
 contains a source-incompatible dependency-boundary change planned for the next
 minor release; its examples must not be mixed with the tagged `v0.1.0` module or
-CLI. The generated service already includes checked construction and explicit
-example HTTP limits. Review those values for the workload, then add real health
-checks and follow the production checklist.
+CLI.
 
-`minimal` is the default profile. When the HTTP contract should drive the Go
-types and checked route registration, start with the `http-api` profile:
+The `service` profile creates the selected contracts, one generation manifest,
+generated checked bindings, create-once implementations, a content-addressed
+lock, a stable `cmd/<service>` entry point, and endpoint assembly under
+`internal/kproapp`. Review the generated limits and transport configuration for
+the workload, then add real health checks and follow the production checklist.
+
+To grow a current HTTP-only unified service after its client contract requires
+gRPC:
 
 ```sh
-go run ./cmd/kpro new ../orders-api \
-  --module example.com/orders-api \
-  --name orders-api \
-  --profile http-api
+kpro add --api grpc --dry-run
+kpro add --api grpc
+go mod tidy
+go test ./...
+kpro generate --check
 ```
 
-That profile creates an OpenAPI contract, generation manifest, generated
-bindings, create-once service implementation, and a content-addressed lock.
-Follow [Code Generation](code-generation.md) for regeneration, supported
-contract subsets, protobuf tooling, message bindings, and external-plugin
-trust boundaries.
+The add command does not rewrite the process entry point or run dependency
+tidying. It stages the service selection, generation manifest, protobuf
+contract, generated endpoint/binding files, and lock, then installs them through
+a checked compare-and-swap transaction with rollback. Repeating it is a no-op.
+This path intentionally rejects legacy inline-main scaffolds instead of
+attempting an ambiguous migration; recreate or migrate such a project
+explicitly. See [Code Generation](code-generation.md#add-grpc-to-a-service)
+for the exact project and tooling prerequisites, regeneration behavior,
+supported contract subsets, Message bindings, and external-plugin trust
+boundaries.
 
 ## 2. Start with the protocol your contract requires
 
@@ -254,11 +298,31 @@ cancellation initiates shutdown. The complete lifecycle pattern is in
 
 For TCP, KCP, QUIC, UDP, and WebSocket routes, start with `HandleSync`. It preserves per-session execution order and is the safer default when operations mutate session or aggregate state.
 
-For a contract-first message API, KPro can generate the Router registration,
-JSON request/response types, and create-once service implementation from a
-`kpro.dev/message/v1alpha1` document. The same generated adapter works across
-those five Router-based transports; it does not generate HTTP, SSE, or gRPC
-bindings. See [Code Generation](code-generation.md#kpro-message-backend).
+For a contract-first message API, KPro can generate checked message
+registration, JSON request/response types, and a create-once service
+implementation from a `kpro.dev/message/v1alpha1` document. The generated
+registration accepts a
+small interface containing `HandleSyncChecked` and `HandleAsyncChecked`;
+`*core.Router` and `*server.Endpoint` both implement it.
+
+Prefer registering the service on the endpoint returned by `Mount`:
+
+```go
+endpoint := app.Mount(tcp.New(tcp.Config{
+	Addr:  cfg.Addr,
+	Codec: codec.KProV1(),
+}))
+
+if err := kpromessage.RegisterOrders(endpoint, service); err != nil {
+	return err
+}
+```
+
+Passing a directly owned `*core.Router` remains supported. The same generated
+adapter type can be used with TCP, KCP, QUIC, UDP, and WebSocket message
+endpoints, but each endpoint must be registered separately. It does not
+generate HTTP, SSE, or gRPC bindings. See
+[Code Generation](code-generation.md#kpro-message-backend).
 
 Use `HandleAsync` only when all of the following are true:
 

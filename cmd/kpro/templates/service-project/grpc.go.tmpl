@@ -1,0 +1,29 @@
+// This file is created once by kpro and is safe to edit.
+
+package kproapp
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/saramand9/kpro/server"
+	"github.com/saramand9/kpro/transport/grpcx"
+	grpcapi "{{.Module}}/{{.GRPCPackage}}"
+)
+
+func mountGRPC(app *server.Server) error {
+	endpoint, err := server.MountNativeChecked(app, grpcx.NewServer(
+		":9090",
+		grpcx.WithShutdownTimeout(10*time.Second),
+	))
+	if err != nil {
+		return fmt.Errorf("mount gRPC endpoint: %w", err)
+	}
+	services := grpcapi.KProGrpcApiGRPCServices{
+		{{.ServiceExported}}: &grpcapi.KProGrpcApi{{.ServiceExported}}Service{},
+	}
+	if err := services.RegisterGRPC(endpoint); err != nil {
+		return fmt.Errorf("register generated gRPC API: %w", err)
+	}
+	return nil
+}

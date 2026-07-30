@@ -1047,16 +1047,56 @@ func (e *Endpoint) Handle(msgID uint32, h core.Handler) *Endpoint {
 	return e
 }
 
+// HandleChecked registers a sync message handler and reports invalid,
+// duplicate, or late registration.
+func (e *Endpoint) HandleChecked(msgID uint32, h core.Handler) error {
+	router, err := e.checkedRouter()
+	if err != nil {
+		return err
+	}
+	return router.HandleChecked(msgID, h)
+}
+
 // HandleSync registers a per-session serialized message handler.
 func (e *Endpoint) HandleSync(msgID uint32, h core.Handler) *Endpoint {
 	e.router.HandleSync(msgID, h)
 	return e
 }
 
+// HandleSyncChecked registers a per-session serialized message handler and
+// reports invalid, duplicate, or late registration.
+func (e *Endpoint) HandleSyncChecked(msgID uint32, h core.Handler) error {
+	router, err := e.checkedRouter()
+	if err != nil {
+		return err
+	}
+	return router.HandleSyncChecked(msgID, h)
+}
+
 // HandleAsync registers a message handler that runs through async workers.
 func (e *Endpoint) HandleAsync(msgID uint32, h core.Handler) *Endpoint {
 	e.router.HandleAsync(msgID, h)
 	return e
+}
+
+// HandleAsyncChecked registers a message handler that runs through async
+// workers and reports invalid, duplicate, or late registration.
+func (e *Endpoint) HandleAsyncChecked(msgID uint32, h core.Handler) error {
+	router, err := e.checkedRouter()
+	if err != nil {
+		return err
+	}
+	return router.HandleAsyncChecked(msgID, h)
+}
+
+func (e *Endpoint) checkedRouter() (*core.Router, error) {
+	if e == nil {
+		return nil, fmt.Errorf("%w: endpoint is nil", ErrInvalidConfiguration)
+	}
+	if e.router == nil {
+		return nil, fmt.Errorf("%w: endpoint router is nil", ErrInvalidConfiguration)
+	}
+	return e.router, nil
 }
 
 // Snapshot returns a point-in-time view of this endpoint's Router runtime.

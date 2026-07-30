@@ -1,0 +1,17 @@
+apiVersion: kpro.dev/codegen/v1alpha1
+module: "{{.Module}}"
+service: "{{.ServiceIdentifier}}"
+sources:
+{{if .HasHTTP}}  - id: http-api
+    kind: openapi
+    path: api/http/openapi.yaml
+    package: internal/httpapi
+{{end}}{{if .HasGRPC}}  - id: grpc-api
+    kind: proto
+    path: api/grpc/service.proto
+    package: internal/grpcapi
+{{end}}{{if .HasMessage}}  - id: message-api
+    kind: message
+    path: api/message/messages.yaml
+    package: internal/messageapi
+{{end}}

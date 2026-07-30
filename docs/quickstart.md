@@ -37,8 +37,8 @@ quickstart ready on :8080
 
 The complete source is [examples/quickstart/main.go](../examples/quickstart/main.go).
 
-To scaffold a separate service using the API described here, run the tool from
-the same KPro checkout:
+To scaffold a separate contract-first HTTP service, run the tool from the same
+KPro checkout:
 
 ```sh
 go run ./cmd/kpro doctor
@@ -46,53 +46,102 @@ go run ./cmd/kpro version
 go run ./cmd/kpro new ../hello-kpro \
   --module example.com/hello-kpro \
   --name hello-kpro \
-  --profile minimal
+  --profile service \
+  --api http
 cd ../hello-kpro
 go mod tidy
-go run .
+go run ./cmd/hello-kpro
 ```
 
-`minimal` is the default profile and writes the small hand-authored service
-used below. For a contract-first HTTP project with an OpenAPI document,
-generation manifest, checked bindings, create-once service implementation, and
-content-addressed generation lock, use:
+The unified `service` profile accepts repeatable `--api http|grpc|message`
+selections. A Message API also requires at least one explicit, repeatable
+`--transport tcp|kcp|quic|udp|websocket`. For example:
 
 ```sh
-go run ./cmd/kpro new ../hello-api \
-  --module example.com/hello-api \
-  --name hello-api \
-  --profile http-api
-cd ../hello-api
-go mod tidy
-go run ./cmd/hello-api
+# Message API over TCP.
+go run ./cmd/kpro new ../session-service \
+  --module example.com/session-service \
+  --name session-service \
+  --profile service \
+  --api message \
+  --transport tcp
+
+# HTTP, gRPC, and Message APIs assembled into one process.
+go run ./cmd/kpro new ../multi-service \
+  --module example.com/multi-service \
+  --name multi-service \
+  --profile service \
+  --api http \
+  --api grpc \
+  --api message \
+  --transport tcp \
+  --transport websocket
 ```
 
-See [Code Generation](code-generation.md) for the manifest, ownership rules,
-supported OpenAPI, protobuf, and message subsets, plugin trust boundary, and
-the `validate`/`generate --check` workflow.
+An HTTP-only unified service can add gRPC later:
+
+```sh
+go run ./cmd/kpro add --root ../hello-kpro --api grpc --dry-run
+go run ./cmd/kpro add --root ../hello-kpro --api grpc
+cd ../hello-kpro
+go mod tidy
+go test ./...
+kpro generate --check
+```
+
+This command currently adds only gRPC and accepts only projects created by the
+current unified `service` profile. It does not migrate the removed
+protocol-specific profile or an older project whose endpoint setup is embedded
+directly in `cmd/<service>/main.go`. The stable main file is not rewritten, and
+the command deliberately leaves dependency selection to `go mod tidy`.
+Re-running the same add against a current project is a byte-preserving no-op.
+
+Selecting gRPC requires `protoc`, `protoc-gen-go`, and
+`protoc-gen-go-grpc` on `PATH`. Run `kpro doctor` before scaffolding and pin all
+three versions in development and CI. Selecting QUIC produces configuration
+that reads `KPRO_QUIC_CERT_FILE` and `KPRO_QUIC_KEY_FILE`; supply reviewed TLS
+material before starting that project. The scaffold intentionally does not
+create or commit a private key.
+
+The old `http-api` profile has been removed. Use
+`--profile service --api http`. The hand-written `minimal` profile remains
+available when contract generation is deliberately not wanted:
+
+```sh
+go run ./cmd/kpro new ../hello-minimal \
+  --module example.com/hello-minimal \
+  --name hello-minimal \
+  --profile minimal
+```
+
+See [Code Generation](code-generation.md) for the generated project layout,
+manifest and ownership rules, supported contract subsets, plugin trust
+boundary, and the `validate`/`generate --check` workflow.
 
 The tagged `v0.1.0` CLI generates a service for the `v0.1.0` API and remains
 usable with the documentation at that tag. It predates `server.MountNative`;
 do not combine that binary with current `main` examples. Private-module use also
 requires the organization's normal Git credentials and `GOPRIVATE`
 configuration. The target must be missing or empty; the command refuses to
-overwrite a non-empty directory.
+overwrite a non-empty directory. Service generation is staged and published
+only after all selected bindings are generated successfully.
 
 `doctor` prints the Go runtime, platform, main module, available VCS revision,
-and the availability of the three optional protobuf generation tools. Missing
-protobuf tools are reported as optional and do not make the general framework
-diagnostic fail. `version` prints build metadata; a checkout run reports
-development values, while release artifacts receive version, commit, and build
-time from the release pipeline.
+and the availability of the three protobuf generation tools. Missing protobuf
+tools remain optional for the general diagnostic and for HTTP or Message
+projects, but `--profile service --api grpc` requires them before creating the
+project. `version` prints build metadata; a checkout run reports development
+values, while release artifacts receive version, commit, and build time from
+the release pipeline.
 
 The source-mode tool detects the current KPro checkout and writes a quoted local
 `replace` into the generated `go.mod`; `--kpro-replace <checkout>` selects one
-explicitly. The generated service includes checked construction, explicit HTTP
-timeouts/body limits, Zap logging, recovery middleware, separate liveness and
-readiness probes, a hello route, process signals, and graceful shutdown. The
+explicitly. The generated HTTP service includes checked construction, explicit
+request timeouts and body limits, recovery and payload-limit middleware,
+liveness and readiness routes, process signals, and graceful shutdown. The
 starter has no external dependency, so readiness succeeds while the process is
-serving. Add dependency checks, metrics/tracing, and resource ownership when the
-service begins using them.
+serving. Add dependency checks, metrics, tracing, authentication, and managed
+resource ownership when the service begins using them.
 
 ## 3. Call the routes
 
@@ -129,8 +178,9 @@ snapshot. It is not a Prometheus exporter or a replacement for an external
 observability backend.
 
 If you instead started the generated `hello-kpro` service, call `/livez`,
-`/readyz`, and `/hello`; `/healthz` is a compatibility alias for `/readyz`.
-`GET /hello` returns `{"message":"hello from hello-kpro"}`.
+`/readyz`, and `/healthz`. The starter returns `{"status":"alive"}` from
+`/livez` and a ready status with its placeholder dependency summary from the
+other two routes.
 
 ## 4. Stop gracefully
 

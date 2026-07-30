@@ -73,14 +73,82 @@ jobs:
           go mod tidy
           go test -count=1 ./...
 
-      - name: Generate and check an HTTP API scaffold
+      - name: Install pinned protobuf generation tools
+        env:
+          PROTOC_VERSION: "35.0"
+          PROTOC_SHA256: a45cda0989c17dd950db55f6fbe1e5814c50fda08e87aa422980ac1f89dddbbc
+          PROTOC_GEN_GO_VERSION: v1.36.11
+          PROTOC_GEN_GO_GRPC_VERSION: v1.6.2
         run: |
-          target="${RUNNER_TEMP}/kpro-scaffold-http-api"
-          go run ./cmd/kpro new "$target" --module example.com/kpro-scaffold-http-api --name scaffold-http-api --profile http-api
+          archive="${RUNNER_TEMP}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+          install_dir="${RUNNER_TEMP}/protoc-${PROTOC_VERSION}"
+          plugin_dir="${RUNNER_TEMP}/protoc-go-plugins"
+          curl --fail --location --retry 3 --output "$archive" \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+          echo "${PROTOC_SHA256}  ${archive}" | sha256sum --check -
+          unzip -q "$archive" -d "$install_dir"
+          mkdir -p "$plugin_dir"
+          GOBIN="$plugin_dir" go install "google.golang.org/protobuf/cmd/protoc-gen-go@${PROTOC_GEN_GO_VERSION}"
+          GOBIN="$plugin_dir" go install "google.golang.org/grpc/cmd/protoc-gen-go-grpc@${PROTOC_GEN_GO_GRPC_VERSION}"
+          echo "${install_dir}/bin" >> "$GITHUB_PATH"
+          echo "$plugin_dir" >> "$GITHUB_PATH"
+          "${install_dir}/bin/protoc" --version
+          "${plugin_dir}/protoc-gen-go" --version
+          "${plugin_dir}/protoc-gen-go-grpc" --version
+
+      - name: Add gRPC to an existing HTTP service
+        run: |
+          target="${RUNNER_TEMP}/kpro-add-grpc"
+          go run ./cmd/kpro new "$target" \
+            --module example.com/kpro-add-grpc \
+            --name addgrpc \
+            --profile service \
+            --api http
+
+          main_file="$target/cmd/addgrpc/main.go"
+          main_before="$(sha256sum "$main_file" | awk '{print $1}')"
+
+          go run ./cmd/kpro add --root "$target" --api grpc
+
+          main_after="$(sha256sum "$main_file" | awk '{print $1}')"
+          test "$main_before" = "$main_after"
+
+          tree_digest() {
+            (
+              cd "$target"
+              find . -type f -printf '%P %m\n' | LC_ALL=C sort
+              find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+            ) | sha256sum | awk '{print $1}'
+          }
+
+          first_add="$(tree_digest)"
+          go run ./cmd/kpro add --root "$target" --api grpc
+          second_add="$(tree_digest)"
+          test "$first_add" = "$second_add"
+
+          go -C "$target" mod tidy
+          go -C "$target" test -count=1 ./...
           go run ./cmd/kpro generate --root "$target" --check
 
-      - name: Compile generated HTTP API scaffold
-        working-directory: ${{ runner.temp }}/kpro-scaffold-http-api
+      - name: Generate and check a multi-API service scaffold
+        run: |
+          target="${RUNNER_TEMP}/kpro-scaffold-service"
+          go run ./cmd/kpro new "$target" \
+            --module example.com/kpro-scaffold-service \
+            --name scaffold-service \
+            --profile service \
+            --api http \
+            --api grpc \
+            --api message \
+            --transport tcp \
+            --transport kcp \
+            --transport quic \
+            --transport udp \
+            --transport websocket
+          go run ./cmd/kpro generate --root "$target" --check
+
+      - name: Compile generated multi-API service scaffold
+        working-directory: ${{ runner.temp }}/kpro-scaffold-service
         run: |
           go mod tidy
           go test -count=1 ./...
@@ -176,6 +244,83 @@ jobs:
       - name: Test Windows core and developer tooling
         run: go test -count=1 ./core ./server ./transport/... ./cmd/kpro ./examples/...
 
+      - name: Install pinned protobuf generation tools
+        shell: pwsh
+        env:
+          PROTOC_VERSION: "35.0"
+          PROTOC_SHA256: d1cede9e308cc3eb072392af1c02ccae4bdd3d2f374ec2970dbd8cdfdaa91363
+          PROTOC_GEN_GO_VERSION: v1.36.11
+          PROTOC_GEN_GO_GRPC_VERSION: v1.6.2
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "protoc-$env:PROTOC_VERSION-win64.zip"
+          $installDir = Join-Path $env:RUNNER_TEMP "protoc-$env:PROTOC_VERSION"
+          $pluginDir = Join-Path $env:RUNNER_TEMP 'protoc-go-plugins'
+          curl.exe --fail --location --retry 3 --output $archive `
+            "https://github.com/protocolbuffers/protobuf/releases/download/v$env:PROTOC_VERSION/protoc-$env:PROTOC_VERSION-win64.zip"
+          if ($LASTEXITCODE -ne 0) { throw 'failed to download protoc' }
+          $actualHash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($actualHash -ne $env:PROTOC_SHA256) {
+            throw "protoc checksum mismatch: $actualHash"
+          }
+          Expand-Archive -LiteralPath $archive -DestinationPath $installDir
+          New-Item -ItemType Directory -Path $pluginDir | Out-Null
+          $env:GOBIN = $pluginDir
+          go install "google.golang.org/protobuf/cmd/protoc-gen-go@$env:PROTOC_GEN_GO_VERSION"
+          if ($LASTEXITCODE -ne 0) { throw 'failed to install protoc-gen-go' }
+          go install "google.golang.org/grpc/cmd/protoc-gen-go-grpc@$env:PROTOC_GEN_GO_GRPC_VERSION"
+          if ($LASTEXITCODE -ne 0) { throw 'failed to install protoc-gen-go-grpc' }
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value (Join-Path $installDir 'bin')
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value $pluginDir
+          & (Join-Path $installDir 'bin/protoc.exe') --version
+          & (Join-Path $pluginDir 'protoc-gen-go.exe') --version
+          & (Join-Path $pluginDir 'protoc-gen-go-grpc.exe') --version
+
+      - name: Add gRPC to an existing HTTP service
+        shell: pwsh
+        run: |
+          $target = Join-Path $env:RUNNER_TEMP 'kpro-add-grpc'
+          go run ./cmd/kpro new $target `
+            --module example.com/kpro-add-grpc `
+            --name addgrpc `
+            --profile service `
+            --api http
+
+          $mainFile = Join-Path $target 'cmd/addgrpc/main.go'
+          $mainBefore = (Get-FileHash -Algorithm SHA256 $mainFile).Hash
+
+          go run ./cmd/kpro add --root $target --api grpc
+
+          $mainAfter = (Get-FileHash -Algorithm SHA256 $mainFile).Hash
+          if ($mainBefore -ne $mainAfter) { throw 'add rewrote the application main file' }
+
+          function Get-TreeSnapshot {
+            Get-ChildItem -LiteralPath $target -Recurse -File |
+              Sort-Object FullName |
+              ForEach-Object {
+                $relative = [System.IO.Path]::GetRelativePath($target, $_.FullName).Replace('\', '/')
+                $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash
+                "$relative`t$hash"
+              }
+          }
+
+          $firstAdd = @(Get-TreeSnapshot)
+          go run ./cmd/kpro add --root $target --api grpc
+          $secondAdd = @(Get-TreeSnapshot)
+          $delta = @(Compare-Object -ReferenceObject $firstAdd -DifferenceObject $secondAdd)
+          if ($delta.Count -ne 0) {
+            $delta | Format-Table | Out-String | Write-Host
+            throw 'second add changed the project tree'
+          }
+
+          Push-Location $target
+          try {
+            go mod tidy
+            go test -count=1 ./...
+          } finally {
+            Pop-Location
+          }
+          go run ./cmd/kpro generate --root $target --check
+
       - name: Generate and compile a minimal service
         shell: pwsh
         run: |
@@ -186,11 +331,18 @@ jobs:
           go test -count=1 ./...
           Pop-Location
 
-      - name: Generate, check, and compile an HTTP API service
+      - name: Generate, check, and compile an HTTP and message service
         shell: pwsh
         run: |
-          $target = Join-Path $env:RUNNER_TEMP 'kpro-scaffold-http-api'
-          go run ./cmd/kpro new $target --module example.com/kpro-scaffold-http-api --name scaffold-http-api --profile http-api
+          $target = Join-Path $env:RUNNER_TEMP 'kpro-scaffold-service'
+          go run ./cmd/kpro new $target `
+            --module example.com/kpro-scaffold-service `
+            --name scaffold-service `
+            --profile service `
+            --api http `
+            --api message `
+            --transport tcp `
+            --transport websocket
           go run ./cmd/kpro generate --root $target --check
           Push-Location $target
           go mod tidy

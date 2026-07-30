@@ -34,7 +34,8 @@ for application code.
 | `observability/` | Optional integrations for health, Prometheus, OTel, and Zap. | `healthx/`, `prometheusx/`, `otelx/`, `zapx/` |
 | `eventing/` | Event envelopes, delivery store contracts, GORM outbox, projector runner. | `events/`, `delivery/`, `projector/` |
 | `database/` | Database adapters and lifecycle/resource helpers. | `gorm/`, `redis/`, `es/`, `qdrant/`, `mongo/`, `clickhouse/`, `influx/`, `neo4j/`, `common/` |
-| `cmd/kpro/` | CLI for scaffolding a checked starter service and reporting version/environment diagnostics. | `main.go`, `templates/service/` |
+| `cmd/kpro/` | CLI for minimal/unified service scaffolding, transactional API additions, contract generation, and version/environment diagnostics. | `main.go`, `scaffold.go`, `command_add.go`, `command_codegen.go`, `service_project.go`, `templates/profiles/service/`, `templates/service-project/` |
+| `internal/codegen/` | Safe generation planning, manifests, content-addressed locks, compare-and-swap file transactions, and OpenAPI, protobuf, Message, and plugin backends. | `transaction.go`, `manifest/`, `openapi/`, `protogen/`, `messagegen/`, `pluginhost/` |
 | `cmd/benchguard/` | Benchmark budget checker used by CI. | `main.go` |
 | `examples/` | Protocol and modular application examples. | `quickstart/`, protocol-specific directories |
 | `benchmark/` | Microbenchmarks, budget config, and comparison fixtures. | `budgets.json`, `protocol_benchmark_test.go`, `compare/` |
@@ -158,6 +159,8 @@ should avoid depending directly on concrete storage types.
 
 ## Evidence Files
 
+- [framework-quality-assessment.md](framework-quality-assessment.md) records
+  the current scored quality baseline, its evidence, and reassessment rules.
 - [production-readiness.md](production-readiness.md) defines built-in,
   configure-and-verify, and external responsibilities.
 - [operations.md](operations.md) records overload, failure, and capacity

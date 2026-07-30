@@ -11,6 +11,7 @@ import (
 	"go/token"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
@@ -30,8 +31,9 @@ var templateFiles embed.FS
 var serviceNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 const (
-	kproModulePath           = "github.com/saramand9/kpro"
-	developmentModuleVersion = "v0.0.0"
+	kproModulePath              = "github.com/saramand9/kpro"
+	developmentModuleVersion    = "v0.0.0"
+	messageServiceNameMaxLength = 64
 )
 
 var (
@@ -44,9 +46,21 @@ type scaffoldData struct {
 	Module            string
 	ServiceName       string
 	ServiceIdentifier string
+	ServiceExported   string
+	ServiceFileStem   string
 	KProModule        string
 	KProVersion       string
 	KProReplace       string
+	APIList           string
+	TransportList     string
+	HasHTTP           bool
+	HasGRPC           bool
+	HasMessage        bool
+	HasTCP            bool
+	HasKCP            bool
+	HasQUIC           bool
+	HasUDP            bool
+	HasWebSocket      bool
 }
 
 type scaffoldTemplate struct {
@@ -55,21 +69,64 @@ type scaffoldTemplate struct {
 	mode   os.FileMode
 }
 
-var serviceScaffoldTemplates = []scaffoldTemplate{
+type repeatedFlag []string
+
+func (values *repeatedFlag) String() string {
+	return strings.Join(*values, ",")
+}
+
+func (values *repeatedFlag) Set(value string) error {
+	for _, candidate := range strings.Split(value, ",") {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			return errors.New("selection cannot be empty")
+		}
+		*values = append(*values, candidate)
+	}
+	return nil
+}
+
+type serviceSelection struct {
+	profile    string
+	apis       []string
+	transports []string
+}
+
+var (
+	scaffoldLookPath = exec.LookPath
+	serviceAPIOrder  = []string{"http", "grpc", "message"}
+	transportOrder   = []string{"tcp", "kcp", "quic", "udp", "websocket"}
+)
+
+var minimalScaffoldTemplates = []scaffoldTemplate{
 	{source: "templates/service/go.mod.tmpl", target: "go.mod", mode: 0o644},
 	{source: "templates/service/main.go.tmpl", target: "main.go", mode: 0o644},
 	{source: "templates/service/README.md.tmpl", target: "README.md", mode: 0o644},
 	{source: "templates/service/gitignore.tmpl", target: ".gitignore", mode: 0o644},
 }
 
-var httpAPIScaffoldTemplates = []scaffoldTemplate{
-	{source: "templates/profiles/http-api/go.mod.tmpl", target: "go.mod", mode: 0o644},
-	{source: "templates/profiles/http-api/main.go.tmpl", target: "cmd/{{.ServiceName}}/main.go", mode: 0o644},
-	{source: "templates/profiles/http-api/service.go.tmpl", target: "internal/api/service/api.go", mode: 0o644},
-	{source: "templates/profiles/http-api/openapi.yaml.tmpl", target: "api/openapi.yaml", mode: 0o644},
-	{source: "templates/profiles/http-api/kpro.gen.yaml.tmpl", target: "kpro.gen.yaml", mode: 0o644},
-	{source: "templates/profiles/http-api/README.md.tmpl", target: "README.md", mode: 0o644},
-	{source: "templates/profiles/http-api/gitignore.tmpl", target: ".gitignore", mode: 0o644},
+var serviceProfileBaseTemplates = []scaffoldTemplate{
+	{source: "templates/profiles/service/go.mod.tmpl", target: "go.mod", mode: 0o644},
+	{source: "templates/profiles/service/main.go.tmpl", target: "cmd/{{.ServiceName}}/main.go", mode: 0o644},
+	{source: "templates/profiles/service/kpro.gen.yaml.tmpl", target: "kpro.gen.yaml", mode: 0o644},
+	{source: "templates/profiles/service/kpro.service.yaml.tmpl", target: "kpro.service.yaml", mode: 0o644},
+	{source: "templates/profiles/service/README.md.tmpl", target: "README.md", mode: 0o644},
+	{source: "templates/profiles/service/gitignore.tmpl", target: ".gitignore", mode: 0o644},
+}
+
+var serviceProfileHTTPTemplates = []scaffoldTemplate{
+	{source: "templates/profiles/service/openapi.yaml.tmpl", target: "api/http/openapi.yaml", mode: 0o644},
+	{source: "templates/profiles/service/http_service.go.tmpl", target: "internal/httpapi/service/api.go", mode: 0o644},
+}
+
+var serviceProfileGRPCTemplates = []scaffoldTemplate{
+	{source: "templates/profiles/service/service.proto.tmpl", target: "api/grpc/service.proto", mode: 0o644},
+	{source: "templates/profiles/service/grpc_service.go.tmpl", target: "internal/grpcapi/kpro_grpc_api_service.go", mode: 0o644},
+}
+
+var serviceProfileMessageTemplates = []scaffoldTemplate{
+	{source: "templates/profiles/service/messages.yaml.tmpl", target: "api/message/messages.yaml", mode: 0o644},
+	{source: "templates/profiles/service/message_service.go.tmpl", target: "internal/messageapi/service/{{.ServiceFileStem}}.go", mode: 0o644},
 }
 
 func scaffoldNew(args []string, stdout, stderr io.Writer) error {
@@ -78,7 +135,11 @@ func scaffoldNew(args []string, stdout, stderr io.Writer) error {
 	modulePath := flags.String("module", "", "Go module path (default example.com/<directory>)")
 	serviceName := flags.String("name", "", "service name (default directory name)")
 	kproReplace := flags.String("kpro-replace", "", "local KPro checkout (auto-detected from the current directory)")
-	profile := flags.String("profile", "", "project profile (supported: minimal, http-api)")
+	profile := flags.String("profile", "", "project profile (supported: minimal, service)")
+	var apiValues repeatedFlag
+	var transportValues repeatedFlag
+	flags.Var(&apiValues, "api", "service API: http, grpc, or message (repeatable)")
+	flags.Var(&transportValues, "transport", "message transport: tcp, kcp, quic, udp, or websocket (repeatable)")
 	parseArgs := args
 	// Accept both the natural `new <directory> --module ...` form and Go's
 	// conventional `new --module ... <directory>` form.
@@ -89,16 +150,11 @@ func scaffoldNew(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if flags.NArg() != 1 {
-		return errors.New("usage: kpro new <directory> [--module example.com/service] [--name service] [--kpro-replace path] [--profile minimal|http-api]")
+		return errors.New("usage: kpro new <directory> [--module example.com/service] [--name service] [--kpro-replace path] [--profile minimal|service] [--api http|grpc|message] [--transport tcp|kcp|quic|udp|websocket]")
 	}
-	var templates []scaffoldTemplate
-	switch *profile {
-	case "", "minimal":
-		templates = serviceScaffoldTemplates
-	case "http-api":
-		templates = httpAPIScaffoldTemplates
-	default:
-		return fmt.Errorf("unsupported project profile %q (supported: minimal, http-api)", *profile)
+	selection, err := validateServiceSelection(*profile, apiValues, transportValues)
+	if err != nil {
+		return err
 	}
 	target, err := filepath.Abs(flags.Arg(0))
 	if err != nil {
@@ -120,6 +176,17 @@ func scaffoldNew(args []string, stdout, stderr io.Writer) error {
 	if !serviceNamePattern.MatchString(*serviceName) {
 		return fmt.Errorf("invalid service name %q: use 1-64 letters, digits, '.', '_' or '-'", *serviceName)
 	}
+	if err := validatePortableServicePathSegment(*serviceName); err != nil {
+		return err
+	}
+	serviceIdentifier := goIdentifier(*serviceName)
+	serviceExported := exportedServiceIdentifier(serviceIdentifier)
+	if err := validateDerivedServiceName(selection, serviceExported); err != nil {
+		return err
+	}
+	if err := validateScaffoldPrerequisites(selection); err != nil {
+		return err
+	}
 	replacePath, err := resolveKProReplace(*kproReplace)
 	if err != nil {
 		return err
@@ -135,6 +202,17 @@ func scaffoldNew(args []string, stdout, stderr io.Writer) error {
 	if err := ensureEmptyTarget(target); err != nil {
 		return err
 	}
+	stagedTarget, err := createScaffoldStage(target)
+	if err != nil {
+		return err
+	}
+	stagePublished := false
+	defer func() {
+		if !stagePublished {
+			_ = os.RemoveAll(stagedTarget)
+		}
+	}()
+
 	quotedReplace := ""
 	if replacePath != "" {
 		quotedReplace = strconv.Quote(filepath.ToSlash(replacePath))
@@ -142,32 +220,187 @@ func scaffoldNew(args []string, stdout, stderr io.Writer) error {
 	data := scaffoldData{
 		Module:            *modulePath,
 		ServiceName:       *serviceName,
-		ServiceIdentifier: goIdentifier(*serviceName),
+		ServiceIdentifier: serviceIdentifier,
+		ServiceExported:   serviceExported,
+		ServiceFileStem:   strings.ToLower(serviceExported),
 		KProModule:        kproModulePath,
 		KProVersion:       kproVersion,
 		KProReplace:       quotedReplace,
+		APIList:           strings.Join(selection.apis, ", "),
+		TransportList:     strings.Join(selection.transports, ", "),
+		HasHTTP:           hasSelection(selection.apis, "http"),
+		HasGRPC:           hasSelection(selection.apis, "grpc"),
+		HasMessage:        hasSelection(selection.apis, "message"),
+		HasTCP:            hasSelection(selection.transports, "tcp"),
+		HasKCP:            hasSelection(selection.transports, "kcp"),
+		HasQUIC:           hasSelection(selection.transports, "quic"),
+		HasUDP:            hasSelection(selection.transports, "udp"),
+		HasWebSocket:      hasSelection(selection.transports, "websocket"),
+	}
+	templates := minimalScaffoldTemplates
+	if selection.profile == "service" {
+		templates = serviceProfileTemplates(data)
 	}
 	for _, file := range templates {
-		if err := renderTemplate(target, file.source, file.target, file.mode, data); err != nil {
+		if err := renderTemplate(stagedTarget, file.source, file.target, file.mode, data); err != nil {
 			return err
 		}
 	}
-	if *profile == "http-api" {
-		if err := runGenerate([]string{"--root", target}, io.Discard, io.Discard); err != nil {
-			return fmt.Errorf("generate http-api bindings: %w", err)
+	if selection.profile == "service" {
+		if err := runGenerate([]string{"--root", stagedTarget}, io.Discard, io.Discard); err != nil {
+			return fmt.Errorf("generate service bindings: %w", err)
 		}
 	}
+	if err := commitScaffoldStage(stagedTarget, target); err != nil {
+		return err
+	}
+	stagePublished = true
+
 	if replacePath != "" {
 		fmt.Fprintf(stdout, "created %s\nusing KPro source %s\n", *serviceName, replacePath)
 	} else {
 		fmt.Fprintf(stdout, "created %s\nusing KPro %s\n", *serviceName, kproVersion)
 	}
+	if selection.profile == "service" {
+		fmt.Fprintf(stdout, "APIs: %s\n", data.APIList)
+		if data.HasMessage {
+			fmt.Fprintf(stdout, "message transports: %s\n", data.TransportList)
+		}
+	}
 	runTarget := "."
-	if *profile == "http-api" {
+	if selection.profile == "service" {
 		runTarget = "./cmd/" + *serviceName
 	}
 	fmt.Fprintf(stdout, "\nnext:\n  cd %s\n  go mod tidy\n  go run %s\n", target, runTarget)
 	return nil
+}
+
+func validateServiceSelection(profile string, rawAPIs, rawTransports []string) (serviceSelection, error) {
+	if profile == "" {
+		profile = "minimal"
+	}
+	if profile != "minimal" && profile != "service" {
+		return serviceSelection{}, fmt.Errorf("unsupported project profile %q (supported: minimal, service)", profile)
+	}
+	if profile == "minimal" {
+		if len(rawAPIs) > 0 || len(rawTransports) > 0 {
+			return serviceSelection{}, errors.New("minimal profile does not accept --api or --transport")
+		}
+		return serviceSelection{profile: profile}, nil
+	}
+	apis, err := canonicalSelections("API", rawAPIs, serviceAPIOrder)
+	if err != nil {
+		return serviceSelection{}, err
+	}
+	if len(apis) == 0 {
+		return serviceSelection{}, errors.New("service profile requires at least one --api")
+	}
+	transports, err := canonicalSelections("transport", rawTransports, transportOrder)
+	if err != nil {
+		return serviceSelection{}, err
+	}
+	hasMessage := hasSelection(apis, "message")
+	if !hasMessage && len(transports) > 0 {
+		return serviceSelection{}, errors.New("--transport requires --api message")
+	}
+	if hasMessage && len(transports) == 0 {
+		return serviceSelection{}, errors.New("--api message requires at least one --transport")
+	}
+	return serviceSelection{profile: profile, apis: apis, transports: transports}, nil
+}
+
+func canonicalSelections(label string, values, allowed []string) ([]string, error) {
+	selected := make(map[string]struct{}, len(values))
+	for _, raw := range values {
+		value := strings.ToLower(strings.TrimSpace(raw))
+		if !hasSelection(allowed, value) {
+			return nil, fmt.Errorf("unsupported %s %q (supported: %s)", label, raw, strings.Join(allowed, ", "))
+		}
+		if _, exists := selected[value]; exists {
+			return nil, fmt.Errorf("duplicate %s %q", label, value)
+		}
+		selected[value] = struct{}{}
+	}
+	ordered := make([]string, 0, len(selected))
+	for _, value := range allowed {
+		if _, exists := selected[value]; exists {
+			ordered = append(ordered, value)
+		}
+	}
+	return ordered, nil
+}
+
+func hasSelection(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func validateScaffoldPrerequisites(selection serviceSelection) error {
+	if !hasSelection(selection.apis, "grpc") {
+		return nil
+	}
+	for _, tool := range []string{"protoc", "protoc-gen-go", "protoc-gen-go-grpc"} {
+		if _, err := scaffoldLookPath(tool); err != nil {
+			return fmt.Errorf("service profile with gRPC requires %s on PATH; run 'kpro doctor': %w", tool, err)
+		}
+	}
+	return nil
+}
+
+func validatePortableServicePathSegment(value string) error {
+	if strings.HasSuffix(value, ".") {
+		return fmt.Errorf("invalid service name %q: a portable path segment cannot end with '.'", value)
+	}
+	stem := value
+	if extension := strings.IndexByte(stem, '.'); extension >= 0 {
+		stem = stem[:extension]
+	}
+	if windowsReservedDeviceName(stem) {
+		return fmt.Errorf("invalid service name %q: %q is a reserved Windows device name", value, stem)
+	}
+	return nil
+}
+
+func windowsReservedDeviceName(value string) bool {
+	upper := strings.ToUpper(value)
+	switch upper {
+	case "CON", "PRN", "AUX", "NUL":
+		return true
+	}
+	if len(upper) != 4 || upper[3] < '1' || upper[3] > '9' {
+		return false
+	}
+	return upper[:3] == "COM" || upper[:3] == "LPT"
+}
+
+func validateDerivedServiceName(selection serviceSelection, serviceExported string) error {
+	if !hasSelection(selection.apis, "message") || len(serviceExported) <= messageServiceNameMaxLength {
+		return nil
+	}
+	return fmt.Errorf(
+		"invalid service name for Message API: derived name %q is %d characters; maximum is %d",
+		serviceExported,
+		len(serviceExported),
+		messageServiceNameMaxLength,
+	)
+}
+
+func serviceProfileTemplates(data scaffoldData) []scaffoldTemplate {
+	templates := append([]scaffoldTemplate(nil), serviceProfileBaseTemplates...)
+	if data.HasHTTP {
+		templates = append(templates, serviceProfileHTTPTemplates...)
+	}
+	if data.HasGRPC {
+		templates = append(templates, serviceProfileGRPCTemplates...)
+	}
+	if data.HasMessage {
+		templates = append(templates, serviceProfileMessageTemplates...)
+	}
+	return templates
 }
 
 func goIdentifier(value string) string {
@@ -188,6 +421,27 @@ func goIdentifier(value string) string {
 	}
 	return identifier
 }
+
+func exportedServiceIdentifier(value string) string {
+	var builder strings.Builder
+	upperNext := true
+	for _, character := range value {
+		if character == '_' {
+			upperNext = true
+			continue
+		}
+		if upperNext && character >= 'a' && character <= 'z' {
+			character -= 'a' - 'A'
+		}
+		builder.WriteRune(character)
+		upperNext = false
+	}
+	if builder.Len() == 0 {
+		return "Service"
+	}
+	return builder.String()
+}
+
 func resolveKProReplace(configured string) (string, error) {
 	if configured != "" {
 		path, err := filepath.Abs(configured)
@@ -280,20 +534,112 @@ func normalizeReleaseVersion(candidate string) (string, bool) {
 }
 
 func ensureEmptyTarget(target string) error {
-	entries, err := os.ReadDir(target)
+	info, err := os.Lstat(target)
 	switch {
-	case err == nil && len(entries) > 0:
-		return fmt.Errorf("target directory %q is not empty", target)
-	case err == nil:
-		return nil
 	case errors.Is(err, os.ErrNotExist):
-		if err := os.MkdirAll(target, 0o755); err != nil {
-			return fmt.Errorf("create target: %w", err)
-		}
 		return nil
-	default:
+	case err != nil:
+		return fmt.Errorf("inspect target: %w", err)
+	case info.Mode()&os.ModeSymlink != 0:
+		return fmt.Errorf("target directory %q cannot be a symbolic link", target)
+	case !info.IsDir():
+		return fmt.Errorf("target %q is not a directory", target)
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil {
 		return fmt.Errorf("inspect target: %w", err)
 	}
+	if len(entries) > 0 {
+		return fmt.Errorf("target directory %q is not empty", target)
+	}
+	return nil
+}
+
+func createScaffoldStage(target string) (string, error) {
+	parent := filepath.Dir(target)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return "", fmt.Errorf("create scaffold parent: %w", err)
+	}
+	pattern := ".kpro-" + goIdentifier(filepath.Base(target)) + "-*"
+	stage, err := os.MkdirTemp(parent, pattern)
+	if err != nil {
+		return "", fmt.Errorf("create scaffold staging directory: %w", err)
+	}
+	return stage, nil
+}
+
+func commitScaffoldStage(stage, target string) error {
+	targetInfo, err := os.Lstat(target)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.Chmod(stage, 0o755); err != nil {
+			return fmt.Errorf("set published scaffold permissions: %w", err)
+		}
+		if current, recheckErr := os.Lstat(target); recheckErr == nil {
+			if current.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("target directory %q became a symbolic link while the scaffold was generated", target)
+			}
+			return fmt.Errorf("target path %q appeared while the scaffold was generated", target)
+		} else if !errors.Is(recheckErr, os.ErrNotExist) {
+			return fmt.Errorf("reinspect target before publishing scaffold: %w", recheckErr)
+		}
+		if err := os.Rename(stage, target); err != nil {
+			return fmt.Errorf("publish scaffold: %w", err)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reinspect target before publishing scaffold: %w", err)
+	}
+	if targetInfo.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("target directory %q cannot be a symbolic link", target)
+	}
+	if !targetInfo.IsDir() {
+		return fmt.Errorf("target %q is not a directory", target)
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		return fmt.Errorf("reinspect target before publishing scaffold: %w", err)
+	}
+	if len(entries) != 0 {
+		return fmt.Errorf("target directory %q changed while the scaffold was generated", target)
+	}
+	currentInfo, err := os.Lstat(target)
+	if err != nil {
+		return fmt.Errorf("reinspect target before publishing scaffold: %w", err)
+	}
+	if currentInfo.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("target directory %q became a symbolic link while the scaffold was generated", target)
+	}
+	if !currentInfo.IsDir() || !os.SameFile(targetInfo, currentInfo) {
+		return fmt.Errorf("target path %q changed while the scaffold was generated", target)
+	}
+
+	publishMode := scaffoldDirectoryPublishMode(targetInfo.Mode())
+	if err := os.Chmod(stage, publishMode); err != nil {
+		return fmt.Errorf("preserve target directory permissions: %w", err)
+	}
+	if err := os.Remove(target); err != nil {
+		return fmt.Errorf("replace empty target directory: %w", err)
+	}
+	if err := os.Rename(stage, target); err != nil {
+		restoreErr := restoreEmptyScaffoldTarget(target, publishMode)
+		if restoreErr != nil {
+			return errors.Join(fmt.Errorf("publish scaffold: %w", err), fmt.Errorf("restore empty target: %w", restoreErr))
+		}
+		return fmt.Errorf("publish scaffold: %w", err)
+	}
+	return nil
+}
+
+func scaffoldDirectoryPublishMode(mode os.FileMode) os.FileMode {
+	return mode & (os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky)
+}
+
+func restoreEmptyScaffoldTarget(target string, mode os.FileMode) error {
+	if err := os.Mkdir(target, mode.Perm()); err != nil {
+		return err
+	}
+	return os.Chmod(target, mode)
 }
 
 func renderTemplate(root, source, target string, mode os.FileMode, data scaffoldData) error {
