@@ -125,9 +125,9 @@ The tagged `v0.1.0` CLI generates a service for the `v0.1.0` API and remains
 usable with the documentation at that tag. It predates `server.MountNative`;
 do not combine that binary with current `main` examples. Private-module use also
 requires the organization's normal Git credentials and `GOPRIVATE`
-configuration. The target must be missing or empty; the command refuses to
-overwrite a non-empty directory. Service generation is staged and published
-only after all selected bindings are generated successfully.
+configuration. The target must not exist; the command never removes or replaces
+an existing path. Service generation is staged and published only after all
+selected bindings are generated successfully.
 
 `doctor` prints the Go runtime, platform, main module, available VCS revision,
 and the availability of the three protobuf generation tools. Missing protobuf

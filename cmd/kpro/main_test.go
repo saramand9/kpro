@@ -162,7 +162,7 @@ func TestVersionAndDoctorCommands(t *testing.T) {
 }
 
 func TestSubcommandHelpSucceeds(t *testing.T) {
-	for _, command := range []string{"new", "add", "validate", "generate", "version", "doctor"} {
+	for _, command := range []string{"new", "add", "validate", "generate", "list", "describe", "version", "doctor"} {
 		t.Run(command, func(t *testing.T) {
 			var stdout bytes.Buffer
 			var stderr bytes.Buffer
@@ -197,7 +197,7 @@ func TestDoctorReportsAvailableProtoGenerationTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	contents := output.String()
-	if !strings.Contains(contents, "proto generation tools (required only when generating proto sources):") {
+	if !strings.Contains(contents, "protobuf tools (protoc inspects contracts; protoc plus both plugins generate Go sources):") {
 		t.Fatalf("doctor does not scope tools to proto generation:\n%s", contents)
 	}
 	for name, path := range paths {
@@ -307,6 +307,7 @@ func TestNewServiceHTTPAPICreatesModularParseableProject(t *testing.T) {
 		"internal/httpapi/types/types.gen.go",
 		"internal/httpapi/contract/contract.gen.go",
 		"internal/httpapi/kprohttp/routes.gen.go",
+		"internal/httpapi/kprohttpclient/client.gen.go",
 		"internal/httpapi/service/api.go",
 		"internal/kproapp/endpoints.gen.go",
 		"internal/kproapp/http.go",
@@ -414,7 +415,7 @@ func TestNewServiceGenerationFailureLeavesNoTargetOrStage(t *testing.T) {
 	assertNoScaffoldStages(t, parent)
 }
 
-func TestNewServicePublishesIntoExistingEmptyDirectory(t *testing.T) {
+func TestNewServiceRejectsExistingEmptyDirectory(t *testing.T) {
 	parent := t.TempDir()
 	target := filepath.Join(parent, "existing-empty")
 	wantMode := os.FileMode(0o711)
@@ -427,17 +428,22 @@ func TestNewServicePublishesIntoExistingEmptyDirectory(t *testing.T) {
 		}
 	}
 	var output bytes.Buffer
-	if err := execute([]string{
+	err := execute([]string{
 		"new",
 		"--module", "example.com/existing-empty",
 		"--profile", "service",
 		"--api", "http",
 		target,
-	}, &output, &output); err != nil {
+	}, &output, &output)
+	if err == nil || !strings.Contains(err.Error(), "requires a missing target") {
+		t.Fatalf("existing empty target error = %v", err)
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"go.mod", "kpro.gen.yaml", "cmd/existing-empty/main.go", codegen.DefaultLockFile} {
-		assertProjectPath(t, target, name)
+	if len(entries) != 0 {
+		t.Fatalf("existing empty target was modified: %v", entries)
 	}
 	if runtime.GOOS != "windows" {
 		info, err := os.Stat(target)
@@ -450,6 +456,7 @@ func TestNewServicePublishesIntoExistingEmptyDirectory(t *testing.T) {
 	}
 	assertNoScaffoldStages(t, parent)
 }
+
 func TestNewPublishesMissingTargetWithPortablePermissions(t *testing.T) {
 	parent := t.TempDir()
 	target := filepath.Join(parent, "missing-target")
@@ -540,6 +547,36 @@ func TestCommitScaffoldStageRejectsSymlinkTarget(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(stage, "go.mod")); err != nil {
 		t.Fatalf("commit consumed stage after rejection: %v", err)
+	}
+}
+
+func TestCommitScaffoldStageRejectsExistingTarget(t *testing.T) {
+	parent := t.TempDir()
+	stage := filepath.Join(parent, "stage")
+	if err := os.Mkdir(stage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stage, "go.mod"), []byte("module example.com/stage\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(parent, "appeared")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	err := commitScaffoldStage(stage, target)
+	if err == nil || !strings.Contains(err.Error(), "appeared while the scaffold was generated") {
+		t.Fatalf("commit existing target error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stage, "go.mod")); err != nil {
+		t.Fatalf("commit consumed stage after rejection: %v", err)
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("commit modified existing target: %v", entries)
 	}
 }
 
@@ -886,6 +923,7 @@ func TestNewServiceCombinesHTTPAndMessageAPIs(t *testing.T) {
 		"api/message/messages.yaml",
 		"kpro.service.yaml",
 		"internal/httpapi/kprohttp/routes.gen.go",
+		"internal/httpapi/kprohttpclient/client.gen.go",
 		"internal/messageapi/kpromessage",
 		"internal/kproapp/endpoints.gen.go",
 		"internal/kproapp/http.go",

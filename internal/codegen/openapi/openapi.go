@@ -187,6 +187,9 @@ func lower(spec *openapi3.T) (Document, error) {
 	if len(doc.Operations) == 0 {
 		return Document{}, fmt.Errorf("openapi: document has no operations")
 	}
+	if err := doc.Validate(); err != nil {
+		return Document{}, err
+	}
 	return doc, nil
 }
 
@@ -665,7 +668,7 @@ func unsupportedSchemaConstraints(schema *openapi3.Schema) []string {
 }
 
 func validJSONTagName(name string) bool {
-	if name == "" {
+	if name == "" || name == "-" {
 		return false
 	}
 	const allowedPunctuation = `!#$%&()*+-./:;<=>?@[]^_{|}~ `

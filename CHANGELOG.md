@@ -12,6 +12,16 @@ upgrading between minor versions.
 
 ### Added
 
+- OpenAPI generation now emits a bounded, typed HTTP client implementing the
+  generated application contract, with checked URL/parameter binding, exact
+  success statuses, response media-type validation, and structured
+  `ResponseError` values.
+- `kpro list api` and `kpro describe service` provide deterministic text or
+  versioned JSON catalogs of declared OpenAPI, gRPC, and Message contracts
+  without starting the application or executing external generator plugins.
+- `kpro new --template` applies a strict, versioned local scaffold overlay with
+  additive/replacement rules, selection conditions, portable path checks,
+  source snapshots, and content-addressed provenance.
 - `kpro new --profile service` composes repeatable HTTP, gRPC, and Message APIs
   in one generated application; Message scaffolds support explicit TCP, KCP,
   QUIC, UDP, and WebSocket transport selections.
@@ -67,6 +77,23 @@ upgrading between minor versions.
 
 ### Fixed
 
+- Protobuf generation and descriptor inspection now parse the complete import
+  grammar used by supported compilers, capture the project-local closure before
+  tool lookup, and run `protoc` against a private input snapshot. Unsafe paths,
+  missing/non-regular dependencies, path aliases, symlink escapes, and
+  option/plugin-argument-like entry names are rejected before execution.
+- Generated OpenAPI clients preserve unexpected-response metadata and partial
+  bounded bodies when reads fail, reject redirects by default, safely encode dot
+  path values, reject header control characters and non-finite numbers, handle
+  typed-nil response bodies, and no longer let external parameter names alter
+  generated error format strings. Direct IR and route validation now enforce the
+  same generation invariants, reject JSON's special ignored field name, and
+  prevent non-importable Go `vendor` output paths.
+- Scaffolding now requires a missing target so its staged project is published
+  with one directory rename instead of removing an existing empty directory;
+  declared file modes are applied explicitly rather than weakened by `umask`.
+- Human-readable API catalogs visibly escape terminal control and Unicode format
+  characters while JSON catalogs retain the original encoded values.
 - HTTP and HTTP/3 now install `MaxBodyBytes` on the native request before
   middleware and handlers run, so reading `Request().Body` cannot bypass the
   endpoint limit and all consumers share one request budget.

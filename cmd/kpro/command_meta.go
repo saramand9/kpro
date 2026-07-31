@@ -53,7 +53,7 @@ func runDoctorWithLookPath(args []string, stdout, stderr io.Writer, lookPath doc
 			}
 		}
 	}
-	fmt.Fprintln(stdout, "proto generation tools (required only when generating proto sources):")
+	fmt.Fprintln(stdout, "protobuf tools (protoc inspects contracts; protoc plus both plugins generate Go sources):")
 	for _, tool := range []string{"protoc", "protoc-gen-go", "protoc-gen-go-grpc"} {
 		path, err := lookPath(tool)
 		if err != nil {

@@ -14,6 +14,7 @@ import (
 
 	"github.com/saramand9/kpro/internal/codegen"
 	"github.com/saramand9/kpro/internal/codegen/manifest"
+	"github.com/saramand9/kpro/internal/codegen/protogen"
 )
 
 func TestAddGRPCHermeticSuccessNoOpAndPreservesCustomScaffold(t *testing.T) {
@@ -456,7 +457,7 @@ service ExistingApi {}
 		if err != nil {
 			return codegen.Plan{}, err
 		}
-		imports, err := parseProtoImports(content)
+		imports, err := protogen.ParseImports(content)
 		if err != nil {
 			return codegen.Plan{}, err
 		}

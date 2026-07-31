@@ -15,7 +15,9 @@ server. The current implementation includes:
 - transport capacity limits and shutdown gates;
 - optional health, Prometheus, OTel, and Zap packages;
 - GORM-backed transactional delivery/outbox and projector controls;
-- unified service scaffolding and contract code generation through `cmd/kpro`;
+- unified service scaffolding, versioned local overlays, contract catalogs,
+  server/client code generation, and transactional API additions through
+  `cmd/kpro`;
 - benchmark budget enforcement through `cmd/benchguard`.
 
 The repository provides the initial `v0.1.0` developer release, but not a v1
@@ -80,7 +82,7 @@ Use this route for eventing/data analysis:
 | Streaming/native RPC | `transport/sse/`, `transport/grpcx/` |
 | Observability | `observability/healthx/`, `observability/prometheusx/`, `observability/otelx/`, `observability/zapx/` |
 | Event delivery | `eventing/delivery/`, `eventing/projector/` |
-| Scaffolding, incremental API additions, and code generation | `cmd/kpro/`, `cmd/kpro/service_project.go`, `cmd/kpro/templates/profiles/service/`, `cmd/kpro/templates/service-project/`, `internal/codegen/`, `docs/code-generation.md` |
+| Scaffolding, template overlays, API catalogs, incremental additions, and code generation | `cmd/kpro/`, `cmd/kpro/scaffold_template.go`, `cmd/kpro/command_catalog.go`, `cmd/kpro/service_project.go`, `cmd/kpro/templates/profiles/service/`, `cmd/kpro/templates/service-project/`, `internal/codegen/`, `docs/code-generation.md` |
 | Performance budgets | `benchmark/`, `cmd/benchguard/` |
 
 ## Checks To Reuse
