@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"sort"
+	"strings"
+	"unicode/utf8"
 )
 
 // Lock records the exact generator input and final output for each emitted
@@ -45,12 +48,47 @@ func (l Lock) Validate() error {
 	if l.Version != lockVersion {
 		return fmt.Errorf("codegen: unsupported lock version %d", l.Version)
 	}
-	for name, entry := range l.Files {
-		if _, err := SafeRelativePath(name); err != nil {
+	names := make([]string, 0, len(l.Files))
+	for name := range l.Files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	seen := make(map[string]string, len(names))
+	for _, name := range names {
+		entry := l.Files[name]
+		normalized, err := SafeRelativePath(name)
+		if err != nil {
 			return fmt.Errorf("lock file %q: %w", name, err)
 		}
+		if normalized != name {
+			return fmt.Errorf("lock file %q is not canonical; use %q", name, normalized)
+		}
+		key, err := PortablePathKey(name)
+		if err != nil {
+			return fmt.Errorf("lock file %q: %w", name, err)
+		}
+		if previous, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("%w in lock: %q aliases %q", ErrDuplicatePath, name, previous)
+		}
+		seen[key] = name
 		if !validOwnership(entry.Ownership) || !isSHA256(entry.InputSHA256) || !isSHA256(entry.OutputSHA256) {
 			return fmt.Errorf("codegen: invalid lock entry for %q", name)
+		}
+	}
+	for _, name := range names {
+		for parent := path.Dir(name); parent != "."; parent = path.Dir(parent) {
+			parentKey, err := PortablePathKey(parent)
+			if err != nil {
+				return err
+			}
+			if parentName, collision := seen[parentKey]; collision {
+				return fmt.Errorf(
+					"%w in lock: %q is both a file and parent of %q",
+					ErrDuplicatePath,
+					parentName,
+					name,
+				)
+			}
 		}
 	}
 	return nil
@@ -89,6 +127,9 @@ func EncodeLock(lock Lock) ([]byte, error) {
 
 // DecodeLock accepts the deterministic document emitted by EncodeLock.
 func DecodeLock(data []byte) (Lock, error) {
+	if !utf8.Valid(data) {
+		return Lock{}, fmt.Errorf("decode codegen lock: document is not valid UTF-8")
+	}
 	type item struct {
 		Path string `json:"path"`
 		LockEntry
@@ -121,6 +162,9 @@ func hashBytes(data []byte) string {
 
 func isSHA256(value string) bool {
 	if len(value) != sha256.Size*2 {
+		return false
+	}
+	if value != strings.ToLower(value) {
 		return false
 	}
 	_, err := hex.DecodeString(value)

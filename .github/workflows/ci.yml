@@ -31,6 +31,28 @@ jobs:
           go mod verify
           go mod tidy -diff
 
+      - name: Verify publishable module metadata
+        run: |
+          if grep -En '^[[:space:]]*(replace|exclude)([[:space:]]|$)' go.mod; then
+            echo "::error file=go.mod::published module must not contain replace or exclude directives"
+            exit 1
+          fi
+
+      - name: Compile root module without cgo
+        env:
+          CGO_ENABLED: "0"
+        run: go test -count=1 -run '^$' ./...
+
+      - name: Test pure-Go SQLite paths
+        env:
+          CGO_ENABLED: "0"
+        run: >-
+          go test -count=1
+          ./database/gorm
+          ./eventing/delivery
+          ./internal/app/persistence
+          ./cmd/app
+
       - name: Check formatting
         run: |
           files="$(gofmt -l .)"

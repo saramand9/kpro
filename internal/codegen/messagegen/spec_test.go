@@ -22,6 +22,9 @@ messages:
         - name: quantity
           type: int32
           required: false
+        - name: fields
+          type: string
+          required: false
     response:
       fields:
         - name: accepted
@@ -54,7 +57,8 @@ func TestParseAcceptsStrictYAMLAndJSON(t *testing.T) {
 				"request": {
 					"fields": [
 						{"name": "orderId", "type": "string", "required": true},
-						{"name": "quantity", "type": "int32", "required": false}
+						{"name": "quantity", "type": "int32", "required": false},
+						{"name": "fields", "type": "string", "required": false}
 					]
 				},
 				"response": {

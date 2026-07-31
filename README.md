@@ -63,12 +63,31 @@ application or platform responsibilities.
 | Add a transport, middleware, codec, or database adapter | [Extending KPro](docs/extending-kpro.md) |
 
 The current documentation tracks unreleased `main`. Create a starter service
-from this checkout; source mode adds a local `replace` to the generated module:
+from this checkout:
 
 ```sh
 go run ./cmd/kpro new ../hello-kpro --module example.com/hello-kpro \
   --name hello-kpro --profile service --api http
 ```
+
+All subcommands accept `--help`; displaying help is a successful command. The
+KPro root module contains no repository-local `replace`, but source-mode
+scaffolding deliberately adds a local KPro `replace` to the generated
+application so it can build against the checkout. Remove that replacement and
+pin a reachable release before distributing the generated module.
+
+A versioned CLI install is valid only after the selected tag is available
+through the module's declared path:
+
+```sh
+go install github.com/saramand9/kpro/cmd/kpro@vX.Y.Z
+```
+
+For a private source, configure VCS credentials and `GOPRIVATE` for that module
+path. `GOPRIVATE` does not authenticate Git access. Until the declared path and
+tag are reachable, use `go run ./cmd/kpro` from a reviewed checkout or a
+verified release archive; a successful local checkout build does not prove the
+versioned install path.
 
 Current unified `service` projects can add gRPC later without rewriting the
 application entry point:
@@ -432,7 +451,10 @@ expose the dependency error.
 
 ## Examples
 
-Standalone examples live under [examples/](examples/). Start with `examples/quickstart`; each protocol also has a server and client:
+Standalone examples live under [examples/](examples/). Start with
+`examples/quickstart` for the recommended lifecycle shape. Protocol-specific
+server/client pairs are focused demonstrations of transport behavior, not
+complete deployment templates:
 
 ```text
 examples/quickstart

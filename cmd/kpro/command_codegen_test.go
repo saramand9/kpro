@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -114,6 +115,25 @@ func TestGenerateRejectsMutuallyExclusiveModesBeforeLoadingManifest(t *testing.T
 	}
 }
 
+func TestGenerateReportsCommittedCleanupWarnings(t *testing.T) {
+	root := t.TempDir()
+	writeOpenAPICodegenProject(t, root)
+	previous := executeGenerationPlan
+	executeGenerationPlan = func(codegen.Plan, codegen.Options) (codegen.Result, error) {
+		return codegen.Result{CleanupWarnings: []string{"retained transaction backup for manual cleanup"}}, nil
+	}
+	t.Cleanup(func() { executeGenerationPlan = previous })
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := execute([]string{"generate", "--root", root}, &stdout, &stderr); err != nil {
+		t.Fatalf("generate with cleanup warning: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "warning: retained transaction backup for manual cleanup") {
+		t.Fatalf("cleanup warning not reported on stderr:\n%s", stderr.String())
+	}
+}
+
 func TestGenerateReportsUnsupportedSourceAfterValidation(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, defaultCodegenConfig), []byte(testCodegenManifest), 0o644); err != nil {
@@ -218,7 +238,7 @@ func TestGenerateUsesConfigScopedLockAndRejectsOutsideConfig(t *testing.T) {
 	if err := execute([]string{"generate", "--root", root, "--config", "config/orders.yaml"}, &output, &output); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "config", "orders.lock.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(root, "config", "orders.yaml.lock.json")); err != nil {
 		t.Fatalf("scoped generation lock: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, codegen.DefaultLockFile)); !errors.Is(err, os.ErrNotExist) {
@@ -233,6 +253,168 @@ func TestGenerateUsesConfigScopedLockAndRejectsOutsideConfig(t *testing.T) {
 	err := execute([]string{"validate", "--root", root, "--config", outside}, &output, &output)
 	if err == nil || !strings.Contains(err.Error(), "must be inside root") {
 		t.Fatalf("outside config error = %v", err)
+	}
+}
+
+func TestGenerateUsesDistinctLocksForSameStemManifests(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "api"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, contract := range []string{"orders", "billing"} {
+		if err := os.WriteFile(filepath.Join(root, "api", contract+".openapi.yaml"), []byte(testOpenAPISpec), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifestFor := func(contract, output string) []byte {
+		return []byte(fmt.Sprintf(`apiVersion: kpro.dev/codegen/v1alpha1
+module: example.com/multi
+service: multi
+sources:
+  - id: %s-api
+    kind: openapi
+    path: api/%s.openapi.yaml
+    package: internal/%s
+`, contract, contract, output))
+	}
+	if err := os.WriteFile(filepath.Join(root, "config", "orders.yaml"), manifestFor("orders", "orders"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "config", "orders.json"), manifestFor("billing", "billing"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	for _, config := range []string{"config/orders.yaml", "config/orders.json"} {
+		if err := execute([]string{"generate", "--root", root, "--config", config}, &output, &output); err != nil {
+			t.Fatalf("generate %s: %v\n%s", config, err, output.String())
+		}
+		output.Reset()
+	}
+	for _, name := range []string{
+		"config/orders.yaml.lock.json",
+		"config/orders.json.lock.json",
+		"internal/orders/types/types.gen.go",
+		"internal/billing/types/types.gen.go",
+	} {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(name))); err != nil {
+			t.Fatalf("expected isolated output %q: %v", name, err)
+		}
+	}
+	if err := execute([]string{"generate", "--root", root, "--config", "config/orders.yaml", "--check"}, &output, &output); err != nil {
+		t.Fatalf("first manifest is not current after generating second manifest: %v", err)
+	}
+}
+
+func TestGenerateMigratesUnambiguousLegacyScopedLock(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "api"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "config", "orders.yaml"), []byte(testCodegenManifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "api", "orders.openapi.yaml"), []byte(testOpenAPISpec), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	args := []string{"generate", "--root", root, "--config", "config/orders.yaml"}
+	if err := execute(args, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	current := filepath.Join(root, "config", "orders.yaml.lock.json")
+	legacy := filepath.Join(root, "config", "orders.lock.json")
+	if err := os.Rename(current, legacy); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := execute(append(append([]string(nil), args...), "--check"), &output, &output); err != nil {
+		t.Fatalf("legacy lock is not recoverable in check mode: %v", err)
+	}
+	if _, err := os.Stat(current); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("check mode migrated lock or failed to stat current lock: %v", err)
+	}
+	output.Reset()
+	if err := execute(args, &output, &output); err != nil {
+		t.Fatalf("migrate legacy lock: %v\n%s", err, output.String())
+	}
+	if _, err := os.Stat(current); err != nil {
+		t.Fatalf("migrated lock: %v", err)
+	}
+	if _, err := os.Stat(legacy); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy lock remains after migration: %v", err)
+	}
+}
+
+func TestGenerateRejectsAmbiguousLegacyScopedLockWithoutWrites(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "api"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "config", "orders.yaml"), []byte(testCodegenManifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "api", "orders.openapi.yaml"), []byte(testOpenAPISpec), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	args := []string{"generate", "--root", root, "--config", "config/orders.yaml"}
+	if err := execute(args, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(
+		filepath.Join(root, "config", "orders.yaml.lock.json"),
+		filepath.Join(root, "config", "orders.lock.json"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "config", "orders.json"), []byte(testCodegenManifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotAddTestTree(t, root)
+	output.Reset()
+	err := execute(args, &output, &output)
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("ambiguous legacy lock error = %v", err)
+	}
+	assertAddProjectUnchanged(t, root, before)
+}
+
+func TestValidateRejectsConfigSymlinkOutsideRoot(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.yaml")
+	if err := os.WriteFile(outside, []byte(testCodegenManifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, defaultCodegenConfig)); err != nil {
+		t.Skipf("symbolic links are unavailable on this platform: %v", err)
+	}
+	var output bytes.Buffer
+	err := execute([]string{"validate", "--root", root}, &output, &output)
+	if err == nil || !strings.Contains(err.Error(), "outside root") {
+		t.Fatalf("outside-root config symlink error = %v", err)
+	}
+}
+
+func TestValidateRejectsManifestNameThatCollidesWithDefaultLock(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "kpro.gen"), []byte(testCodegenManifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	err := execute([]string{"validate", "--root", root, "--config", "kpro.gen"}, &output, &output)
+	if err == nil || !strings.Contains(err.Error(), "reserved default lock") {
+		t.Fatalf("reserved lock collision error = %v", err)
 	}
 }
 

@@ -142,10 +142,13 @@ components:
   schemas:
     Pet:
       type: object
-      required: [id, name]
+      required: [id, name, tags, matrix, envelopes]
       properties:
         id: { type: integer }
         name: { type: string }
+        tags: { $ref: '#/components/schemas/TagList' }
+        matrix: { $ref: '#/components/schemas/StringMatrix' }
+        envelopes: { $ref: '#/components/schemas/EnvelopeList' }
     PetInput:
       type: object
       required: [name]
@@ -155,6 +158,29 @@ components:
       type: object
       properties:
         name: { type: string }
+        tags: { $ref: '#/components/schemas/TagList' }
+        matrix: { $ref: '#/components/schemas/StringMatrix' }
+        envelopes: { $ref: '#/components/schemas/EnvelopeList' }
+        tree: { $ref: '#/components/schemas/Tree' }
+    TagList:
+      type: array
+      items: { type: string }
+    StringMatrix:
+      type: array
+      items:
+        type: array
+        items: { type: string }
+    Envelope:
+      type: object
+      required: [tags]
+      properties:
+        tags: { $ref: '#/components/schemas/TagList' }
+    EnvelopeList:
+      type: array
+      items: { $ref: '#/components/schemas/Envelope' }
+    Tree:
+      type: array
+      items: { $ref: '#/components/schemas/Tree' }
 `
 
 func TestBuildPlanDeterministicAndCompiles(t *testing.T) {
@@ -247,6 +273,46 @@ components:
 	if _, err = Parse([]byte(inline)); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("inline response error = %v", err)
 	}
+
+	nestedReference := strings.Replace(sampleSpec, "#/components/schemas/Pet", "#/components/schemas/Pet/properties/id", 1)
+	if _, err = Parse([]byte(nestedReference)); !errors.Is(err, ErrUnsupported) || !strings.Contains(err.Error(), "exactly one component schema token") {
+		t.Fatalf("nested component reference error = %v", err)
+	}
+
+	encodedNestedReference := strings.Replace(sampleSpec, "#/components/schemas/Pet", "#/components/schemas/Pet%2Fproperties%2Fid", 1)
+	if _, err = Parse([]byte(encodedNestedReference)); !errors.Is(err, ErrUnsupported) || !strings.Contains(err.Error(), "exactly one component schema token") {
+		t.Fatalf("encoded nested component reference error = %v", err)
+	}
+}
+
+func TestLocalSchemaReferenceDecodesJSONPointerToken(t *testing.T) {
+	doc, err := Parse([]byte(`openapi: 3.0.3
+info: { title: escaped, version: v1 }
+paths:
+  /escaped:
+    get:
+      operationId: getEscaped
+      responses:
+        '200':
+          description: escaped
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Pet~1Envelope' }
+components:
+  schemas:
+    Pet/Envelope:
+      type: object
+      required: [id]
+      properties:
+        id: { type: integer }
+`))
+	if err != nil {
+		t.Fatalf("Parse escaped component reference: %v", err)
+	}
+	if len(doc.Components) != 1 || doc.Components[0].Name != "PetEnvelope" ||
+		len(doc.Operations) != 1 || doc.Operations[0].Response == nil || doc.Operations[0].Response.Name != "PetEnvelope" {
+		t.Fatalf("escaped component lowering = %#v", doc)
+	}
 }
 
 func TestRouteAndBindingSemanticsAreValidated(t *testing.T) {
@@ -299,6 +365,44 @@ func TestRouteAndBindingSemanticsAreValidated(t *testing.T) {
 			spec:        strings.Replace(sampleSpec, "          in: query\n", "          in: query\n          allowEmptyValue: true\n", 1),
 			unsupported: true,
 		},
+		{
+			name:        "numeric constraint",
+			spec:        strings.Replace(sampleSpec, "schema: { type: integer }", "schema: { type: integer, minimum: 1 }", 1),
+			unsupported: true,
+		},
+		{
+			name:        "string constraint",
+			spec:        strings.Replace(sampleSpec, "name: { type: string }", "name: { type: string, pattern: '^[a-z]+$' }", 1),
+			unsupported: true,
+		},
+		{
+			name:        "unsupported scalar format",
+			spec:        strings.Replace(sampleSpec, "schema: { type: integer }", "schema: { type: integer, format: int32 }", 1),
+			unsupported: true,
+		},
+		{
+			name:        "undeclared required property",
+			spec:        strings.Replace(sampleSpec, "required: [id]", "required: [id, missing]", 1),
+			unsupported: true,
+		},
+		{
+			name: "generated JSON method field collision",
+			spec: strings.Replace(sampleSpec, "name: { type: string }", "unmarshalJSON: { type: string }", 1),
+		},
+		{
+			name: "generated JSON validator field collision",
+			spec: strings.Replace(sampleSpec, "name: { type: string }", "validateJSON: { type: string }", 1),
+		},
+		{
+			name:        "property cannot round trip through JSON tag",
+			spec:        strings.Replace(sampleSpec, "name: { type: string }", `"a,b": { type: string }`, 1),
+			unsupported: true,
+		},
+		{
+			name:        "parameter cannot round trip through JSON tag",
+			spec:        strings.Replace(sampleSpec, "        - name: verbose\n", "        - name: verbose,raw\n", 1),
+			unsupported: true,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -311,6 +415,34 @@ func TestRouteAndBindingSemanticsAreValidated(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildPlanRejectsConflictingRoutesAndRequiredReferenceCycles(t *testing.T) {
+	t.Run("equivalent wildcard routes", func(t *testing.T) {
+		doc := Document{
+			Components: []Schema{{Name: "Pet", Kind: Object}},
+			Operations: []Operation{
+				{ID: "GetPetByID", Method: "GET", Path: "/pets/{id}", Response: &TypeRef{Name: "Pet"}, Status: 200},
+				{ID: "GetPetByName", Method: "GET", Path: "/pets/{name}", Response: &TypeRef{Name: "Pet"}, Status: 200},
+			},
+		}
+		if _, err := BuildPlan(doc, Options{Module: "example.com/generated"}); err == nil || !strings.Contains(err.Error(), "conflicts") {
+			t.Fatalf("BuildPlan route conflict error = %v", err)
+		}
+	})
+
+	t.Run("required object reference cycle", func(t *testing.T) {
+		doc := Document{
+			Components: []Schema{
+				{Name: "Parent", Kind: Object, Properties: []Field{{Name: "Child", JSONName: "child", Type: TypeRef{Name: "Child"}, Required: true}}},
+				{Name: "Child", Kind: Object, Properties: []Field{{Name: "Parent", JSONName: "parent", Type: TypeRef{Name: "Parent"}, Required: true}}},
+			},
+			Operations: []Operation{{ID: "GetParent", Method: "GET", Path: "/parent", Response: &TypeRef{Name: "Parent"}, Status: 200}},
+		}
+		if _, err := BuildPlan(doc, Options{Module: "example.com/generated"}); !errors.Is(err, ErrUnsupported) || !strings.Contains(err.Error(), "Parent -> Child -> Parent") {
+			t.Fatalf("BuildPlan required cycle error = %v", err)
+		}
+	})
 }
 
 func TestUnsupportedMethodsCallbacksAndEmptyDocumentsAreVisible(t *testing.T) {
@@ -399,20 +531,26 @@ var _ contract.API = (*recordingAPI)(nil)
 
 func (api *recordingAPI) CreatePet(_ context.Context, params contract.CreatePetParams, request types.PetInput) (types.Pet, error) {
     api.source, api.name = params.Source, request.Name
-    return types.Pet{Id: 1, Name: request.Name}, nil
+    return types.Pet{Id: 1, Name: request.Name, Tags: types.TagList{}, Matrix: types.StringMatrix{{}}, Envelopes: types.EnvelopeList{}}, nil
 }
 func (api *recordingAPI) GetPet(_ context.Context, params contract.GetPetParams) (types.Pet, error) {
     api.id = params.Id
-    return types.Pet{Id: params.Id, Name: "found"}, nil
+    tags := types.TagList{}
+    matrix := types.StringMatrix{{}}
+    envelopes := types.EnvelopeList{}
+    if params.Id == 96 { envelopes = types.EnvelopeList{{Tags: nil}} }
+    if params.Id == 98 { matrix = types.StringMatrix{nil} }
+    if params.Id == 99 { tags = nil }
+    return types.Pet{Id: params.Id, Name: "found", Tags: tags, Matrix: matrix, Envelopes: envelopes}, nil
 }
 func (api *recordingAPI) UpdatePet(_ context.Context, params contract.UpdatePetParams, request types.PetInput) (types.Pet, error) {
     api.id, api.name = params.Id, request.Name
-    return types.Pet{Id: params.Id, Name: request.Name}, nil
+    return types.Pet{Id: params.Id, Name: request.Name, Tags: types.TagList{}, Matrix: types.StringMatrix{{}}, Envelopes: types.EnvelopeList{}}, nil
 }
 func (api *recordingAPI) PatchPet(_ context.Context, params contract.PatchPetParams, request types.PetPatch) (types.Pet, error) {
     api.id = params.Id
     if request.Name != nil { api.name = *request.Name }
-    return types.Pet{Id: params.Id, Name: api.name}, nil
+    return types.Pet{Id: params.Id, Name: api.name, Tags: types.TagList{}, Matrix: types.StringMatrix{{}}, Envelopes: types.EnvelopeList{}}, nil
 }
 func (api *recordingAPI) DeletePet(_ context.Context, params contract.DeletePetParams) error {
     api.id = params.Id
@@ -436,11 +574,24 @@ func TestGeneratedBindings(t *testing.T) {
     endpoint := httpx.New(httpx.Config{})
     if err := Register(endpoint, api); err != nil { t.Fatal(err) }
 
-    response := request(endpoint, http.MethodPost, "/pets?source=import", "application/json; charset=utf-8", ` + "`" + `{"name":"Milo"}` + "`" + `)
-    if response.Code != http.StatusCreated || api.source != "import" || api.name != "Milo" {
-        t.Fatalf("POST = status %d source %q name %q", response.Code, api.source, api.name)
-    }
-    response = request(endpoint, http.MethodPut, "/pets/7", "application/json", ` + "`" + `{"name":"Otis"}` + "`" + `)
+	response := request(endpoint, http.MethodPost, "/pets?source=import", "application/json; charset=utf-8", ` + "`" + `{"name":"Milo"}` + "`" + `)
+	if response.Code != http.StatusCreated || api.source != "import" || api.name != "Milo" {
+		t.Fatalf("POST = status %d source %q name %q", response.Code, api.source, api.name)
+	}
+	api.name = "unchanged"
+	response = request(endpoint, http.MethodPost, "/pets?source=import", "application/json", ` + "`" + `{}` + "`" + `)
+	if response.Code != http.StatusBadRequest || api.name != "unchanged" {
+		t.Fatalf("missing required field = status %d name %q", response.Code, api.name)
+	}
+	response = request(endpoint, http.MethodPost, "/pets?source=import", "application/json", ` + "`" + `{"name":null}` + "`" + `)
+	if response.Code != http.StatusBadRequest || api.name != "unchanged" {
+		t.Fatalf("null required field = status %d name %q", response.Code, api.name)
+	}
+	response = request(endpoint, http.MethodPost, "/pets?source=import", "application/json", ` + "`" + `{"Name":"Milo"}` + "`" + `)
+	if response.Code != http.StatusBadRequest || api.name != "unchanged" {
+		t.Fatalf("case-mismatched required field = status %d name %q", response.Code, api.name)
+	}
+	response = request(endpoint, http.MethodPut, "/pets/7", "application/json", ` + "`" + `{"name":"Otis"}` + "`" + `)
     if response.Code != http.StatusOK || api.id != 7 || api.name != "Otis" {
         t.Fatalf("PUT = status %d id %d name %q", response.Code, api.id, api.name)
     }
@@ -448,10 +599,46 @@ func TestGeneratedBindings(t *testing.T) {
     if response.Code != http.StatusOK || api.id != 8 || api.name != "Pip" {
         t.Fatalf("PATCH = status %d id %d name %q", response.Code, api.id, api.name)
     }
-    response = request(endpoint, http.MethodPatch, "/pets/10", "application/json", ` + "`" + `{}` + "`" + `)
-    if response.Code != http.StatusOK || api.id != 10 || api.name != "Pip" {
-        t.Fatalf("empty PATCH = status %d id %d name %q", response.Code, api.id, api.name)
-    }
+	response = request(endpoint, http.MethodPatch, "/pets/10", "application/json", ` + "`" + `{}` + "`" + `)
+	if response.Code != http.StatusOK || api.id != 10 || api.name != "Pip" {
+		t.Fatalf("empty PATCH = status %d id %d name %q", response.Code, api.id, api.name)
+	}
+	response = request(endpoint, http.MethodPatch, "/pets/11", "application/json", ` + "`" + `null` + "`" + `)
+	if response.Code != http.StatusBadRequest || api.id != 10 || api.name != "Pip" {
+		t.Fatalf("null PATCH = status %d id %d name %q", response.Code, api.id, api.name)
+	}
+	response = request(endpoint, http.MethodPatch, "/pets/11", "application/json", ` + "`" + `{"name":null}` + "`" + `)
+	if response.Code != http.StatusBadRequest || api.id != 10 || api.name != "Pip" {
+		t.Fatalf("null optional field = status %d id %d name %q", response.Code, api.id, api.name)
+	}
+	response = request(endpoint, http.MethodPatch, "/pets/11", "application/json", ` + "`" + `{"tags":[null]}` + "`" + `)
+	if response.Code != http.StatusBadRequest || api.id != 10 || api.name != "Pip" {
+		t.Fatalf("null scalar array item = status %d id %d name %q", response.Code, api.id, api.name)
+	}
+	response = request(endpoint, http.MethodPatch, "/pets/11", "application/json", ` + "`" + `{"matrix":[[null]]}` + "`" + `)
+	if response.Code != http.StatusBadRequest || api.id != 10 || api.name != "Pip" {
+		t.Fatalf("null nested array item = status %d id %d name %q", response.Code, api.id, api.name)
+	}
+	response = request(endpoint, http.MethodPatch, "/pets/11", "application/json", ` + "`" + `{"envelopes":[null]}` + "`" + `)
+	if response.Code != http.StatusBadRequest || api.id != 10 || api.name != "Pip" {
+		t.Fatalf("null referenced array item = status %d id %d name %q", response.Code, api.id, api.name)
+	}
+	response = request(endpoint, http.MethodPatch, "/pets/11", "application/json", ` + "`" + `{"envelopes":[{"tags":[null]}]}` + "`" + `)
+	if response.Code != http.StatusBadRequest || api.id != 10 || api.name != "Pip" {
+		t.Fatalf("null nested referenced field item = status %d id %d name %q", response.Code, api.id, api.name)
+	}
+	response = request(endpoint, http.MethodPatch, "/pets/13", "application/json", ` + "`" + `{"tree":[[]]}` + "`" + `)
+	if response.Code != http.StatusOK || api.id != 13 || api.name != "Pip" {
+		t.Fatalf("recursive array = status %d id %d name %q", response.Code, api.id, api.name)
+	}
+	response = request(endpoint, http.MethodPatch, "/pets/13", "application/json", ` + "`" + `{"tree":[null]}` + "`" + `)
+	if response.Code != http.StatusBadRequest || api.id != 13 || api.name != "Pip" {
+		t.Fatalf("null recursive array item = status %d id %d name %q", response.Code, api.id, api.name)
+	}
+	response = request(endpoint, http.MethodPatch, "/pets/12", "application/json", ` + "`" + `{"Name":"wrong case"}` + "`" + `)
+	if response.Code != http.StatusOK || api.id != 12 || api.name != "Pip" {
+		t.Fatalf("case-mismatched optional field = status %d id %d name %q", response.Code, api.id, api.name)
+	}
     response = request(endpoint, http.MethodDelete, "/pets/9", "", "")
     if response.Code != http.StatusNoContent || api.id != 9 {
         t.Fatalf("DELETE = status %d id %d", response.Code, api.id)
@@ -465,6 +652,19 @@ func TestGeneratedBindings(t *testing.T) {
     if err := Register(limited, &recordingAPI{}); err != nil { t.Fatal(err) }
     response = request(limited, http.MethodPost, "/pets?source=import", "application/json", ` + "`" + `{"name":"too long"}` + "`" + `)
     if response.Code != http.StatusRequestEntityTooLarge { t.Fatalf("oversize status = %d body %q", response.Code, response.Body.String()) }
+
+    response = request(endpoint, http.MethodGet, "/pets/96", "", "")
+    if response.Code != http.StatusInternalServerError {
+        t.Fatalf("invalid nested referenced response status = %d body %q", response.Code, response.Body.String())
+    }
+    response = request(endpoint, http.MethodGet, "/pets/98", "", "")
+    if response.Code != http.StatusInternalServerError {
+        t.Fatalf("invalid nested-array response status = %d body %q", response.Code, response.Body.String())
+    }
+    response = request(endpoint, http.MethodGet, "/pets/99", "", "")
+    if response.Code != http.StatusInternalServerError {
+        t.Fatalf("invalid nil-array response status = %d body %q", response.Code, response.Body.String())
+    }
 }
 `
 	testPath := filepath.Join(dir, "internal", "openapi", "kprohttp", "routes_test.go")

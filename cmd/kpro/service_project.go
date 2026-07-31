@@ -96,6 +96,17 @@ func loadServiceProjectConfig(filename string) (serviceProjectConfig, error) {
 func loadConfiguredServiceProject(root string) (serviceProjectConfig, bool, error) {
 	candidate := filepath.Join(root, defaultServiceProjectFile)
 	if _, err := os.Lstat(candidate); os.IsNotExist(err) {
+		for _, name := range []string{"endpoints.gen.go", "http.go", "grpc.go", "message.go"} {
+			marker := filepath.Join(root, "internal", "kproapp", name)
+			if _, markerErr := os.Lstat(marker); markerErr == nil {
+				return serviceProjectConfig{}, false, fmt.Errorf(
+					"%s is missing from an established service project; restore it before validate or generate",
+					defaultServiceProjectFile,
+				)
+			} else if !os.IsNotExist(markerErr) {
+				return serviceProjectConfig{}, false, fmt.Errorf("inspect service project marker %q: %w", filepath.ToSlash(marker), markerErr)
+			}
+		}
 		return serviceProjectConfig{}, false, nil
 	} else if err != nil {
 		return serviceProjectConfig{}, false, fmt.Errorf("inspect service project config: %w", err)

@@ -297,6 +297,29 @@ func TestValidateChecksConfiguredServiceAssembly(t *testing.T) {
 	}
 }
 
+func TestEstablishedServiceProjectRejectsMissingServiceConfigWithoutWrites(t *testing.T) {
+	installAddTestEnvironment(t)
+	root := createAddTestProject(t, true)
+	if err := os.Remove(filepath.Join(root, defaultServiceProjectFile)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "internal", "kproapp", "endpoints.gen.go")); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotAddTestTree(t, root)
+
+	for _, command := range []string{"validate", "generate"} {
+		t.Run(command, func(t *testing.T) {
+			var output bytes.Buffer
+			err := execute([]string{command, "--root", root}, &output, &output)
+			if err == nil || !strings.Contains(err.Error(), defaultServiceProjectFile) || !strings.Contains(err.Error(), "established service project") {
+				t.Fatalf("%s missing service config error = %v\n%s", command, err, output.String())
+			}
+			assertAddProjectUnchanged(t, root, before)
+		})
+	}
+}
+
 func TestBuildServiceAssemblyPlanAllAPIsAndTransports(t *testing.T) {
 	project := serviceProjectConfig{
 		APIVersion: serviceProjectAPIVersion,

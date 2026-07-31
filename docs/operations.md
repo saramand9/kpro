@@ -153,17 +153,28 @@ capacity: it shifts memory and latency to blocked callers.
 
 TCP, KCP, QUIC, UDP, and WebSocket configs also expose
 `HandlerErrorPolicy` and `OnHandlerError`. The zero-value policy closes only the
-affected session when the transport's supplied handler returns an error.
-`HandlerErrorContinue` keeps it open; choose that only when subsequent messages
-remain safe. With a transport mounted through `server.Server`, this boundary is
-Router dispatch/admission. Configure `core.RouterConfig.ErrorObserver` for
-errors returned later by registered Router handlers, recovered panics, and
-failures to send the safe `MsgError` response. Its payload-free event contains
-transport, connection, remote address, message ID, sequence, the original
-error, optional response error, and a panic stack. A nil observer preserves the
-standard-log compatibility behavior. Observer panics are isolated, but
-observers run synchronously and may run concurrently, so they must remain fast,
-concurrency-safe, non-blocking, and subject to diagnostic redaction policy.
+affected session when the transport's supplied handler returns an error or
+panics. Built-in direct handler invocation contains the panic and returns an
+error wrapping `core.ErrRecovered`; an error-valued panic also retains its
+original `errors.Is`/`errors.As` chain. The transport calls `OnHandlerError`
+before applying the policy. `HandlerErrorContinue` keeps the session open after
+a returned error or recovered panic; choose it only when subsequent messages
+remain safe. Recovered panics always follow this explicit policy and are not
+treated as ordinary Router admission rejections.
+
+With a transport mounted through `server.Server`, the supplied handler is the
+Router dispatch/admission boundary. Configure
+`core.RouterConfig.ErrorObserver` for errors returned later by registered
+Router handlers, recovered route panics, and failures to send the safe
+`MsgError` response. Its payload-free event contains transport, connection,
+remote address, message ID, sequence, the original error, optional response
+error, and a panic stack. The direct transport `HandlerErrorEvent` contains the
+same routing identifiers and original error but does not include a stack. A nil
+Router observer preserves the standard-log compatibility behavior; a nil
+direct `OnHandlerError` simply disables that callback. Observer panics are
+isolated, but observers run synchronously and may run concurrently, so they
+must remain fast, concurrency-safe, non-blocking, and subject to diagnostic
+redaction policy.
 
 Transport limits stop different failure modes. Connection/session/stream caps bound peer state; frame, packet, message, header, and body limits bound parsing allocations; send queues bound slow consumers; read/write/idle timeouts bound resource residence. Set all applicable layers so an upstream permissive limit cannot defeat a downstream safety limit.
 
@@ -260,6 +271,22 @@ Capture at least these workload dimensions before choosing limits:
   protocol-specific drain window.
 
 Use production-like encryption, codecs, middleware, schemas, indexes, logging, and telemetry in the test. A loopback echo benchmark isolates framework overhead but does not establish application capacity.
+
+The repository also provides the opt-in
+[`TestTCPConnectionLoad`](../test/tcp_connection_load_test.go), which defaults
+to 1000 concurrent connections and 10 request/response messages per connection:
+
+```powershell
+$env:KPRO_TCP_CONNECTION_LOAD_TEST = "1"
+go test ./test -run TestTCPConnectionLoad -count=1 -timeout=10m
+```
+
+It verifies connection lifecycle, configured round trips, shutdown, and reuse
+of connection slots by a second full wave. Elapsed time, heap, and goroutine
+counts are recorded as observations for that run. This is a loopback framework
+check, not application capacity or SLA evidence; change the dimensions and run
+production-like scenarios before setting limits. See the
+[integration test guide](../test/README.md) for its environment controls.
 
 ## Controls to size
 

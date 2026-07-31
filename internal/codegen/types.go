@@ -95,13 +95,15 @@ type Options struct {
 
 // Result lists deterministic, slash-separated paths affected by the selected
 // plan. In Check and DryRun these are proposed changes; in Apply they are the
-// changes performed. LockChanged includes lock-only updates.
+// changes performed. LockChanged includes lock-only updates. CleanupWarnings
+// report recoverable backup-cleanup failures after a successful Apply.
 type Result struct {
-	Created     []string
-	Updated     []string
-	Removed     []string
-	Unchanged   []string
-	LockChanged bool
+	Created         []string
+	Updated         []string
+	Removed         []string
+	Unchanged       []string
+	LockChanged     bool
+	CleanupWarnings []string
 }
 
 // Changed reports whether applying the plan would change an output or lock.

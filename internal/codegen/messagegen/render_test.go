@@ -71,7 +71,7 @@ func TestBuildPlanIsDeterministicAndOwnershipAware(t *testing.T) {
 		"registrar.HandleAsyncChecked(types.OrderNotifyMessageID",
 		`fmt.Errorf("message registrar is nil")`,
 		"type OrdersBindingError struct",
-		"decoder.DisallowUnknownFields()",
+		"var rawFields map[string]json.RawMessage",
 		"ctx.Reply(types.CreateOrderMessageID, payload)",
 	} {
 		if !strings.Contains(adapter, required) {
@@ -300,6 +300,17 @@ func TestGeneratedBindingErrorsAreTypedAndSpecific(t *testing.T) {
 	}
 	if binding.Err == nil {
 		t.Fatal("binding error did not retain its cause")
+	}
+
+	_, err = decodeCreateOrderRequest([]byte("{\"ORDERID\":\"A-1\"}"))
+	if !errors.As(err, &binding) ||
+		binding.Error() != "bind message \"createOrder\" (100): unknown field \"ORDERID\"" {
+		t.Fatalf("case-mismatched field error = %v", err)
+	}
+	_, err = decodeCreateOrderRequest([]byte("{\"zUnknown\":true,\"aUnknown\":true}"))
+	if !errors.As(err, &binding) ||
+		binding.Error() != "bind message \"createOrder\" (100): unknown field \"aUnknown\"" {
+		t.Fatalf("deterministic unknown field error = %v", err)
 	}
 
 	_, err = decodeCreateOrderRequest([]byte("{\"orderId\":null}"))

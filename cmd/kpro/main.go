@@ -2,6 +2,8 @@
 package main
 
 import (
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -19,22 +21,27 @@ func execute(args []string, stdout, stderr io.Writer) error {
 		printUsage(stdout)
 		return nil
 	}
+	var err error
 	switch args[0] {
 	case "new":
-		return runNew(args[1:], stdout, stderr)
+		err = runNew(args[1:], stdout, stderr)
 	case "add":
-		return runAdd(args[1:], stdout, stderr)
+		err = runAdd(args[1:], stdout, stderr)
 	case "validate":
-		return runValidate(args[1:], stdout, stderr)
+		err = runValidate(args[1:], stdout, stderr)
 	case "generate":
-		return runGenerate(args[1:], stdout, stderr)
+		err = runGenerate(args[1:], stdout, stderr)
 	case "version":
-		return runVersion(args[1:], stdout, stderr)
+		err = runVersion(args[1:], stdout, stderr)
 	case "doctor":
-		return runDoctor(args[1:], stdout, stderr)
+		err = runDoctor(args[1:], stdout, stderr)
 	default:
 		return fmt.Errorf("unknown command %q; run 'kpro help'", args[0])
 	}
+	if errors.Is(err, flag.ErrHelp) {
+		return nil
+	}
+	return err
 }
 
 func printUsage(output io.Writer) {

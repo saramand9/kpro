@@ -102,21 +102,46 @@ The receive path should:
 1. accept or identify a peer and allocate a stable, collision-free session ID;
 2. apply connection, frame/message, read deadline, and idle limits before allocation grows without bound;
 3. decode exactly one `core.Message` with a `codec.StreamCodec` or `codec.PacketCodec`;
-4. create the dispatch value with `core.AcquireContext(session, message)` and call the supplied handler;
-5. observe and classify the returned error according to the protocol contract.
+4. call the supplied handler through
+   `transport.InvokeHandler(handler, session, message)`;
+5. pass its result to `transport.ContinueAfterHandlerError` and close or retain
+   the session according to that result.
 
-For message protocols, the shared `transport.HandlerErrorPolicy`,
-`HandlerErrorObserver`, and `ContinueAfterHandlerError` helper provide the same
-behavior used by built-ins. The zero value closes the affected session;
-`HandlerErrorContinue` keeps it open after notifying the observer. The event is
-a stable snapshot and preserves the original error for internal diagnostics.
-When the transport is mounted through `server.Server`, the supplied handler is
-Router dispatch, so the policy observes dispatch/admission errors; errors from
-an accepted registered route are handled and safely reported inside the Router.
-Never block the read loop on slow telemetry, and do not rely on an observer
-panic to alter the session policy.
+For example, the handler boundary in a custom receive loop should have this
+shape:
 
-When mounted through `app.Mount(customTransport)`, the endpoint router owns the acquired context after handler handoff. Do not retain or mutate it after the handler returns. Code that intentionally continues in the background must call `core.CloneContext` first; the clone preserves the current standard context and copied message/value containers but still shares the live session, so replies can fail after disconnect.
+```go
+err := transport.InvokeHandler(handler, session, message)
+if !transport.ContinueAfterHandlerError(
+	policy,
+	observer,
+	session,
+	message,
+	err,
+) {
+	_ = session.Close()
+	return
+}
+```
+
+`InvokeHandler` acquires the pooled transport context, invokes the handler, and
+releases the context before returning. It also converts a panic into an error
+wrapping `core.ErrRecovered` while retaining an error-valued panic's original
+`errors.Is`/`errors.As` chain. Do not acquire or release another transport
+context around this helper, and do not retain the handler context after the
+handler returns. Code that intentionally continues in the background must call
+`core.CloneContext` inside the handler before it returns; the clone still
+shares the live session, so replies can fail after disconnect.
+
+`HandlerErrorPolicy`, `HandlerErrorObserver`, and
+`ContinueAfterHandlerError` provide the remaining behavior used by built-ins.
+The zero value closes the affected session; `HandlerErrorContinue` keeps it
+open after notifying a configured observer. When the transport is mounted
+through `server.Server`, the supplied handler is Router dispatch, so this
+policy observes dispatch/admission errors; errors from an accepted registered
+route are handled and safely reported inside the Router. Never block the read
+loop on slow telemetry, and do not rely on an observer panic to alter the
+session policy.
 
 The send and shutdown paths should have bounded outbound queues, explicit
 slow-consumer behavior, idempotent close, a context-aware bounded stop, and no
