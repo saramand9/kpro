@@ -667,7 +667,7 @@ func renderTemplate(root, source, target string, mode os.FileMode, data scaffold
 	if err := parsed.Execute(&rendered, data); err != nil {
 		return fmt.Errorf("render %s: %w", target, err)
 	}
-	content := rendered.Bytes()
+	content := normalizeTextLineEndings(rendered.Bytes())
 	if strings.EqualFold(filepath.Ext(target), ".go") {
 		content, err = format.Source(content)
 		if err != nil {
@@ -689,6 +689,11 @@ func renderTemplate(root, source, target string, mode os.FileMode, data scaffold
 		return fmt.Errorf("close %s: %w", target, closeErr)
 	}
 	return nil
+}
+
+func normalizeTextLineEndings(content []byte) []byte {
+	content = bytes.ReplaceAll(content, []byte("\r\n"), []byte("\n"))
+	return bytes.ReplaceAll(content, []byte("\r"), []byte("\n"))
 }
 
 func renderString(value string, data scaffoldData) (string, error) {

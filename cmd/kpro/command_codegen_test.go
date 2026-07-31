@@ -353,7 +353,7 @@ func TestGenerateAuthorizedPluginPreservesExecutionModes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotCommand != wantCommand {
+	if !sameFilePath(t, gotCommand, wantCommand) {
 		t.Fatalf("plugin command = %q, want %q", gotCommand, wantCommand)
 	}
 	if len(gotArgs) != 1 || gotArgs[0] != "--strict" {
@@ -406,7 +406,7 @@ func TestResolvePluginCommandUsesPATHForPlainName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != want {
+	if !sameFilePath(t, got, want) {
 		t.Fatalf("resolved PATH command = %q, want %q", got, want)
 	}
 }
@@ -517,6 +517,20 @@ func TestGenerateOpenAPIRejectsSymlinkSourceEscape(t *testing.T) {
 		t.Fatalf("symlink source escape error = %v", err)
 	}
 }
+
+func sameFilePath(t *testing.T, got, want string) bool {
+	t.Helper()
+	gotInfo, err := os.Stat(got)
+	if err != nil {
+		t.Fatalf("stat resolved path %q: %v", got, err)
+	}
+	wantInfo, err := os.Stat(want)
+	if err != nil {
+		t.Fatalf("stat expected path %q: %v", want, err)
+	}
+	return os.SameFile(gotInfo, wantInfo)
+}
+
 func TestGenerateProtoWithInstalledToolchain(t *testing.T) {
 	for _, tool := range []string{"protoc", "protoc-gen-go", "protoc-gen-go-grpc"} {
 		if _, err := exec.LookPath(tool); err != nil {
