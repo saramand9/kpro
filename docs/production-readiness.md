@@ -45,7 +45,10 @@ Status terms used below:
 - [ ] **Configure and verify:** Keep HTTP/3 `Allow0RTT` disabled unless every accepted route is idempotent or protected against replay. A nested `QUICConfig.Allow0RTT` does not override the safe top-level default.
 - [ ] **Configure and verify:** Define what clients observe when a queue, body, frame, connection, or deadline limit is reached; test retry storms and slow consumers.
 - [ ] **Built in:** Protocol-neutral error kinds map rate limiting, payload limits, overload, internal failures, and recovered panics to stable safe HTTP/gRPC responses without exposing raw error text.
-- [ ] **Configure and verify:** Select and test each message transport's `HandlerErrorPolicy`; the zero value closes the affected session when the transport-supplied handler returns an error, while continue mode requires an explicit safety rationale and a non-blocking, redacted observer. For Server-mounted endpoints, distinguish Router admission errors from accepted route-handler failures handled inside the Router.
+- [ ] **Built in:** Direct TCP, KCP, QUIC, UDP, and WebSocket handler panics are
+  contained as errors wrapping `core.ErrRecovered`, reported to
+  a configured `OnHandlerError`, and passed through the session policy.
+- [ ] **Configure and verify:** Select and test each message transport's `HandlerErrorPolicy`; the zero value closes the affected session when the transport-supplied handler returns an error or panics, while continue mode requires an explicit safety rationale and a non-blocking, redacted observer. For Server-mounted endpoints, distinguish Router admission errors from accepted route-handler failures handled inside the Router.
 - [ ] **External:** Enforce upstream rate, connection, and request-size controls where an ingress, load balancer, or API gateway is part of the topology.
 
 ## Security
@@ -111,6 +114,11 @@ The repository CI requires live MySQL and PostgreSQL for its `dbintegration` sui
 - [ ] Record CPU, memory, goroutines, connections, queues, database pools, latency percentiles, rejection rate, and drain time.
 - [ ] Pin a reviewed KPro commit or release and review its public API changes before upgrading; see [API Stability](api-stability.md).
 - [ ] Run `kpro doctor` and `kpro version` (or their `go run ./cmd/kpro` forms) in build diagnostics so toolchain, module, platform, version, and commit evidence are recoverable.
+- [ ] Before publishing a KPro release, verify the root `go.mod` contains no
+  `replace` or `exclude`, then test a clean external consumer module and
+  `go install github.com/saramand9/kpro/cmd/kpro@<tag>` through the module path
+  consumers will actually use. Local checkout replacements do not satisfy this
+  check.
 - [ ] For a `v*` tag, verify the release workflow published the expected Linux, Windows, and macOS archives only after validating `checksums.txt`, per-archive SBOMs, the artifact matrix, and native CLI version metadata.
 - [ ] Rehearse canary, rollback, configuration rollback, and data compatibility procedures.
 - [ ] Assign owners to the runbooks in [Operations and Capacity Planning](operations.md).

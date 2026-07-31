@@ -433,6 +433,88 @@ func TestAddGRPCStageGeneratorFailureWritesNothing(t *testing.T) {
 	assertNoAddStageSiblings(t, root)
 }
 
+func TestAddGRPCStagesAndSnapshotsTransitiveProtoImports(t *testing.T) {
+	installAddTestEnvironment(t)
+	root := createAddTestProject(t, true)
+	manifestData := readAddTestFile(t, root, defaultCodegenConfig)
+	manifestData = append(manifestData, []byte(`  - id: existing-proto
+    kind: proto
+    path: api/existing/service.proto
+    package: internal/existing
+`)...)
+	writeAddTestFile(t, root, defaultCodegenConfig, manifestData)
+	writeAddTestFile(t, root, "api/existing/service.proto", []byte(`syntax = "proto3";
+package existing;
+import "api/common/common.proto";
+service ExistingApi {}
+`))
+	commonContent := []byte("syntax = \"proto3\";\npackage common;\nmessage Shared {}\n")
+	writeAddTestFile(t, root, "api/common/common.proto", commonContent)
+
+	sourceGenerators[manifest.KindProto] = sourceGeneratorFunc(func(root string, value manifest.Manifest, source manifest.Source) (codegen.Plan, error) {
+		content, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(source.Path)))
+		if err != nil {
+			return codegen.Plan{}, err
+		}
+		imports, err := parseProtoImports(content)
+		if err != nil {
+			return codegen.Plan{}, err
+		}
+		for _, dependency := range imports {
+			if _, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(dependency))); err != nil {
+				return codegen.Plan{}, fmt.Errorf("read imported proto %q: %w", dependency, err)
+			}
+		}
+		planned, err := addTestSourcePlan(root, value, source)
+		if err != nil || source.ID == "grpc-api" {
+			return planned, err
+		}
+		files, err := planned.OrderedFiles()
+		if err != nil {
+			return codegen.Plan{}, err
+		}
+		filtered := files[:0]
+		for _, file := range files {
+			if file.Path != addGRPCServicePath {
+				filtered = append(filtered, file)
+			}
+		}
+		return codegen.BuildPlan(filtered...)
+	})
+	value, err := manifest.Load(filepath.Join(root, defaultCodegenConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := buildGenerationPlan(root, value, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := codegen.Execute(plan, codegen.Options{Root: root}); err != nil {
+		t.Fatalf("generate current project with imported proto: %v", err)
+	}
+
+	commit := addCommitFileTransaction
+	sawDependency := false
+	addCommitFileTransaction = func(mutations []codegen.FileMutation, options codegen.FileTransactionOptions) (codegen.FileTransactionResult, error) {
+		for _, mutation := range mutations {
+			if mutation.Path == "api/common/common.proto" {
+				sawDependency = true
+			}
+		}
+		return commit(mutations, options)
+	}
+	var output bytes.Buffer
+	if err := runAdd([]string{"--api", "grpc", "--root", root}, &output, &output); err != nil {
+		t.Fatalf("add with transitive proto import: %v\n%s", err, output.String())
+	}
+	if !sawDependency {
+		t.Fatal("transitive proto dependency was not included in the add CAS read set")
+	}
+	if got := readAddTestFile(t, root, "api/common/common.proto"); !bytes.Equal(got, commonContent) {
+		t.Fatalf("transitive proto dependency changed:\n%s", got)
+	}
+}
+
 func installAddTestEnvironment(t *testing.T) {
 	t.Helper()
 	previousGenerators := sourceGenerators

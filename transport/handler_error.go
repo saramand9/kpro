@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/saramand9/kpro/core"
@@ -33,6 +34,28 @@ type HandlerErrorEvent struct {
 // to change the configured session policy.
 type HandlerErrorObserver func(HandlerErrorEvent)
 
+// InvokeHandler invokes a direct message-transport handler while containing
+// panics at the handler boundary. Recovered panics retain core.ErrRecovered and
+// an error panic's original errors.Is/As chain so ContinueAfterHandlerError can
+// apply the configured policy and notify the observer.
+func InvokeHandler(handler core.Handler, session core.Session, message core.Message) (err error) {
+	if handler == nil {
+		return core.ErrNilHandler
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if recoveredErr, ok := recovered.(error); ok {
+				err = fmt.Errorf("%w: %w", core.ErrRecovered, recoveredErr)
+				return
+			}
+			err = fmt.Errorf("%w: %v", core.ErrRecovered, recovered)
+		}
+	}()
+	ctx := core.AcquireTransportContext(session, message)
+	defer core.ReleaseTransportContext(ctx)
+	return handler(ctx)
+}
+
 // Validate rejects unknown policy values before a listener is opened.
 func (p HandlerErrorPolicy) Validate() error {
 	switch p {
@@ -44,8 +67,9 @@ func (p HandlerErrorPolicy) Validate() error {
 }
 
 // ContinueAfterHandlerError applies the observer and policy to one handler
-// result. It returns true for a successful handler or when the policy explicitly
-// keeps the session open.
+// result. It returns true for success, a Router dispatch rejection that already
+// produced a safe response, or an explicit continue policy. Recovered panics
+// always require the explicit continue policy.
 func ContinueAfterHandlerError(
 	policy HandlerErrorPolicy,
 	observer HandlerErrorObserver,
@@ -69,6 +93,9 @@ func ContinueAfterHandlerError(
 		}
 	}
 	notifyHandlerError(observer, event)
+	if errors.Is(err, core.ErrRecovered) {
+		return policy == HandlerErrorContinue
+	}
 	if core.IsDispatchRejection(err) {
 		return true
 	}

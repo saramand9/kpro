@@ -406,7 +406,7 @@ func (s *session) readLoop(handler core.Handler) {
 			_ = s.Send(core.Message{ID: core.MsgPong, Seq: msg.Seq})
 			continue
 		}
-		err = invokeHandler(handler, s, msg)
+		err = transportapi.InvokeHandler(handler, s, msg)
 		if !transportapi.ContinueAfterHandlerError(
 			s.server.config.HandlerErrorPolicy,
 			s.server.config.OnHandlerError,
@@ -417,12 +417,6 @@ func (s *session) readLoop(handler core.Handler) {
 			return
 		}
 	}
-}
-
-func invokeHandler(handler core.Handler, session core.Session, msg core.Message) (err error) {
-	ctx := core.AcquireTransportContext(session, msg)
-	defer core.ReleaseTransportContext(ctx)
-	return handler(ctx)
 }
 
 func (s *session) writeLoop() {

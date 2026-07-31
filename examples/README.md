@@ -1,6 +1,9 @@
 # KPro examples
 
-Each protocol example has a standalone server and client. Start the server in one terminal, then run the matching client in another terminal.
+Each protocol example has a standalone server and client. These pairs isolate
+transport setup and wire behavior for learning and protocol checks; they omit
+some application and deployment concerns and are not production templates.
+Start the server in one terminal, then run the matching client in another.
 
 Commands below use forward slashes and run from the repository root in POSIX
 shells and PowerShell. Use `go run ./cmd/kpro doctor` to print local Go/module
@@ -15,6 +18,12 @@ go run ./examples/quickstart -addr :8080
 ```
 
 Then follow the requests and code walkthrough in [the 10-minute guide](../docs/quickstart.md). Authentication and authorization are application integrations and intentionally not part of this minimal example.
+
+Use the generated unified `service` profile or the
+[recommended golden path](../docs/golden-path.md) as the starting point for a
+real application. The quickstart demonstrates the preferred lifecycle shape,
+but it still does not establish workload capacity, deployment policy, or a
+production certification.
 
 Create a separate starter service in a missing or empty directory with:
 

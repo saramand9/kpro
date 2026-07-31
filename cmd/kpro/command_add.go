@@ -144,6 +144,9 @@ func addGRPC(options addOptions, output, warningOutput io.Writer) error {
 			return fmt.Errorf("add gRPC API: snapshot source %q: %w", source.ID, err)
 		}
 	}
+	if err := snapshotProtoImportClosure(currentManifest, capture); err != nil {
+		return fmt.Errorf("add gRPC API: snapshot proto import closure: %w", err)
+	}
 	lockState, err := capture(input.lockFile, false)
 	if err != nil {
 		return fmt.Errorf("add gRPC API: snapshot generation lock: %w", err)
@@ -405,7 +408,10 @@ func resolveAddCodegenPaths(root, config string) (string, string, string, error)
 	if err != nil {
 		return "", "", "", fmt.Errorf("generation manifest must be inside root: %w", err)
 	}
-	lockFile := strings.TrimSuffix(portableConfig, filepath.Ext(portableConfig)) + ".lock.json"
+	lockFile, _ := generationLockPaths(portableConfig)
+	if err := validateGenerationLockPath(portableConfig, lockFile); err != nil {
+		return "", "", "", err
+	}
 	return resolvedRoot, portableConfig, lockFile, nil
 }
 

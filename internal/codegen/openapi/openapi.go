@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -299,6 +300,13 @@ func lowerOperation(path, method string, source *openapi3.Operation, parameters 
 		if p.Schema == nil || p.Schema.Value == nil || p.Schema.Ref != "" {
 			return Operation{}, fmt.Errorf("%w: parameter %q must have an inline scalar schema", ErrUnsupported, p.Name)
 		}
+		if !validJSONTagName(p.Name) {
+			return Operation{}, fmt.Errorf(
+				"%w: parameter name %q cannot be represented exactly by encoding/json",
+				ErrUnsupported,
+				p.Name,
+			)
+		}
 		typ, _, _, err := lowerSchema(p.Schema, "parameter "+p.Name)
 		if err != nil {
 			return Operation{}, err
@@ -442,18 +450,27 @@ func lowerSchema(ref *openapi3.SchemaRef, location string) (TypeRef, []Field, *T
 		return TypeRef{}, nil, nil, fmt.Errorf("openapi: %s schema is empty", location)
 	}
 	if ref.Ref != "" {
-		if !strings.HasPrefix(ref.Ref, "#/components/schemas/") {
-			return TypeRef{}, nil, nil, fmt.Errorf("%w: %s uses non-local schema reference %q", ErrUnsupported, location, ref.Ref)
-		}
-		name, err := exported(strings.TrimPrefix(ref.Ref, "#/components/schemas/"))
+		component, err := localSchemaReferenceName(ref.Ref)
 		if err != nil {
-			return TypeRef{}, nil, nil, err
+			return TypeRef{}, nil, nil, fmt.Errorf("%w: %s uses schema reference %q: %v", ErrUnsupported, location, ref.Ref, err)
+		}
+		name, err := exported(component)
+		if err != nil {
+			return TypeRef{}, nil, nil, fmt.Errorf("openapi: schema reference %q: %w", ref.Ref, err)
 		}
 		return TypeRef{Name: name}, nil, nil, nil
 	}
 	schema := ref.Value
 	if schema.Nullable || len(schema.OneOf) != 0 || len(schema.AnyOf) != 0 || len(schema.AllOf) != 0 || schema.Not != nil || len(schema.Enum) != 0 || schema.AdditionalProperties.Has != nil || schema.AdditionalProperties.Schema != nil {
 		return TypeRef{}, nil, nil, fmt.Errorf("%w: %s uses a composition, enum, nullable, or additionalProperties schema", ErrUnsupported, location)
+	}
+	if constraints := unsupportedSchemaConstraints(schema); len(constraints) != 0 {
+		return TypeRef{}, nil, nil, fmt.Errorf(
+			"%w: %s uses schema constraints that the generated Go types cannot enforce: %s",
+			ErrUnsupported,
+			location,
+			strings.Join(constraints, ", "),
+		)
 	}
 	if schema.Type == nil || len(schema.Type.Slice()) != 1 {
 		return TypeRef{}, nil, nil, fmt.Errorf("%w: %s schema type is required", ErrUnsupported, location)
@@ -474,6 +491,14 @@ func lowerSchema(ref *openapi3.SchemaRef, location string) (TypeRef, []Field, *T
 	case Object:
 		required := map[string]bool{}
 		for _, name := range schema.Required {
+			if _, exists := schema.Properties[name]; !exists {
+				return TypeRef{}, nil, nil, fmt.Errorf(
+					"%w: %s requires undeclared property %q",
+					ErrUnsupported,
+					location,
+					name,
+				)
+			}
 			required[name] = true
 		}
 		names := make([]string, 0, len(schema.Properties))
@@ -484,9 +509,25 @@ func lowerSchema(ref *openapi3.SchemaRef, location string) (TypeRef, []Field, *T
 		fields := make([]Field, 0, len(names))
 		used := map[string]string{}
 		for _, name := range names {
+			if !validJSONTagName(name) {
+				return TypeRef{}, nil, nil, fmt.Errorf(
+					"%w: %s property name %q cannot be represented exactly by encoding/json",
+					ErrUnsupported,
+					location,
+					name,
+				)
+			}
 			goName, err := exported(name)
 			if err != nil {
 				return TypeRef{}, nil, nil, err
+			}
+			if goName == "UnmarshalJSON" || goName == "ValidateJSON" {
+				return TypeRef{}, nil, nil, fmt.Errorf(
+					"openapi: %s property %q conflicts with generated method %q",
+					location,
+					name,
+					goName,
+				)
 			}
 			if other := used[goName]; other != "" {
 				return TypeRef{}, nil, nil, fmt.Errorf("openapi: %s properties %q and %q both become %q", location, other, name, goName)
@@ -505,6 +546,136 @@ func lowerSchema(ref *openapi3.SchemaRef, location string) (TypeRef, []Field, *T
 	default:
 		return TypeRef{}, nil, nil, fmt.Errorf("%w: %s schema type %q", ErrUnsupported, location, kind)
 	}
+}
+
+func localSchemaReferenceName(reference string) (string, error) {
+	const prefix = "#/components/schemas/"
+	if !strings.HasPrefix(reference, prefix) {
+		return "", errors.New("only local component schema references are supported")
+	}
+	token := strings.TrimPrefix(reference, prefix)
+	if token == "" || strings.Contains(token, "/") {
+		return "", errors.New("reference must contain exactly one component schema token")
+	}
+	decoded, err := url.PathUnescape(token)
+	if err != nil {
+		return "", fmt.Errorf("decode URI fragment token: %w", err)
+	}
+	if strings.Contains(decoded, "/") {
+		return "", errors.New("reference must contain exactly one component schema token")
+	}
+	var name strings.Builder
+	name.Grow(len(decoded))
+	for index := 0; index < len(decoded); index++ {
+		if decoded[index] != '~' {
+			name.WriteByte(decoded[index])
+			continue
+		}
+		if index+1 >= len(decoded) {
+			return "", errors.New("JSON Pointer token ends with an incomplete escape")
+		}
+		index++
+		switch decoded[index] {
+		case '0':
+			name.WriteByte('~')
+		case '1':
+			name.WriteByte('/')
+		default:
+			return "", fmt.Errorf("JSON Pointer token contains invalid escape ~%c", decoded[index])
+		}
+	}
+	if name.Len() == 0 {
+		return "", errors.New("component schema name is empty")
+	}
+	return name.String(), nil
+}
+
+func unsupportedSchemaConstraints(schema *openapi3.Schema) []string {
+	var constraints []string
+	if schema.Format != "" {
+		var types []string
+		if schema.Type != nil {
+			types = schema.Type.Slice()
+		}
+		matchesGeneratedType := len(types) == 1 &&
+			((types[0] == string(Integer) && schema.Format == "int64") ||
+				(types[0] == string(Number) && schema.Format == "double"))
+		if !matchesGeneratedType {
+			constraints = append(constraints, "format")
+		}
+	}
+	if schema.Default != nil {
+		constraints = append(constraints, "default")
+	}
+	if schema.UniqueItems {
+		constraints = append(constraints, "uniqueItems")
+	}
+	if schema.ExclusiveMin {
+		constraints = append(constraints, "exclusiveMinimum")
+	}
+	if schema.ExclusiveMax {
+		constraints = append(constraints, "exclusiveMaximum")
+	}
+	if schema.Min != nil {
+		constraints = append(constraints, "minimum")
+	}
+	if schema.Max != nil {
+		constraints = append(constraints, "maximum")
+	}
+	if schema.MultipleOf != nil {
+		constraints = append(constraints, "multipleOf")
+	}
+	if schema.MinLength != 0 {
+		constraints = append(constraints, "minLength")
+	}
+	if schema.MaxLength != nil {
+		constraints = append(constraints, "maxLength")
+	}
+	if schema.Pattern != "" {
+		constraints = append(constraints, "pattern")
+	}
+	if schema.MinItems != 0 {
+		constraints = append(constraints, "minItems")
+	}
+	if schema.MaxItems != nil {
+		constraints = append(constraints, "maxItems")
+	}
+	if schema.MinProps != 0 {
+		constraints = append(constraints, "minProperties")
+	}
+	if schema.MaxProps != nil {
+		constraints = append(constraints, "maxProperties")
+	}
+	if schema.ReadOnly {
+		constraints = append(constraints, "readOnly")
+	}
+	if schema.WriteOnly {
+		constraints = append(constraints, "writeOnly")
+	}
+	if schema.AllowEmptyValue {
+		constraints = append(constraints, "allowEmptyValue")
+	}
+	if schema.XML != nil {
+		constraints = append(constraints, "xml")
+	}
+	if schema.Discriminator != nil {
+		constraints = append(constraints, "discriminator")
+	}
+	return constraints
+}
+
+func validJSONTagName(name string) bool {
+	if name == "" {
+		return false
+	}
+	const allowedPunctuation = `!#$%&()*+-./:;<=>?@[]^_{|}~ `
+	for _, character := range name {
+		if unicode.IsLetter(character) || unicode.IsDigit(character) || strings.ContainsRune(allowedPunctuation, character) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func scalar(kind Kind) bool {

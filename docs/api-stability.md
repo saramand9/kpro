@@ -86,9 +86,12 @@ Security and correctness exceptions must be explicit in release notes and should
 
 ## Release checklist
 
-Before creating a tag, maintainers should:
+Before publishing a release, maintainers should:
 
 - run formatting, unit, race-sensitive, protocol, database integration, and example compilation checks applicable to the change;
+- verify the root `go.mod` intended for publication contains no `replace` or
+  `exclude` directives and that the complete module compiles with
+  `CGO_ENABLED=0`;
 - run `go mod verify` and pinned `govulncheck` against the complete module, and resolve or explicitly block release on every reachable finding;
 - generate the repository coverage profile, enforce the configured aggregate floor, and inspect important package/scenario gaps rather than relying on the total alone;
 - inspect the exported API diff and wire/storage compatibility impact;
@@ -96,6 +99,10 @@ Before creating a tag, maintainers should:
 - provide migration guidance for every intentional incompatibility;
 - identify production validations that remain external to repository tests;
 - tag the exact reviewed commit and verify `kpro version` reports the expected tag, commit, build time, platform, and Go version;
+- from a clean directory outside the repository, create a minimal consumer
+  module that imports the tagged KPro API and run its tests; also run
+  `go install github.com/saramand9/kpro/cmd/kpro@<tag>` through the same
+  public or private module path consumers will use;
 - let the tag-triggered release workflow repeat module verification, tests,
   vet, and `govulncheck`; construct a draft with cross-platform archives,
   checksums, and SBOMs; verify its artifact matrix and embedded binary metadata;
@@ -106,6 +113,13 @@ construction, verification, and conversion to a published release; they do not
 make an arbitrary `v*` tag a supported release. Release notes, upgrade
 guidance, provenance review, and the explicit decision to push the release tag
 remain required.
+
+The external smoke requires the declared module path and selected tag to be
+reachable. For a private source, configure the organization's VCS credentials
+and `GOPRIVATE`; `GOPRIVATE` changes proxy and checksum-database behavior but
+does not provide authentication. A successful build from a local checkout or a
+generated application's local `replace` is not evidence that versioned
+consumption works.
 
 ## Guidance for application authors
 

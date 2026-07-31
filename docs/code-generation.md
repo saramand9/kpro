@@ -104,6 +104,13 @@ sources and renders `internal/kproapp/endpoints.gen.go`. The corresponding
 protocol files under `internal/kproapp` are create-once application code, while
 `cmd/<service>/main.go` can stay focused on process lifecycle.
 
+An established unified service is not silently treated as a legacy project if
+`kpro.service.yaml` disappears. If the generated endpoint assembly or its
+create-once endpoint files remain, both `validate` and `generate` fail before
+writing and ask for the service configuration to be restored. KPro does not
+interpret an accidentally deleted control file as a request to remove endpoint
+assembly.
+
 The service profile runs generation once before it returns. A gRPC selection
 therefore requires `protoc`, `protoc-gen-go`, and `protoc-gen-go-grpc` on
 `PATH`; the CLI checks them before publishing the target project. From the
@@ -152,9 +159,12 @@ at a migration for application-owned startup code.
 
 Before writing, the command checks `protoc`, `protoc-gen-go`, and
 `protoc-gen-go-grpc`, validates the existing service configuration and
-manifest, and stages the complete desired generation plan outside the project.
-It then commits the following related changes as one compare-and-swap
-transaction:
+manifest, recursively snapshots the project-local import closure of every
+built-in protobuf source, and stages the complete desired generation plan
+outside the project. Imported proto files are copied into the isolated stage
+and included in the compare-and-swap read set; a missing, unsafe, symlinked, or
+concurrently changed dependency prevents the addition from committing. It then
+commits the following related changes as one compare-and-swap transaction:
 
 - the gRPC selection in `kpro.service.yaml`;
 - the `grpc-api` source in the selected generation manifest;
@@ -222,7 +232,15 @@ project-relative Go `package` directory. A path cannot escape the project root,
 and one manifest cannot list the same contract path twice.
 
 The manifest is strict: unknown fields, unsupported versions or source kinds,
-invalid identifiers, duplicate IDs, and unsafe paths are errors.
+invalid identifiers, duplicate IDs, and unsafe paths are errors. Portable path
+validation is intentionally stricter than the current host filesystem. Each
+path rejects Windows device names and invalid characters, segments ending in a
+dot or space, and other non-portable forms. Plans and locks additionally use a
+Unicode-normalized, case-folded physical-identity key to reject paths that
+could alias after checkout on a supported platform. Invalid UTF-8 paths are
+rejected before they can enter a JSON lock. Planned Go files are also checked for
+package-name and declaration conflicts across sources, including files whose
+package directories differ only by portable casing.
 
 ## Commands and lock scope
 
@@ -255,10 +273,19 @@ The commands have distinct purposes:
 
 The lock is scoped to the manifest path. The default `kpro.gen.yaml` uses
 `kpro.gen.lock.json`; `config/public.yaml` uses
-`config/public.lock.json`. Both the manifest and its lock must be inside
-`--root`. Separate manifests therefore own separate generated-file sets; keep
-their output paths disjoint because one lock will treat another lock's output
-as unmanaged.
+`config/public.yaml.lock.json`. Non-default locks retain the manifest's complete
+file name, so `public.yaml` and `public.json` cannot share generation state.
+Both the manifest and its lock must be inside `--root`. Separate manifests
+therefore own separate generated-file sets; keep their output paths disjoint
+because one lock will treat another lock's output as unmanaged.
+
+Older releases named that non-default lock `config/public.lock.json`. Check and
+dry-run modes can read an unambiguous legacy lock without changing it; the next
+apply migrates it to the complete-filename form with compare-and-swap
+protection before applying the planned outputs. If another same-stem manifest
+such as `public.json` is present, KPro cannot prove which manifest owns the
+legacy lock and fails without writing. Review the generated outputs and move or
+remove the legacy lock explicitly in that case.
 
 Commit the contract, manifest, generated outputs, application scaffolds, and
 lock together. A review can then distinguish a contract change from its
@@ -284,11 +311,32 @@ When a contract adds a method, an existing create-once service implementation
 is not rewritten. The resulting compile error is the explicit prompt to add
 the new application method.
 
-Generation rejects absolute and escaping paths, symlink output paths, duplicate
-outputs, and generated outputs that collide with unmanaged files. It validates
-the complete plan before writing and uses an atomic replacement for each file.
-It is not a multi-file filesystem transaction, so keep generation under normal
-version-control review.
+Generation rejects absolute and escaping paths, symlink output paths, portable
+path aliases, duplicate outputs, non-canonical lock entries, and generated
+outputs that collide with unmanaged files. It validates the complete plan
+before writing. Apply then stages output replacements and commits output
+creates or updates, stale-output removals, and the lock change as one
+rollback-capable compare-and-swap batch. Content preconditions are rechecked
+before installation. Unchanged planned files, deliberate missing create-once
+files, stale missing generated paths, and the lock snapshot remain in the read
+set and are checked again after installation but before commit completes. A
+later installation or read-set failure attempts to restore all earlier
+mutations. If restoration cannot complete, the error identifies every retained
+backup that requires manual recovery.
+
+The transaction probes every affected directory for same-filesystem hard-link
+support before moving any target. Hard links provide the no-overwrite install
+and rollback primitive used by the batch; on a filesystem that does not support
+them, apply fails before changing generated targets. Final output permissions
+are applied through the installed inode's open handle, so a path replacement is
+not accidentally chmodded as if it were the staged output.
+
+Successful installation is not changed into a failure merely because an old
+backup cannot be cleaned up; `generate` reports that retained backup as a
+warning. This transaction is still not an inter-process filesystem lock or a
+crash-atomic commit. Serialize generators for one project, keep generation
+under version-control review, and treat process termination, power loss, and
+storage failure as conditions that may require repository-based recovery.
 
 ## OpenAPI HTTP backend
 
@@ -321,6 +369,19 @@ Supported operations and bindings:
   component references within the checked subset; required object properties
   are values and optional properties are pointers in generated Go types.
 
+The generated request decoder enforces the non-nullable subset at runtime. A
+JSON body equal to `null`, a missing or `null` required property, or an
+explicitly `null` optional property is rejected with 400 before application
+code runs. Non-null checks recurse through array items, including nested arrays
+and referenced component schemas. Required-property presence checks use the
+exact JSON property name, so a differently cased name does not satisfy the
+contract.
+
+Generated responses are marshaled once and validated against the same
+non-nullable subset before any bytes are written. A nil required array, a nil
+array item, or another response value that would emit contract-invalid `null`
+therefore becomes a server error instead of an invalid success payload.
+
 Generated body handling accepts `application/json` media-type parameters,
 returns 415 for another content type, returns 400 for malformed JSON, and lets
 KPro's request-size classification map an oversized body to 413.
@@ -338,11 +399,28 @@ Not currently supported:
   into generated Go error types;
 - external references, callbacks, enums, nullable schemas, `oneOf`, `anyOf`,
   `allOf`, `not`, `additionalProperties`, or inline nested object schemas;
+- schema constraints that the generated Go type cannot enforce, including
+  numeric bounds and multiples, string patterns or length bounds, array or
+  object size bounds, defaults, uniqueness, read/write annotations, XML, and
+  discriminators; `integer` with `format: int64` and `number` with
+  `format: double` are the only accepted scalar formats;
+- required object-reference cycles that cannot be represented by generated Go
+  value fields;
 - document-level or operation-level security requirements.
 
 Every operation needs a unique usable `operationId`. Path-template names and
-required path parameters must match exactly. These restrictions avoid a
-partially generated or silently mis-bound API.
+required path parameters must match exactly. Generated method/path patterns are
+preflighted with Go's `http.ServeMux` semantics, so equivalent wildcard routes
+such as `/users/{id}` and `/users/{name}`, invalid patterns, and other
+registration conflicts fail before project output is written. These
+restrictions avoid a partially generated or silently mis-bound API. Unsupported
+schema constraints are reported explicitly rather than being accepted and then
+ignored at runtime.
+
+Schema references must identify exactly one local
+`#/components/schemas/<token>` entry; JSON Pointer escapes such as `~1` are
+decoded, while nested reference paths are rejected. Property and parameter
+names must also be representable exactly by Go's `encoding/json` tag syntax.
 
 Authentication remains an application concern even when the source document
 declares security schemes. Install fail-closed middleware or enforce access in
@@ -448,10 +526,14 @@ registration; select it only when handlers are concurrency-safe and replies may
 complete out of order.
 
 The generated adapter strictly rejects unknown JSON fields, trailing JSON
-values, and missing/null required fields. A declared response is encoded as
-JSON and sent with the request's message ID and sequence number. Omitting
-`response` suppresses the generated success reply; normal Router error handling
-still applies when the service returns an error.
+values, and missing/null required fields. Field lookup is case-sensitive even
+though Go's default JSON struct matching is not: `ORDERID` is unknown when the
+contract declares `orderId`. If a payload contains multiple unknown fields,
+their names are sorted and the lexicographically first name is reported, making
+the binding diagnostic deterministic. A declared response is encoded as JSON
+and sent with the request's message ID and sequence number. Omitting `response`
+suppresses the generated success reply; normal Router error handling still
+applies when the service returns an error.
 
 The adapter declares a service-specific small interface such as
 `OrdersRegistrar`, containing only:

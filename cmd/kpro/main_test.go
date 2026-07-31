@@ -161,6 +161,24 @@ func TestVersionAndDoctorCommands(t *testing.T) {
 	}
 }
 
+func TestSubcommandHelpSucceeds(t *testing.T) {
+	for _, command := range []string{"new", "add", "validate", "generate", "version", "doctor"} {
+		t.Run(command, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			if err := execute([]string{command, "--help"}, &stdout, &stderr); err != nil {
+				t.Fatalf("execute(%s --help) error = %v", command, err)
+			}
+			if !strings.Contains(stderr.String(), "Usage of "+command+":") {
+				t.Fatalf("%s --help output does not contain command usage:\n%s", command, stderr.String())
+			}
+			if strings.Contains(stderr.String(), "flag: help requested") {
+				t.Fatalf("%s --help reported help as an error:\n%s", command, stderr.String())
+			}
+		})
+	}
+}
+
 func TestDoctorReportsAvailableProtoGenerationTools(t *testing.T) {
 	paths := map[string]string{
 		"protoc":             filepath.Join("tools", "protoc"),
@@ -249,6 +267,22 @@ func TestNewMinimalProfileMatchesDefaultScaffold(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(defaultTarget, "cmd")); !os.IsNotExist(err) {
 		t.Fatalf("default scaffold unexpectedly created cmd: %v", err)
 	}
+}
+
+func TestNewAcceptsTargetMixedBetweenFlags(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "mixed-flags")
+	var output bytes.Buffer
+	if err := execute([]string{
+		"new",
+		"--module", "example.com/mixed",
+		target,
+		"--name", "mixed",
+		"--profile", "minimal",
+	}, &output, &output); err != nil {
+		t.Fatalf("mixed target and flags: %v\n%s", err, output.String())
+	}
+	assertProjectPath(t, target, "go.mod")
+	assertProjectPath(t, target, "main.go")
 }
 
 func TestNewServiceHTTPAPICreatesModularParseableProject(t *testing.T) {
@@ -571,6 +605,28 @@ func TestNewMessageRejectsOverlongDerivedServiceNameBeforeStaging(t *testing.T) 
 	}
 	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
 		t.Fatalf("overlong service name created target %q: %v", target, statErr)
+	}
+	assertNoScaffoldStages(t, parent)
+}
+
+func TestNewMessageRejectsReservedDerivedFileNameBeforeStaging(t *testing.T) {
+	parent := t.TempDir()
+	target := filepath.Join(parent, "derived-reserved")
+	var output bytes.Buffer
+	err := execute([]string{
+		"new",
+		"--module", "example.com/derived-reserved",
+		"--name", "c-o-n",
+		"--profile", "service",
+		"--api", "message",
+		"--transport", "tcp",
+		target,
+	}, &output, &output)
+	if err == nil || !strings.Contains(err.Error(), "invalid derived scaffold path") || !strings.Contains(strings.ToLower(err.Error()), "con.go") {
+		t.Fatalf("reserved derived file error = %v", err)
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("reserved derived file created target %q: %v", target, statErr)
 	}
 	assertNoScaffoldStages(t, parent)
 }

@@ -27,6 +27,17 @@ upgrading between minor versions.
   from importing concrete transport implementations.
 - `core.RouterConfig.ErrorObserver` receives payload-free handler, panic, and
   error-response diagnostics while preserving original error chains.
+- `transport.InvokeHandler` gives built-in and third-party Message transports
+  one public handler boundary that manages the pooled transport context,
+  contains panics as `core.ErrRecovered`, and preserves error-valued panic
+  chains.
+- CI rejects any `replace` or `exclude` directive in the root
+  module and compiles the complete module plus the pure-Go SQLite paths with
+  CGO disabled.
+- An opt-in TCP connection lifecycle check defaults to 1,000 concurrent
+  connections, verifies request/response round trips and connection-slot
+  reuse, and records elapsed time, heap, and goroutine observations without
+  treating them as an application capacity or SLA result.
 
 ### Changed
 
@@ -49,6 +60,10 @@ upgrading between minor versions.
   connection-pool defaults with command-line overrides.
 - Generated services expose `/livez`, `/readyz`, and a `/healthz` readiness
   alias instead of presenting one ambiguous static health response.
+- The root module now uses the published `github.com/mattn/go-sqlite3`
+  dependency instead of replacing it with a repository-local shim. Reference
+  and test SQLite paths continue to select `modernc.org/sqlite` explicitly when
+  a pure-Go driver is required.
 
 ### Fixed
 
@@ -72,6 +87,12 @@ upgrading between minor versions.
   shutdown error for the caller.
 - The reference app no longer reports readiness while an enabled SQL resource
   is unhealthy, and it no longer leaves the SQL pool unbounded by default.
+- Direct TCP, KCP, QUIC, UDP, and WebSocket handlers now contain panics at the
+  transport boundary, preserve `core.ErrRecovered` and error chains, notify
+  configured `OnHandlerError` callbacks, and apply the session error policy.
+- `kpro <command> --help` now prints that subcommand's usage and exits
+  successfully instead of reporting `flag: help requested` as a command
+  failure.
 
 ### Security
 

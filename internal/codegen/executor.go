@@ -2,13 +2,11 @@ package codegen
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"go/format"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 )
@@ -32,6 +30,10 @@ const (
 // writes it, Check returns ErrOutOfDate for pending changes, and DryRun only
 // reports the changes. Every mode rejects externally modified generated files.
 func Execute(plan Plan, options Options) (Result, error) {
+	return execute(plan, options, defaultFileTransactionOps)
+}
+
+func execute(plan Plan, options Options, transactionOps fileTransactionOps) (Result, error) {
 	mode := options.Mode
 	if mode == "" {
 		mode = Apply
@@ -56,7 +58,11 @@ func Execute(plan Plan, options Options) (Result, error) {
 		return Result{}, fmt.Errorf("lock file: %w", err)
 	}
 	for _, file := range files {
-		if file.Path == lockName {
+		conflicts, conflictErr := PortablePathsCollide(file.Path, lockName)
+		if conflictErr != nil {
+			return Result{}, conflictErr
+		}
+		if conflicts {
 			return Result{}, fmt.Errorf("codegen: lock file conflicts with output %q", file.Path)
 		}
 	}
@@ -73,9 +79,19 @@ func Execute(plan Plan, options Options) (Result, error) {
 	if err := ensureNoSymlink(lockPath); err != nil {
 		return Result{}, err
 	}
-	lock, err := readLockDocument(lockPath)
+	// Decode and later compare-and-swap the exact same lock snapshot. Reading
+	// again after planning could accept an external lock update as the write
+	// precondition for a plan derived from stale state.
+	oldData, lockExists, err := existingBytes(lockPath)
 	if err != nil {
 		return Result{}, err
+	}
+	lock := NewLock()
+	if lockExists {
+		lock, err = DecodeLock(oldData)
+		if err != nil {
+			return Result{}, err
+		}
 	}
 	prepared, err := prepare(files)
 	if err != nil {
@@ -94,6 +110,8 @@ func Execute(plan Plan, options Options) (Result, error) {
 	next := NewLock()
 	planned := make(map[string]struct{}, len(prepared))
 	ops := make(map[string]operation, len(prepared))
+	preconditions := make(map[string]FilePrecondition, len(prepared)+1)
+	var missingStaleGenerated []string
 	result := Result{}
 	for _, file := range prepared {
 		planned[file.Path] = struct{}{}
@@ -103,6 +121,10 @@ func Execute(plan Plan, options Options) (Result, error) {
 			return Result{}, err
 		}
 		previous, known := lock.Files[file.Path]
+		preconditions[file.Path] = ExpectFileMissing()
+		if exists {
+			preconditions[file.Path] = ExpectFileContent(current)
+		}
 		if known && previous.Ownership == Generated && exists && hashBytes(current) != previous.OutputSHA256 {
 			return Result{}, fmt.Errorf("%w: %s", ErrGeneratedModified, file.Path)
 		}
@@ -163,13 +185,13 @@ func Execute(plan Plan, options Options) (Result, error) {
 			return Result{}, fmt.Errorf("%w: stale %s", ErrGeneratedModified, name)
 		}
 		if exists {
+			preconditions[name] = ExpectFileContent(current)
 			ops[name] = opRemove
 			result.Removed = append(result.Removed, name)
+		} else {
+			preconditions[name] = ExpectFileMissing()
+			missingStaleGenerated = append(missingStaleGenerated, name)
 		}
-	}
-	oldData, lockExists, err := existingBytes(lockPath)
-	if err != nil {
-		return Result{}, err
 	}
 	nextData, err := EncodeLock(next)
 	if err != nil {
@@ -183,13 +205,29 @@ func Execute(plan Plan, options Options) (Result, error) {
 	if mode == DryRun || !result.Changed() {
 		return result, nil
 	}
-	// All inputs, current outputs, and stale entries were checked above.
+	// All writes, stale removals, and the lock update commit as one rollback-capable
+	// compare-and-swap batch. A later failure therefore cannot leave successfully
+	// replaced outputs paired with the old lock document.
+	mutations := make([]FileMutation, 0, len(ops)+1)
 	for _, file := range prepared {
 		if ops[file.Path] == opCreate || ops[file.Path] == opUpdate {
-			target, _ := joinUnderRoot(root, file.Path)
-			if err := atomicWrite(target, file.output, file.Mode); err != nil {
-				return Result{}, fmt.Errorf("write %s: %w", file.Path, err)
+			fileMode := file.Mode
+			if ops[file.Path] == opUpdate {
+				// File.Mode is a creation mode. Preserve an existing output's mode.
+				fileMode = 0
 			}
+			mutations = append(mutations, FileMutation{
+				Path:         file.Path,
+				Content:      file.output,
+				Mode:         fileMode,
+				Precondition: preconditions[file.Path],
+			})
+		} else {
+			mutations = append(mutations, FileMutation{
+				Path:         file.Path,
+				Precondition: preconditions[file.Path],
+				ObserveOnly:  true,
+			})
 		}
 	}
 	removals := make([]string, 0)
@@ -200,28 +238,53 @@ func Execute(plan Plan, options Options) (Result, error) {
 	}
 	sort.Strings(removals)
 	for _, name := range removals {
-		target, _ := joinUnderRoot(root, name)
-		if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
-			return Result{}, fmt.Errorf("remove stale %s: %w", name, err)
+		mutations = append(mutations, FileMutation{
+			Path:         name,
+			Precondition: preconditions[name],
+			Remove:       true,
+		})
+	}
+	sort.Strings(missingStaleGenerated)
+	for _, name := range missingStaleGenerated {
+		mutations = append(mutations, FileMutation{
+			Path:         name,
+			Precondition: preconditions[name],
+			ObserveOnly:  true,
+		})
+	}
+	if result.LockChanged || len(mutations) != 0 {
+		lockPrecondition := ExpectFileMissing()
+		if lockExists {
+			lockPrecondition = ExpectFileContent(oldData)
 		}
-	}
-	if result.LockChanged {
-		if err := atomicWrite(lockPath, nextData, 0o644); err != nil {
-			return Result{}, fmt.Errorf("write codegen lock: %w", err)
+		var lockMode fs.FileMode
+		if result.LockChanged {
+			lockMode = 0o644
 		}
+		mutations = append(mutations, FileMutation{
+			Path:         lockName,
+			Content:      nextData,
+			Mode:         lockMode,
+			Precondition: lockPrecondition,
+		})
 	}
-	return result, nil
-}
-
-func readLockDocument(filename string) (Lock, error) {
-	data, err := os.ReadFile(filename)
-	if os.IsNotExist(err) {
-		return NewLock(), nil
+	if _, statErr := os.Stat(root); os.IsNotExist(statErr) {
+		if mkdirErr := os.MkdirAll(root, 0o755); mkdirErr != nil {
+			return Result{}, fmt.Errorf("create codegen root: %w", mkdirErr)
+		}
+	} else if statErr != nil {
+		return Result{}, fmt.Errorf("inspect codegen root: %w", statErr)
 	}
+	transactionResult, err := commitFileTransaction(
+		mutations,
+		FileTransactionOptions{Root: root},
+		transactionOps,
+	)
 	if err != nil {
-		return Lock{}, fmt.Errorf("read codegen lock: %w", err)
+		return Result{}, fmt.Errorf("apply codegen transaction: %w", err)
 	}
-	return DecodeLock(data)
+	result.CleanupWarnings = append(result.CleanupWarnings, transactionResult.CleanupWarnings...)
+	return result, nil
 }
 
 func prepare(files []File) ([]preparedFile, error) {
@@ -334,69 +397,6 @@ func existingBytes(filename string) ([]byte, bool, error) {
 		return nil, false, nil
 	}
 	return data, err == nil, err
-}
-
-func atomicWrite(filename string, data []byte, mode fs.FileMode) error {
-	if mode == 0 {
-		mode = 0o644
-	}
-	if err := os.MkdirAll(filepath.Dir(filename), 0o755); err != nil {
-		return err
-	}
-	temporary, err := os.CreateTemp(filepath.Dir(filename), ".kpro-codegen-*")
-	if err != nil {
-		return err
-	}
-	tempName := temporary.Name()
-	defer os.Remove(tempName)
-	if err := temporary.Chmod(mode.Perm()); err != nil {
-		temporary.Close()
-		return err
-	}
-	if _, err := temporary.Write(data); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tempName, filename); err == nil {
-		return nil
-	} else if runtime.GOOS != "windows" {
-		return err
-	}
-
-	// Windows does not allow Rename to replace an existing destination. Move
-	// the destination aside in the same directory, then restore it if the
-	// replacement move fails. The backup keeps a failed update recoverable.
-	backup, err := os.CreateTemp(filepath.Dir(filename), ".kpro-codegen-backup-*")
-	if err != nil {
-		return err
-	}
-	backupName := backup.Name()
-	if err := backup.Close(); err != nil {
-		return err
-	}
-	if err := os.Remove(backupName); err != nil {
-		return err
-	}
-	if err := os.Rename(filename, backupName); err != nil {
-		return err
-	}
-	if err := os.Rename(tempName, filename); err != nil {
-		if restoreErr := os.Rename(backupName, filename); restoreErr != nil {
-			return errors.Join(err, fmt.Errorf("restore original output: %w", restoreErr))
-		}
-		return err
-	}
-	if err := os.Remove(backupName); err != nil {
-		return fmt.Errorf("remove replacement backup: %w", err)
-	}
-	return nil
 }
 
 func sortResult(result *Result) {
