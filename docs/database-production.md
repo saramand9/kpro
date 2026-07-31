@@ -20,6 +20,33 @@ go run .\cmd\app -gorm-driver mysql -gorm-dsn "root:pwd@tcp(127.0.0.1:3306)/kpro
 go run .\cmd\app -gorm-driver postgres -gorm-dsn "host=127.0.0.1 user=kpro password=pwd dbname=kpro sslmode=disable"
 ```
 
+### Pure-Go SQLite for local development
+
+The reference app and repository tests use `modernc.org/sqlite` so their
+SQLite path also works with `CGO_ENABLED=0`. Applications that need the same
+property must register the modernc driver and select its `sqlite` driver name
+explicitly:
+
+```go
+import (
+	gormsqlite "gorm.io/driver/sqlite"
+	_ "modernc.org/sqlite"
+)
+
+dialector := gormsqlite.Dialector{
+	DriverName: "sqlite",
+	DSN:        "file:app.db",
+}
+```
+
+`gormsqlite.Open(...)` selects the driver's default `sqlite3` name, which is
+provided by `github.com/mattn/go-sqlite3` and requires CGO. KPro no longer
+replaces that dependency with a repository-local shim. Choose the driver
+explicitly and test the exact build mode rather than assuming the two
+implementations are interchangeable. SQLite remains a local-development and
+test option in the reference app; validate locking, durability, backup, and
+concurrency behavior before selecting it for a deployed service.
+
 `database/common/readmodels` contains shared interfaces for cache, search, vector, graph, analytics, and metrics stores. The implemented non-SQL adapters are:
 
 | Package | Resource kind | Main use |

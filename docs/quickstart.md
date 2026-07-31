@@ -53,6 +53,9 @@ go mod tidy
 go run ./cmd/hello-kpro
 ```
 
+Every CLI subcommand accepts `--help`; for example,
+`go run ./cmd/kpro new --help` prints usage and exits successfully.
+
 The unified `service` profile accepts repeatable `--api http|grpc|message`
 selections. A Message API also requires at least one explicit, repeatable
 `--transport tcp|kcp|quic|udp|websocket`. For example:
@@ -142,6 +145,22 @@ liveness and readiness routes, process signals, and graceful shutdown. The
 starter has no external dependency, so readiness succeeds while the process is
 serving. Add dependency checks, metrics, tracing, authentication, and managed
 resource ownership when the service begins using them.
+
+The local replacement is a source-development convenience in the generated
+application; the KPro root module itself does not use a repository-local
+replacement. Before distributing the generated module, remove the local
+`replace` and pin a KPro tag that is reachable through its declared module
+path. A versioned CLI install uses:
+
+```sh
+go install github.com/saramand9/kpro/cmd/kpro@vX.Y.Z
+```
+
+That command is only expected to work after the selected tag and declared
+module path are reachable. Private-source use requires both working VCS
+credentials and appropriate `GOPRIVATE` configuration; `GOPRIVATE` is not an
+authentication mechanism. Use a reviewed checkout or verified release archive
+when the versioned module path is not available.
 
 ## 3. Call the routes
 

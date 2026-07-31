@@ -8,6 +8,7 @@ Current tests:
 examples_compile_test.go   compiles every package under examples/
 protocol_smoke_test.go     validates KProV1 encode/read round trip
 tcp_dispatch_test.go       validates TCP async can bypass a blocked sync handler
+tcp_connection_load_test.go provides an opt-in TCP connection lifecycle load check
 tcp_file_compare_test.go   records client/server TCP traces and compares files
 udp_file_compare_test.go   records client/server UDP traces and compares files
 websocket_file_compare_test.go records WebSocket traces and compares files
@@ -53,3 +54,26 @@ Run all tests:
 go test ./...
 ```
 
+Run the opt-in TCP connection load check with its default 1000 concurrent
+connections and 10 request/response messages per connection:
+
+```powershell
+$env:KPRO_TCP_CONNECTION_LOAD_TEST = "1"
+go test ./test -run TestTCPConnectionLoad -count=1 -timeout=10m
+```
+
+Use smaller dimensions for a quick smoke run:
+
+```powershell
+$env:KPRO_TCP_CONNECTION_LOAD_TEST = "1"
+$env:KPRO_TCP_LOAD_CONNECTIONS = "50"
+$env:KPRO_TCP_LOAD_MESSAGES = "2"
+$env:KPRO_TCP_LOAD_TIMEOUT = "30s"
+go test ./test -run TestTCPConnectionLoad -count=1
+```
+
+The test holds one full connection wave open, verifies every configured
+request/response round trip, closes it, and then establishes a second full wave
+to verify that connection slots can be reused. Logged elapsed time, heap, and
+goroutine counts are observations for diagnosing a run; they are not a
+performance benchmark or SLA.

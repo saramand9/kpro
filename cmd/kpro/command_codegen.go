@@ -41,6 +41,8 @@ var sourceGenerators = map[manifest.SourceKind]sourceGenerator{
 	manifest.KindMessage: sourceGeneratorFunc(planMessage),
 }
 
+var executeGenerationPlan = codegen.Execute
+
 type pluginPlanner interface {
 	Plan(context.Context, manifest.Manifest, manifest.Source, []byte) (codegen.Plan, error)
 }
@@ -50,10 +52,12 @@ var newPluginHost = func(path string, args []string) pluginPlanner {
 }
 
 type codegenInput struct {
-	root     string
-	config   string
-	manifest manifest.Manifest
-	lockFile string
+	root           string
+	config         string
+	configPath     string
+	manifest       manifest.Manifest
+	lockFile       string
+	legacyLockFile string
 }
 
 func runValidate(args []string, stdout, stderr io.Writer) error {
@@ -124,10 +128,16 @@ func runGenerate(args []string, stdout, stderr io.Writer) error {
 	if *dryRun {
 		mode = codegen.DryRun
 	}
-	result, err := codegen.Execute(plan, codegen.Options{Root: input.root, LockFile: input.lockFile, Mode: mode})
+	executionLock, migrationWarnings, err := prepareGenerationLock(input, mode)
 	if err != nil {
 		return err
 	}
+	printGenerationWarnings(stderr, migrationWarnings)
+	result, err := executeGenerationPlan(plan, codegen.Options{Root: input.root, LockFile: executionLock, Mode: mode})
+	if err != nil {
+		return err
+	}
+	printGenerationWarnings(stderr, result.CleanupWarnings)
 	printGenerationResult(stdout, input.lockFile, result)
 	return nil
 }
@@ -178,12 +188,26 @@ func loadCodegenInput(root, config string) (codegenInput, error) {
 	if err != nil {
 		return codegenInput{}, fmt.Errorf("codegen config must be inside root: %w", err)
 	}
-	lockFile := strings.TrimSuffix(portableConfig, filepath.Ext(portableConfig)) + ".lock.json"
+	resolvedConfig, err = resolveProjectFile(resolvedRoot, portableConfig)
+	if err != nil {
+		return codegenInput{}, fmt.Errorf("resolve codegen config %q: %w", portableConfig, err)
+	}
+	lockFile, legacyLockFile := generationLockPaths(portableConfig)
+	if err := validateGenerationLockPath(portableConfig, lockFile); err != nil {
+		return codegenInput{}, err
+	}
 	loaded, err := manifest.Load(resolvedConfig)
 	if err != nil {
 		return codegenInput{}, err
 	}
-	return codegenInput{root: resolvedRoot, config: resolvedConfig, manifest: loaded, lockFile: lockFile}, nil
+	return codegenInput{
+		root:           resolvedRoot,
+		config:         resolvedConfig,
+		configPath:     portableConfig,
+		manifest:       loaded,
+		lockFile:       lockFile,
+		legacyLockFile: legacyLockFile,
+	}, nil
 }
 
 func buildGenerationPlan(root string, value manifest.Manifest, allowPlugins bool) (codegen.Plan, error) {
@@ -200,6 +224,7 @@ func buildGenerationPlan(root string, value manifest.Manifest, allowPlugins bool
 	}
 
 	files := make([]codegen.File, 0)
+	symbols := newGoSymbolRegistry()
 	for _, source := range value.Sources {
 		var (
 			sourcePlan codegen.Plan
@@ -221,6 +246,9 @@ func buildGenerationPlan(root string, value manifest.Manifest, allowPlugins bool
 		if err != nil {
 			return codegen.Plan{}, fmt.Errorf("generate source %q: %w", source.ID, err)
 		}
+		if err := symbols.Add(source.ID, outputs); err != nil {
+			return codegen.Plan{}, fmt.Errorf("generate source %q: %w", source.ID, err)
+		}
 		files = append(files, outputs...)
 	}
 	project, configured, err := loadConfiguredServiceProject(root)
@@ -234,6 +262,9 @@ func buildGenerationPlan(root string, value manifest.Manifest, allowPlugins bool
 		}
 		outputs, err := assemblyPlan.OrderedFiles()
 		if err != nil {
+			return codegen.Plan{}, fmt.Errorf("build service assembly: %w", err)
+		}
+		if err := symbols.Add("service assembly", outputs); err != nil {
 			return codegen.Plan{}, fmt.Errorf("build service assembly: %w", err)
 		}
 		files = append(files, outputs...)
@@ -377,5 +408,11 @@ func printGenerationResult(output io.Writer, lockFile string, result codegen.Res
 	}
 	if result.LockChanged {
 		fmt.Fprintf(output, "update %s\n", lockFile)
+	}
+}
+
+func printGenerationWarnings(output io.Writer, warnings []string) {
+	for _, warning := range warnings {
+		fmt.Fprintf(output, "warning: %s\n", warning)
 	}
 }

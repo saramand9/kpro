@@ -169,7 +169,7 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 			_ = session.Send(core.Message{ID: core.MsgPong, Seq: msg.Seq})
 			continue
 		}
-		err = invokeHandler(handler, session, msg)
+		err = transportapi.InvokeHandler(handler, session, msg)
 		if !transportapi.ContinueAfterHandlerError(
 			s.config.HandlerErrorPolicy,
 			s.config.OnHandlerError,
@@ -180,12 +180,6 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 			_ = session.Close()
 		}
 	}
-}
-
-func invokeHandler(handler core.Handler, session core.Session, msg core.Message) (err error) {
-	ctx := core.AcquireTransportContext(session, msg)
-	defer core.ReleaseTransportContext(ctx)
-	return handler(ctx)
 }
 
 func (s *Server) claimStart() error {

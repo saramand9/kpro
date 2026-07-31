@@ -140,12 +140,7 @@ func scaffoldNew(args []string, stdout, stderr io.Writer) error {
 	var transportValues repeatedFlag
 	flags.Var(&apiValues, "api", "service API: http, grpc, or message (repeatable)")
 	flags.Var(&transportValues, "transport", "message transport: tcp, kcp, quic, udp, or websocket (repeatable)")
-	parseArgs := args
-	// Accept both the natural `new <directory> --module ...` form and Go's
-	// conventional `new --module ... <directory>` form.
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		parseArgs = append(append([]string(nil), args[1:]...), args[0])
-	}
+	parseArgs := normalizeScaffoldNewArgs(args)
 	if err := flags.Parse(parseArgs); err != nil {
 		return err
 	}
@@ -199,20 +194,6 @@ func scaffoldNew(args []string, stdout, stderr io.Writer) error {
 			return errors.New("KPro release version is unavailable; run from a KPro checkout or pass --kpro-replace <checkout>")
 		}
 	}
-	if err := ensureEmptyTarget(target); err != nil {
-		return err
-	}
-	stagedTarget, err := createScaffoldStage(target)
-	if err != nil {
-		return err
-	}
-	stagePublished := false
-	defer func() {
-		if !stagePublished {
-			_ = os.RemoveAll(stagedTarget)
-		}
-	}()
-
 	quotedReplace := ""
 	if replacePath != "" {
 		quotedReplace = strconv.Quote(filepath.ToSlash(replacePath))
@@ -241,6 +222,22 @@ func scaffoldNew(args []string, stdout, stderr io.Writer) error {
 	if selection.profile == "service" {
 		templates = serviceProfileTemplates(data)
 	}
+	if err := validateScaffoldTemplateTargets(templates, data); err != nil {
+		return err
+	}
+	if err := ensureEmptyTarget(target); err != nil {
+		return err
+	}
+	stagedTarget, err := createScaffoldStage(target)
+	if err != nil {
+		return err
+	}
+	stagePublished := false
+	defer func() {
+		if !stagePublished {
+			_ = os.RemoveAll(stagedTarget)
+		}
+	}()
 	for _, file := range templates {
 		if err := renderTemplate(stagedTarget, file.source, file.target, file.mode, data); err != nil {
 			return err
@@ -273,6 +270,31 @@ func scaffoldNew(args []string, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "\nnext:\n  cd %s\n  go mod tidy\n  go run %s\n", target, runTarget)
 	return nil
+}
+
+func normalizeScaffoldNewArgs(args []string) []string {
+	flags := make([]string, 0, len(args))
+	positionals := make([]string, 0, 1)
+	for index := 0; index < len(args); index++ {
+		argument := args[index]
+		if argument == "--" {
+			positionals = append(positionals, args[index+1:]...)
+			break
+		}
+		if argument == "-" || !strings.HasPrefix(argument, "-") {
+			positionals = append(positionals, argument)
+			continue
+		}
+		flags = append(flags, argument)
+		if argument == "-h" || argument == "--help" || strings.Contains(argument, "=") {
+			continue
+		}
+		if index+1 < len(args) {
+			index++
+			flags = append(flags, args[index])
+		}
+	}
+	return append(flags, positionals...)
 }
 
 func validateServiceSelection(profile string, rawAPIs, rawTransports []string) (serviceSelection, error) {
@@ -387,6 +409,39 @@ func validateDerivedServiceName(selection serviceSelection, serviceExported stri
 		len(serviceExported),
 		messageServiceNameMaxLength,
 	)
+}
+
+func validateScaffoldTemplateTargets(templates []scaffoldTemplate, data scaffoldData) error {
+	for _, candidate := range templates {
+		target, err := renderString(candidate.target, data)
+		if err != nil {
+			return fmt.Errorf("render target %s: %w", candidate.target, err)
+		}
+		if _, err := portableScaffoldPath(target); err != nil {
+			return fmt.Errorf("invalid derived scaffold path %q: %w", target, err)
+		}
+	}
+	return nil
+}
+
+func portableScaffoldPath(value string) (string, error) {
+	portable, err := codegen.SafeRelativePath(value)
+	if err != nil {
+		return "", err
+	}
+	for _, segment := range strings.Split(portable, "/") {
+		if strings.HasSuffix(segment, ".") || strings.HasSuffix(segment, " ") {
+			return "", fmt.Errorf("path segment %q cannot end with a dot or space", segment)
+		}
+		stem := segment
+		if extension := strings.IndexByte(stem, '.'); extension >= 0 {
+			stem = stem[:extension]
+		}
+		if windowsReservedDeviceName(stem) {
+			return "", fmt.Errorf("path segment %q uses reserved Windows device name %q", segment, stem)
+		}
+	}
+	return portable, nil
 }
 
 func serviceProfileTemplates(data scaffoldData) []scaffoldTemplate {
@@ -655,7 +710,7 @@ func renderTemplate(root, source, target string, mode os.FileMode, data scaffold
 	if err != nil {
 		return fmt.Errorf("render target %s: %w", target, err)
 	}
-	target, err = codegen.SafeRelativePath(target)
+	target, err = portableScaffoldPath(target)
 	if err != nil {
 		return fmt.Errorf("unsafe template target %q: %w", target, err)
 	}

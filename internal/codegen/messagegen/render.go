@@ -193,8 +193,8 @@ func renderAdapter(document Document, modulePath, output string) ([]byte, error)
 	source.WriteString("\t\"bytes\"\n")
 	source.WriteString("\t\"encoding/json\"\n")
 	source.WriteString("\t\"fmt\"\n")
-	source.WriteString("\t\"io\"\n")
-	source.WriteString("\t\"reflect\"\n\n")
+	source.WriteString("\t\"reflect\"\n")
+	source.WriteString("\t\"sort\"\n\n")
 	source.WriteString("\t\"github.com/saramand9/kpro/core\"\n")
 	fmt.Fprintf(&source, "\tcontract %q\n", baseImport+"/contract")
 	fmt.Fprintf(&source, "\ttypes %q\n", baseImport+"/types")
@@ -351,23 +351,11 @@ func renderMessageDecoder(source *bytes.Buffer, message Message, bindingError st
 		goName,
 	)
 	fmt.Fprintf(source, "\tvar request types.%sRequest\n", goName)
-	source.WriteString("\tvar wire *struct {\n")
-	for _, field := range fields {
-		fmt.Fprintf(
-			source,
-			"\t\t%s *%s `json:%s`\n",
-			mustExportedIdentifier(field.Name),
-			goType(field.Type),
-			strconv.Quote(field.Name),
-		)
-	}
-	source.WriteString("\t}\n")
-	source.WriteString("\tdecoder := json.NewDecoder(bytes.NewReader(data))\n")
-	source.WriteString("\tdecoder.DisallowUnknownFields()\n")
-	source.WriteString("\tif err := decoder.Decode(&wire); err != nil {\n")
+	source.WriteString("\tvar rawFields map[string]json.RawMessage\n")
+	source.WriteString("\tif err := json.Unmarshal(data, &rawFields); err != nil {\n")
 	renderBindingErrorReturn(source, message, bindingError, "err")
 	source.WriteString("\t}\n")
-	source.WriteString("\tif wire == nil {\n")
+	source.WriteString("\tif rawFields == nil || bytes.Equal(bytes.TrimSpace(data), []byte(\"null\")) {\n")
 	renderBindingErrorReturn(
 		source,
 		message,
@@ -375,15 +363,31 @@ func renderMessageDecoder(source *bytes.Buffer, message Message, bindingError st
 		`fmt.Errorf("request payload must be a JSON object")`,
 	)
 	source.WriteString("\t}\n")
-	source.WriteString("\tvar trailing any\n")
-	source.WriteString("\tif err := decoder.Decode(&trailing); err != io.EOF {\n")
-	source.WriteString("\t\tif err == nil { err = fmt.Errorf(\"multiple JSON values are not accepted\") }\n")
-	renderBindingErrorReturn(source, message, bindingError, "err")
-	source.WriteString("\t}\n")
+	source.WriteString("\tvar unknownFields []string\n")
+	source.WriteString("\tfor name := range rawFields {\n")
+	source.WriteString("\t\tswitch name {\n")
 	for _, field := range fields {
+		fmt.Fprintf(source, "\t\tcase %s:\n", strconv.Quote(field.Name))
+	}
+	source.WriteString("\t\tdefault:\n")
+	source.WriteString("\t\t\tunknownFields = append(unknownFields, name)\n")
+	source.WriteString("\t\t}\n\t}\n")
+	source.WriteString("\tif len(unknownFields) != 0 {\n")
+	source.WriteString("\t\tsort.Strings(unknownFields)\n")
+	renderBindingErrorReturn(
+		source,
+		message,
+		bindingError,
+		`fmt.Errorf("unknown field %q", unknownFields[0])`,
+	)
+	source.WriteString("\t}\n")
+	for fieldIndex, field := range fields {
 		goField := mustExportedIdentifier(field.Name)
+		rawField := fmt.Sprintf("rawField%d", fieldIndex)
+		fieldExists := fmt.Sprintf("field%dExists", fieldIndex)
+		fmt.Fprintf(source, "\t%s, %s := rawFields[%s]\n", rawField, fieldExists, strconv.Quote(field.Name))
 		if field.Required {
-			fmt.Fprintf(source, "\tif wire.%s == nil {\n", goField)
+			fmt.Fprintf(source, "\tif !%s || bytes.Equal(bytes.TrimSpace(%s), []byte(\"null\")) {\n", fieldExists, rawField)
 			renderBindingErrorReturn(
 				source,
 				message,
@@ -391,10 +395,28 @@ func renderMessageDecoder(source *bytes.Buffer, message Message, bindingError st
 				"fmt.Errorf("+strconv.Quote("required field "+field.Name+" is missing or null")+")",
 			)
 			source.WriteString("\t}\n")
-			fmt.Fprintf(source, "\trequest.%s = *wire.%s\n", goField, goField)
+			fmt.Fprintf(source, "\tif err := json.Unmarshal(%s, &request.%s); err != nil {\n", rawField, goField)
+			renderBindingErrorReturn(
+				source,
+				message,
+				bindingError,
+				"fmt.Errorf("+strconv.Quote("field "+field.Name+": %w")+", err)",
+			)
+			source.WriteString("\t}\n")
 			continue
 		}
-		fmt.Fprintf(source, "\trequest.%s = wire.%s\n", goField, goField)
+		fmt.Fprintf(source, "\tif %s && !bytes.Equal(bytes.TrimSpace(%s), []byte(\"null\")) {\n", fieldExists, rawField)
+		fmt.Fprintf(source, "\t\tvar value %s\n", goType(field.Type))
+		fmt.Fprintf(source, "\t\tif err := json.Unmarshal(%s, &value); err != nil {\n", rawField)
+		renderBindingErrorReturn(
+			source,
+			message,
+			bindingError,
+			"fmt.Errorf("+strconv.Quote("field "+field.Name+": %w")+", err)",
+		)
+		source.WriteString("\t\t}\n")
+		fmt.Fprintf(source, "\t\trequest.%s = &value\n", goField)
+		source.WriteString("\t}\n")
 	}
 	source.WriteString("\treturn request, nil\n")
 	source.WriteString("}\n\n")

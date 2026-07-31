@@ -2,8 +2,6 @@ module github.com/saramand9/kpro
 
 go 1.25.12
 
-replace github.com/mattn/go-sqlite3 => ./internal/sqlite3shim
-
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.32.0
 	github.com/alicebob/miniredis/v2 v2.33.0
@@ -21,6 +19,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.43.0
 	go.uber.org/zap v1.27.0
 	golang.org/x/mod v0.37.0
+	golang.org/x/text v0.39.0
 	golang.org/x/time v0.5.0
 	google.golang.org/grpc v1.82.1
 	google.golang.org/protobuf v1.36.11
@@ -102,7 +101,6 @@ require (
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
-	golang.org/x/text v0.39.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
 	modernc.org/gc/v3 v3.0.0-20240107210532-573471604cb6 // indirect
 	modernc.org/libc v1.49.3 // indirect
