@@ -352,8 +352,12 @@ func assertCommand(
 	goPlugin, _ = filepath.Abs(goPlugin)
 	grpcPlugin, _ := lookup("protoc-gen-go-grpc")
 	grpcPlugin, _ = filepath.Abs(grpcPlugin)
+	resolvedRoot, err := resolveRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := []string{
-		"--proto_path=" + root,
+		"--proto_path=" + resolvedRoot,
 		"--descriptor_set_out=" + descriptorFilename,
 		"--include_imports",
 		"--plugin=protoc-gen-go=" + goPlugin,
