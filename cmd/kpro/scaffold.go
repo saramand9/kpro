@@ -64,9 +64,12 @@ type scaffoldData struct {
 }
 
 type scaffoldTemplate struct {
-	source string
-	target string
-	mode   os.FileMode
+	source     string
+	target     string
+	mode       os.FileMode
+	content    []byte
+	hasContent bool
+	literal    bool
 }
 
 type repeatedFlag []string
@@ -136,6 +139,7 @@ func scaffoldNew(args []string, stdout, stderr io.Writer) error {
 	serviceName := flags.String("name", "", "service name (default directory name)")
 	kproReplace := flags.String("kpro-replace", "", "local KPro checkout (auto-detected from the current directory)")
 	profile := flags.String("profile", "", "project profile (supported: minimal, service)")
+	templatePath := flags.String("template", "", "local versioned scaffold template overlay directory")
 	var apiValues repeatedFlag
 	var transportValues repeatedFlag
 	flags.Var(&apiValues, "api", "service API: http, grpc, or message (repeatable)")
@@ -145,7 +149,7 @@ func scaffoldNew(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if flags.NArg() != 1 {
-		return errors.New("usage: kpro new <directory> [--module example.com/service] [--name service] [--kpro-replace path] [--profile minimal|service] [--api http|grpc|message] [--transport tcp|kcp|quic|udp|websocket]")
+		return errors.New("usage: kpro new <directory> [--module example.com/service] [--name service] [--kpro-replace path] [--profile minimal|service] [--api http|grpc|message] [--transport tcp|kcp|quic|udp|websocket] [--template local-directory]")
 	}
 	selection, err := validateServiceSelection(*profile, apiValues, transportValues)
 	if err != nil {
@@ -222,10 +226,26 @@ func scaffoldNew(args []string, stdout, stderr io.Writer) error {
 	if selection.profile == "service" {
 		templates = serviceProfileTemplates(data)
 	}
+	var localTemplate *localScaffoldTemplateSnapshot
+	if *templatePath != "" {
+		snapshot, err := loadLocalScaffoldTemplate(*templatePath, selection)
+		if err != nil {
+			return err
+		}
+		templates, err = applyLocalScaffoldTemplate(templates, snapshot, selection, data)
+		if err != nil {
+			return err
+		}
+		localTemplate = &snapshot
+	}
 	if err := validateScaffoldTemplateTargets(templates, data); err != nil {
 		return err
 	}
-	if err := ensureEmptyTarget(target); err != nil {
+	plannedFiles, err := planScaffoldTemplates(templates, data)
+	if err != nil {
+		return err
+	}
+	if err := ensureMissingTarget(target); err != nil {
 		return err
 	}
 	stagedTarget, err := createScaffoldStage(target)
@@ -238,10 +258,8 @@ func scaffoldNew(args []string, stdout, stderr io.Writer) error {
 			_ = os.RemoveAll(stagedTarget)
 		}
 	}()
-	for _, file := range templates {
-		if err := renderTemplate(stagedTarget, file.source, file.target, file.mode, data); err != nil {
-			return err
-		}
+	if err := writeScaffoldFiles(stagedTarget, plannedFiles); err != nil {
+		return err
 	}
 	if selection.profile == "service" {
 		if err := runGenerate([]string{"--root", stagedTarget}, io.Discard, io.Discard); err != nil {
@@ -257,6 +275,15 @@ func scaffoldNew(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "created %s\nusing KPro source %s\n", *serviceName, replacePath)
 	} else {
 		fmt.Fprintf(stdout, "created %s\nusing KPro %s\n", *serviceName, kproVersion)
+	}
+	if localTemplate != nil {
+		fmt.Fprintf(
+			stdout,
+			"using scaffold template %s %s (sha256:%s)\n",
+			localTemplate.manifest.Name,
+			localTemplate.manifest.Version,
+			localTemplate.digest,
+		)
 	}
 	if selection.profile == "service" {
 		fmt.Fprintf(stdout, "APIs: %s\n", data.APIList)
@@ -588,7 +615,7 @@ func normalizeReleaseVersion(candidate string) (string, bool) {
 	return candidate, semver.IsValid(candidate)
 }
 
-func ensureEmptyTarget(target string) error {
+func ensureMissingTarget(target string) error {
 	info, err := os.Lstat(target)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -597,17 +624,9 @@ func ensureEmptyTarget(target string) error {
 		return fmt.Errorf("inspect target: %w", err)
 	case info.Mode()&os.ModeSymlink != 0:
 		return fmt.Errorf("target directory %q cannot be a symbolic link", target)
-	case !info.IsDir():
-		return fmt.Errorf("target %q is not a directory", target)
+	default:
+		return fmt.Errorf("target path %q already exists; kpro new requires a missing target", target)
 	}
-	entries, err := os.ReadDir(target)
-	if err != nil {
-		return fmt.Errorf("inspect target: %w", err)
-	}
-	if len(entries) > 0 {
-		return fmt.Errorf("target directory %q is not empty", target)
-	}
-	return nil
 }
 
 func createScaffoldStage(target string) (string, error) {
@@ -624,124 +643,127 @@ func createScaffoldStage(target string) (string, error) {
 }
 
 func commitScaffoldStage(stage, target string) error {
-	targetInfo, err := os.Lstat(target)
-	if errors.Is(err, os.ErrNotExist) {
-		if err := os.Chmod(stage, 0o755); err != nil {
-			return fmt.Errorf("set published scaffold permissions: %w", err)
+	if err := os.Chmod(stage, 0o755); err != nil {
+		return fmt.Errorf("set published scaffold permissions: %w", err)
+	}
+	if current, err := os.Lstat(target); err == nil {
+		if current.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("target directory %q became a symbolic link while the scaffold was generated", target)
 		}
-		if current, recheckErr := os.Lstat(target); recheckErr == nil {
-			if current.Mode()&os.ModeSymlink != 0 {
-				return fmt.Errorf("target directory %q became a symbolic link while the scaffold was generated", target)
-			}
-			return fmt.Errorf("target path %q appeared while the scaffold was generated", target)
-		} else if !errors.Is(recheckErr, os.ErrNotExist) {
-			return fmt.Errorf("reinspect target before publishing scaffold: %w", recheckErr)
-		}
-		if err := os.Rename(stage, target); err != nil {
-			return fmt.Errorf("publish scaffold: %w", err)
-		}
-		return nil
-	}
-	if err != nil {
+		return fmt.Errorf("target path %q appeared while the scaffold was generated", target)
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("reinspect target before publishing scaffold: %w", err)
-	}
-	if targetInfo.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("target directory %q cannot be a symbolic link", target)
-	}
-	if !targetInfo.IsDir() {
-		return fmt.Errorf("target %q is not a directory", target)
-	}
-	entries, err := os.ReadDir(target)
-	if err != nil {
-		return fmt.Errorf("reinspect target before publishing scaffold: %w", err)
-	}
-	if len(entries) != 0 {
-		return fmt.Errorf("target directory %q changed while the scaffold was generated", target)
-	}
-	currentInfo, err := os.Lstat(target)
-	if err != nil {
-		return fmt.Errorf("reinspect target before publishing scaffold: %w", err)
-	}
-	if currentInfo.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("target directory %q became a symbolic link while the scaffold was generated", target)
-	}
-	if !currentInfo.IsDir() || !os.SameFile(targetInfo, currentInfo) {
-		return fmt.Errorf("target path %q changed while the scaffold was generated", target)
-	}
-
-	publishMode := scaffoldDirectoryPublishMode(targetInfo.Mode())
-	if err := os.Chmod(stage, publishMode); err != nil {
-		return fmt.Errorf("preserve target directory permissions: %w", err)
-	}
-	if err := os.Remove(target); err != nil {
-		return fmt.Errorf("replace empty target directory: %w", err)
 	}
 	if err := os.Rename(stage, target); err != nil {
-		restoreErr := restoreEmptyScaffoldTarget(target, publishMode)
-		if restoreErr != nil {
-			return errors.Join(fmt.Errorf("publish scaffold: %w", err), fmt.Errorf("restore empty target: %w", restoreErr))
-		}
 		return fmt.Errorf("publish scaffold: %w", err)
 	}
 	return nil
 }
 
-func scaffoldDirectoryPublishMode(mode os.FileMode) os.FileMode {
-	return mode & (os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky)
-}
-
-func restoreEmptyScaffoldTarget(target string, mode os.FileMode) error {
-	if err := os.Mkdir(target, mode.Perm()); err != nil {
+func renderTemplate(root, source, target string, mode os.FileMode, data scaffoldData) error {
+	files, err := planScaffoldTemplates([]scaffoldTemplate{{
+		source: source,
+		target: target,
+		mode:   mode,
+	}}, data)
+	if err != nil {
 		return err
 	}
-	return os.Chmod(target, mode)
+	return writeScaffoldFiles(root, files)
 }
 
-func renderTemplate(root, source, target string, mode os.FileMode, data scaffoldData) error {
-	templateBody, err := templateFiles.ReadFile(source)
-	if err != nil {
-		return fmt.Errorf("read embedded template %s: %w", source, err)
-	}
-	parsed, err := template.New(source).Option("missingkey=error").Parse(string(templateBody))
-	if err != nil {
-		return fmt.Errorf("parse embedded template %s: %w", source, err)
-	}
-	target, err = renderString(target, data)
-	if err != nil {
-		return fmt.Errorf("render target %s: %w", target, err)
-	}
-	target, err = portableScaffoldPath(target)
-	if err != nil {
-		return fmt.Errorf("unsafe template target %q: %w", target, err)
-	}
-	path := filepath.Join(root, filepath.FromSlash(target))
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create parent directory for %s: %w", target, err)
-	}
-	var rendered bytes.Buffer
-	if err := parsed.Execute(&rendered, data); err != nil {
-		return fmt.Errorf("render %s: %w", target, err)
-	}
-	content := normalizeTextLineEndings(rendered.Bytes())
-	if strings.EqualFold(filepath.Ext(target), ".go") {
-		content, err = format.Source(content)
-		if err != nil {
-			return fmt.Errorf("gofmt %s: %w", target, err)
+func planScaffoldTemplates(templates []scaffoldTemplate, data scaffoldData) ([]codegen.File, error) {
+	files := make([]codegen.File, 0, len(templates))
+	for _, candidate := range templates {
+		body := candidate.content
+		if !candidate.hasContent {
+			var err error
+			body, err = templateFiles.ReadFile(candidate.source)
+			if err != nil {
+				return nil, fmt.Errorf("read embedded template %s: %w", candidate.source, err)
+			}
 		}
+		target, err := renderString(candidate.target, data)
+		if err != nil {
+			return nil, fmt.Errorf("render target %s: %w", candidate.target, err)
+		}
+		target, err = portableScaffoldPath(target)
+		if err != nil {
+			return nil, fmt.Errorf("unsafe template target %q: %w", target, err)
+		}
+
+		content := append([]byte(nil), body...)
+		if !candidate.literal {
+			parsed, err := template.New(candidate.source).Option("missingkey=error").Parse(string(body))
+			if err != nil {
+				return nil, fmt.Errorf("parse template %s: %w", candidate.source, err)
+			}
+			var rendered bytes.Buffer
+			if err := parsed.Execute(&rendered, data); err != nil {
+				return nil, fmt.Errorf("render %s: %w", target, err)
+			}
+			content = normalizeTextLineEndings(rendered.Bytes())
+		}
+		if strings.EqualFold(filepath.Ext(target), ".go") {
+			content, err = format.Source(content)
+			if err != nil {
+				return nil, fmt.Errorf("gofmt %s: %w", target, err)
+			}
+		}
+		mode := candidate.mode
+		if mode == 0 {
+			mode = 0o644
+		}
+		files = append(files, codegen.File{
+			Path:      target,
+			Content:   content,
+			Ownership: codegen.Scaffold,
+			Mode:      mode,
+		})
 	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	plan, err := codegen.BuildPlan(files...)
 	if err != nil {
-		return fmt.Errorf("create %s: %w", target, err)
+		return nil, fmt.Errorf("plan scaffold templates: %w", err)
 	}
-	_, writeErr := file.Write(content)
-	closeErr := file.Close()
-	if writeErr != nil {
-		_ = os.Remove(path)
-		return fmt.Errorf("write %s: %w", target, writeErr)
-	}
-	if closeErr != nil {
-		_ = os.Remove(path)
-		return fmt.Errorf("close %s: %w", target, closeErr)
+	return plan.OrderedFiles()
+}
+
+func writeScaffoldFiles(root string, files []codegen.File) error {
+	for _, candidate := range files {
+		target, err := portableScaffoldPath(candidate.Path)
+		if err != nil {
+			return fmt.Errorf("unsafe planned scaffold target %q: %w", candidate.Path, err)
+		}
+		path := filepath.Join(root, filepath.FromSlash(target))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return fmt.Errorf("create parent directory for %s: %w", target, err)
+		}
+		mode := candidate.Mode
+		if mode == 0 {
+			mode = 0o644
+		}
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+		if err != nil {
+			return fmt.Errorf("create %s: %w", target, err)
+		}
+		_, writeErr := file.Write(candidate.Content)
+		var chmodErr error
+		if writeErr == nil {
+			chmodErr = file.Chmod(mode.Perm())
+		}
+		closeErr := file.Close()
+		if writeErr != nil {
+			_ = os.Remove(path)
+			return fmt.Errorf("write %s: %w", target, writeErr)
+		}
+		if chmodErr != nil {
+			_ = os.Remove(path)
+			return fmt.Errorf("set permissions on %s: %w", target, chmodErr)
+		}
+		if closeErr != nil {
+			_ = os.Remove(path)
+			return fmt.Errorf("close %s: %w", target, closeErr)
+		}
 	}
 	return nil
 }

@@ -39,8 +39,10 @@ that revision, and validate the framework against the target workload.
 
 Developer and operational support currently includes checked server
 construction and component preflight validation, transport capability
-descriptors, `cmd/kpro` service scaffolding and contract code generation,
-optional OTel/Prometheus/Zap/health packages, and CI-enforced Router/HTTP
+descriptors, `cmd/kpro` service scaffolding, versioned local template overlays,
+contract code generation, typed OpenAPI HTTP clients, a read-only contract
+catalog, optional OTel/Prometheus/Zap/health packages, and CI-enforced
+Router/HTTP
 microbenchmark budgets. OTel exporters,
 telemetry backends, deployment sizing, and workload-specific validation remain
 application or platform responsibilities.
@@ -53,7 +55,7 @@ application or platform responsibilities.
 | Understand package ownership and runtime flow | [Project Map](docs/project-map.md) |
 | Review the current scored framework quality baseline | [Framework Quality Assessment](docs/framework-quality-assessment.md) |
 | Run an example or scaffold a unified HTTP, gRPC, or Message service | [10-Minute Quick Start](docs/quickstart.md) |
-| Add gRPC to a service or generate checked contract bindings | [Code Generation](docs/code-generation.md) |
+| Scaffold, inspect, extend, or generate a contract-driven service | [Code Generation](docs/code-generation.md) |
 | Add health, Prometheus, Zap, and OTel wiring | [Observability Example](examples/observability/main.go) |
 | Choose protocols and application structure | [Recommended Golden Path](docs/golden-path.md) |
 | Understand compile-time dependency boundaries | [Dependency Boundaries](docs/dependency-boundaries.md) |
@@ -106,6 +108,20 @@ one checked transaction, and is a no-op when gRPC is already present. It does
 not edit `cmd/<service>/main.go` or run `go mod tidy`. See
 [Code Generation](docs/code-generation.md#add-grpc-to-a-service) for supported
 project versions and safety behavior.
+
+Contract-driven projects can also inspect their declared APIs without scanning
+application Go code or starting the server:
+
+```sh
+kpro list api --root ../hello-kpro
+kpro describe service --root ../hello-kpro
+```
+
+OpenAPI generation includes a typed `contract.API` HTTP client alongside the
+server adapter. Organizations that need a repeatable project shape can pass a
+strict local `kpro.dev/scaffold-template/v1alpha1` overlay to
+`kpro new --template <directory>`; overlays are declarative and never execute
+template hooks or remote content.
 
 The tagged `v0.1.0` CLI and documentation remain internally consistent but
 predate the dependency-neutral mounting API. Do not combine source examples

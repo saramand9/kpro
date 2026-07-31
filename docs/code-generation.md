@@ -60,11 +60,11 @@ The old `http-api` profile has been removed. Its replacement is
 `--profile service --api http`; add further `--api` selections instead of
 choosing another protocol-specific profile.
 
-Both profiles require a missing or empty target directory. When publishing into
-an existing empty directory, KPro preserves its Unix permission bits, but
-replaces the directory itself; platform-specific ACLs and other metadata are
-not guaranteed to be retained. When the CLI is run from a KPro checkout, it
-records that checkout as a local `replace` in the new module.
+Both profiles require the target path not to exist. KPro renders and validates
+the complete project in a sibling staging directory, then publishes it with one
+directory rename; it never removes or replaces a pre-existing target. When the
+CLI is run from a KPro checkout, it records that checkout as a local `replace`
+in the new module.
 `--kpro-replace <checkout>` selects one explicitly. A release-built CLI pins
 its release when no replacement is supplied.
 
@@ -79,7 +79,8 @@ api/message/messages.yaml                Message contract, when selected
 kpro.service.yaml                        selected APIs and Message transports
 kpro.gen.yaml                            generation manifest
 kpro.gen.lock.json                       content-addressed generation lock
-internal/httpapi/                        HTTP types, contract, adapter, service
+kpro.scaffold.lock.json                  local-template provenance, when selected
+internal/httpapi/                        HTTP types, contract, server adapter, typed client, service
 internal/grpcapi/                        protobuf, gRPC adapter, service
 internal/messageapi/                     Message types, contract, adapter, service
 internal/kproapp/endpoints.gen.go         generated selected-endpoint assembly
@@ -130,6 +131,77 @@ start; the scaffold does not generate or commit a private key.
 
 If `kpro` is not installed, use the CLI from the pinned KPro checkout in the
 same way the repository examples do.
+
+## Local scaffold template overlays
+
+`kpro new --template <directory>` can apply an organization-owned overlay to
+either built-in profile. The directory is local and must contain
+`kpro.template.yaml`; KPro does not fetch a URL or Git reference and does not
+run hooks, scripts, or commands from the template.
+
+```yaml
+apiVersion: kpro.dev/scaffold-template/v1alpha1
+name: company-service
+version: v1.2.0
+profile: service
+files:
+  - source: files/readme.md.tmpl
+    target: README.md
+    action: replace
+  - source: files/deploy.yaml.tmpl
+    target: deploy/{{.ServiceName}}.yaml
+    action: add
+    mode: "0644"
+    when:
+      apis: [http]
+  - source: files/run.sh.tmpl
+    target: scripts/run.sh
+    action: add
+    mode: "0755"
+```
+
+The `profile` must equal the selected `minimal` or `service` profile. Template
+versions use Go semantic-version syntax, including the leading `v`. Each file
+uses one of two actions:
+
+- `replace` may replace only a built-in file selected for this invocation. It
+  cannot replace generator output or remove a built-in file.
+- `add` creates a new path and fails if that path aliases, contains, or is
+  contained by another planned file.
+
+`mode` is optional and accepts only the strings `"0644"` and `"0755"`. An
+added file defaults to `0644`; a replacement without a mode retains the
+built-in file's mode. Every value in `when.apis` and `when.transports` must be
+selected for the file to participate. Conditions are invalid for the
+`minimal` profile.
+
+Targets and text bodies use Go `text/template` with `missingkey=error` and no
+custom template functions. The supported data is the same versioned alpha data
+used by the built-in scaffold:
+
+| Field | Meaning |
+| --- | --- |
+| `Module` | Selected Go module path. |
+| `ServiceName` | Original service name. |
+| `ServiceIdentifier`, `ServiceExported`, `ServiceFileStem` | Derived Go identifier, exported identifier, and lowercase file stem. |
+| `KProModule`, `KProVersion`, `KProReplace` | KPro module, selected version, and the Go-quoted local replacement value when present. |
+| `APIList`, `TransportList` | Canonically ordered, comma-separated selections. |
+| `HasHTTP`, `HasGRPC`, `HasMessage` | API-selection booleans. |
+| `HasTCP`, `HasKCP`, `HasQUIC`, `HasUDP`, `HasWebSocket` | Message-transport selection booleans. |
+
+The manifest, every named source, and all rendered targets are validated before
+the target project is created. Template roots and source components must be
+real directories or regular files rather than symbolic links. Paths receive
+the same traversal, Windows portability, case-folding, Unicode-normalization,
+duplicate, and file/parent checks as generated outputs. All sources are read
+into one in-memory snapshot before planning.
+
+The completed project records `kpro.scaffold.lock.json` with the template name,
+version, profile, SHA-256 snapshot digest, and KPro build identity. It never
+records the local template directory. This is provenance, not a mechanism for
+reapplying an overlay to an existing project: `kpro new` still requires a
+missing target, renders into a sibling staging directory, runs service
+generation there, and publishes only after the complete result succeeds.
 
 ## Add gRPC to a service
 
@@ -251,9 +323,12 @@ kpro validate
 kpro generate
 kpro generate --dry-run
 kpro generate --check
+kpro list api
+kpro describe service
 
 kpro validate --root ../orders --config config/public.yaml
 kpro generate --root ../orders --config config/public.yaml --check
+kpro list api --root ../orders --config config/public.yaml --format json
 ```
 
 The commands have distinct purposes:
@@ -268,8 +343,49 @@ The commands have distinct purposes:
   proposed creates, updates, removals, and lock changes without writing.
 - `generate --check` performs the same work without writing and exits with an
   error if applying the plan would change any output or the lock. Use it in CI.
+- `list api` renders each declared HTTP operation, gRPC method, and Message
+  route.
+- `describe service` summarizes the manifest sources and, when present, the
+  selected `kpro.service.yaml` endpoint assembly.
 
 `--check` and `--dry-run` are mutually exclusive.
+
+### Contract catalogs
+
+`list api` and `describe service` are all-or-nothing, read-only views of the
+version-controlled contracts. They do not scan application Go code, inspect a
+running process, claim that a route was conditionally mounted, compare the
+generation lock, or modify the project. If any source is invalid, the command
+returns an error without writing a partial catalog to standard output.
+
+Text output is deterministically ordered for humans and visibly escapes C0/C1,
+DEL, and Unicode format characters from contract-controlled values. `--format
+json` emits a machine-readable alpha document and preserves those original
+values through normal JSON escaping:
+
+```json
+{
+  "apiVersion": "kpro.dev/catalog/v1alpha1",
+  "kind": "APIList",
+  "module": "example.com/orders",
+  "service": "orders",
+  "manifest": "kpro.gen.yaml",
+  "apis": []
+}
+```
+
+`describe service` uses `kind: "ServiceDescription"` and additionally includes
+`assembly`, `sources`, and the complete API list. Collection fields are stable
+JSON arrays, including when empty. The catalog schema and generated APIs remain
+pre-1.0 `v1alpha1` contracts.
+
+OpenAPI and Message sources pass the same pure in-memory backend planning used
+by generation before they are listed. A protobuf catalog asks `protoc` for an
+isolated descriptor set so it can report service and method names, request and
+response types, and unary/client/server/bidirectional streaming shape. This
+inspection requires `protoc`, but it neither requires nor invokes
+`protoc-gen-go` or `protoc-gen-go-grpc`. External-plugin sources are rejected
+before any inspector runs; catalog commands never execute generator plugins.
 
 The lock is scoped to the manifest path. The default `kpro.gen.yaml` uses
 `kpro.gen.lock.json`; `config/public.yaml` uses
@@ -352,7 +468,8 @@ An OpenAPI source uses:
 The current backend deliberately accepts a small OpenAPI 3.0.3 subset and
 returns an error for unsupported features before any project output is written.
 It generates transport-neutral types, an application interface, checked
-`httpx` route registration, and a create-once service implementation.
+`httpx` route registration, a typed HTTP client implementing the same
+application interface, and a create-once service implementation.
 
 Supported operations and bindings:
 
@@ -368,6 +485,16 @@ Supported operations and bindings:
 - component schemas composed from scalar values, arrays, objects, and local
   component references within the checked subset; required object properties
   are values and optional properties are pointers in generated Go types.
+
+Paths must be canonical application routes: raw query/fragment delimiters,
+repeated slashes, malformed or non-UTF-8 escaping, control/format characters,
+and raw or encoded `.`/`..` segments are rejected. Header names must be valid
+HTTP field names, are unique without regard to case, and cannot claim
+representation or hop-by-hop headers controlled by the generated HTTP binding.
+These checks also apply when a caller constructs the exported generator IR
+directly instead of using the OpenAPI parser. JSON field names that
+`encoding/json` treats specially and module/output paths containing a Go
+`vendor` segment are rejected before rendering.
 
 The generated request decoder enforces the non-nullable subset at runtime. A
 JSON body equal to `null`, a missing or `null` required property, or an
@@ -385,6 +512,68 @@ therefore becomes a server error instead of an invalid success payload.
 Generated body handling accepts `application/json` media-type parameters,
 returns 415 for another content type, returns 400 for malformed JSON, and lets
 KPro's request-size classification map an oversized body to 413.
+
+### Generated HTTP client
+
+For the default `internal/httpapi` output, the client is generated at:
+
+```text
+internal/httpapi/kprohttpclient/client.gen.go
+```
+
+It is generator-owned and includes a compile-time assertion that `*Client`
+implements `contract.API`. Construct it rather than using its invalid zero
+value:
+
+```go
+client, err := kprohttpclient.New(kprohttpclient.Config{
+	BaseURL: "https://orders.example.com/gateway",
+})
+if err != nil {
+	return err
+}
+
+var api contract.API = client
+```
+
+Generated methods bind path values with segment-safe URL escaping (including
+`.` and `..`), encode optional query/header parameters only when their pointers
+are non-nil, marshal and validate JSON requests, and require the exact success
+status declared by the contract. Empty string parameters, header control
+characters, and non-finite `number` values are rejected before the request is
+sent; the generated server rejects the same non-finite number spellings. JSON
+success responses must use `application/json` (media-type parameters are
+accepted), fit the configured
+limit, decode successfully, and pass the generated non-null validation. A
+bodyless success such as 204 must not carry bytes.
+
+`Config` has three fields:
+
+| Field | Behavior |
+| --- | --- |
+| `BaseURL` | Required absolute `http` or `https` URL. User information, query, fragment, surrounding whitespace, relative URLs, duplicate slashes, and raw or encoded dot segments are rejected. A canonical fixed path prefix is preserved. |
+| `HTTPClient` | Optional narrow `Doer`. The default is an `http.Client` with a 30-second timeout and redirects disabled; nil and typed-nil custom values are distinguished. A custom `Doer` owns its redirect behavior. |
+| `MaxResponseBytes` | Zero selects the 4 MiB default; a negative value is invalid. The limit applies to success and error responses. |
+
+A non-success response returned without a transport/protocol error becomes a
+`*kprohttpclient.ResponseError`, discoverable through `errors.As`, with
+`StatusCode`, a cloned `Header`, a bounded `Body`, `Truncated`, and an optional
+`Cause`. `Unwrap` preserves a body-read failure for `errors.Is`, including when
+only a partial error body was available. Its `Error` string deliberately
+excludes the response body. If the selected `Doer` instead reports an execution
+error (for example malformed redirect metadata), the client preserves that
+error chain and closes any usable response body it also returned.
+Successful oversized responses fail explicitly. Every usable non-nil response
+body is closed, including when a custom `Doer` returns both a response and an
+error.
+
+The client does not add retries, discovery, authentication, tracing exporters,
+or policy. Supply those through the selected `Doer` and application/platform
+configuration. The default scaffold places the generated packages under Go's
+`internal` boundary, so this client is intended for code in the same module.
+KPro does not yet provide a client-only external SDK layout; choosing a
+non-`internal` source package is an explicit public-package decision affecting
+all outputs for that source.
 
 Not currently supported:
 
@@ -454,13 +643,29 @@ non-protobuf source generation do not need them. They are required when
 three tools before publishing the new project.
 
 The source must use a `.proto` extension and declare at least one gRPC service.
-KPro runs `protoc` in a temporary output directory, collects the standard
-`.pb.go` and `_grpc.pb.go` outputs, validates the declared services against the
-descriptor set, and then adds:
+Before resolving or executing a tool, KPro parses and captures the complete
+recursive import closure. Every dependency must be a safe, regular
+project-relative file; missing files, traversal, symbolic-link escape, portable
+path aliases, and entry names that protoc or its Go plugins would interpret as
+options are rejected. The import scanner handles top-level `weak`, `public`,
+and Edition `option` imports, adjacent string fragments, and protobuf string
+escapes without mistaking fields or options named `import` for declarations.
+
+The captured bytes are materialized under a private temporary input root, so a
+later edit or path replacement in the live project is not what `protoc` reads.
+KPro uses a separate temporary output root, collects the standard `.pb.go` and
+`_grpc.pb.go` outputs, validates the declared services against the descriptor
+set, and then adds:
 
 - a generated checked registration helper targeting
   `grpc.ServiceRegistrar`; and
 - a create-once service implementation scaffold.
+
+The standard `_grpc.pb.go` output already contains the generated
+`<Service>Client` interface and `New<Service>Client` constructor targeting
+`grpc.ClientConnInterface`. KPro intentionally reuses that ecosystem-native
+client instead of generating a second wrapper. The additional KPro files are
+server registration and application scaffolding only.
 
 `transport/grpcx.Server` implements the standard registrar interface, so the
 generated application code does not couple the dependency-neutral `server`
@@ -471,6 +676,8 @@ CI environment. `generate --check` invokes them and compares their planned
 output, so inconsistent tool versions can produce a legitimate generated diff.
 Hermetic backend tests can inject the tool runner, but creating, regenerating,
 or checking a real gRPC service project requires the pinned executables.
+Read-only catalog commands require only `protoc`; they use descriptor output and
+never invoke either Go plugin.
 
 ## KPro message backend
 
@@ -565,6 +772,14 @@ register the service separately on every mounted endpoint that should expose
 it. The backend does not generate HTTP, SSE, or gRPC bindings. Nested payload
 objects, arrays, maps, enums, alternate encodings, and other schema features
 are outside this first contract version.
+
+The Message backend also does not generate an outbound client today. KPro has
+not yet frozen a client runtime contract for dialing, request/sequence
+correlation, reconnect behavior, backpressure, and delivery guarantees across
+all five Message transports. Generating method-shaped stubs without those
+semantics would imply reliability the runtime does not provide; applications
+should use the protocol examples or an application-owned client until that
+runtime boundary is designed explicitly.
 
 ## External generator plugins
 

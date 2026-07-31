@@ -46,7 +46,7 @@ the task explicitly changes that boundary.
 | `observability/` | Optional health, Prometheus, OpenTelemetry, and Zap integrations. |
 | `eventing/` | Event envelopes, transactional delivery store contracts, GORM outbox, projector runner. |
 | `database/` | Database adapters and common lifecycle/resource helpers. |
-| `cmd/kpro/` | Service scaffolding CLI. |
+| `cmd/kpro/` | Service scaffolding, local template overlays, contract catalogs, and code generation CLI. |
 | `cmd/benchguard/` | Benchmark budget enforcement tool. |
 | `examples/` | Standalone and modular protocol examples. |
 | `benchmark/` | Hot-path benchmarks, comparison fixtures, and budget configuration. |
@@ -105,7 +105,8 @@ go test -tags dbintegration ./database/gorm ./eventing/delivery
 The framework now has checked server construction, transport preflight
 validation, one-shot lifecycle ownership, bounded Router queues/in-flight
 limits, transport capacity guards, graceful shutdown behavior, observability
-adapters, event delivery/projector operational controls, scaffolding, and
+adapters, event delivery/projector operational controls, scaffolding,
+declarative template overlays, contract catalogs, typed OpenAPI clients, and
 benchmark budgets.
 
 Remaining maturity gaps are a v1 API freeze, workload-specific load tests,

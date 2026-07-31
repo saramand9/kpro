@@ -197,7 +197,7 @@ func TestBuildPlanDeterministicAndCompiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second BuildPlan: %v", err)
 	}
-	if len(first.Files) != 4 || len(second.Files) != len(first.Files) {
+	if len(first.Files) != 5 || len(second.Files) != len(first.Files) {
 		t.Fatalf("files = %d", len(first.Files))
 	}
 	for i := range first.Files {
@@ -205,14 +205,20 @@ func TestBuildPlanDeterministicAndCompiles(t *testing.T) {
 			t.Fatalf("non-deterministic file %d", i)
 		}
 	}
-	var scaffoldFound bool
+	var scaffoldFound, clientFound bool
 	for _, file := range first.Files {
 		if file.Path == "internal/openapi/service/api.go" {
 			scaffoldFound = file.Ownership == codegen.Scaffold
 		}
+		if file.Path == "internal/openapi/kprohttpclient/client.gen.go" {
+			clientFound = file.Ownership == codegen.Generated
+		}
 	}
 	if !scaffoldFound {
 		t.Fatal("service scaffold missing or not create-once")
+	}
+	if !clientFound {
+		t.Fatal("typed HTTP client missing or not generator-owned")
 	}
 	contract := string(first.Files[0].Content) + string(first.Files[1].Content) + string(first.Files[2].Content)
 	if !strings.Contains(contract, "HandleChecked") || !strings.Contains(contract, "Verbose *bool") || !strings.Contains(contract, "ctx.WriteHeader(http.StatusNoContent)") {
@@ -261,11 +267,7 @@ components:
 	}
 
 	head := strings.Replace(sampleSpec, "    get:\n      operationId: health", "    head:\n      operationId: health", 1)
-	doc, err := Parse([]byte(head))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = BuildPlan(doc, Options{Module: "example.com/generated"}); !errors.Is(err, ErrUnsupported) {
+	if _, err = Parse([]byte(head)); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("HEAD error = %v", err)
 	}
 
@@ -422,8 +424,16 @@ func TestBuildPlanRejectsConflictingRoutesAndRequiredReferenceCycles(t *testing.
 		doc := Document{
 			Components: []Schema{{Name: "Pet", Kind: Object}},
 			Operations: []Operation{
-				{ID: "GetPetByID", Method: "GET", Path: "/pets/{id}", Response: &TypeRef{Name: "Pet"}, Status: 200},
-				{ID: "GetPetByName", Method: "GET", Path: "/pets/{name}", Response: &TypeRef{Name: "Pet"}, Status: 200},
+				{
+					ID: "GetPetByID", Method: "GET", Path: "/pets/{id}",
+					Parameters: []Parameter{{Name: "id", GoName: "ID", In: "path", Type: TypeRef{Kind: String}, Required: true}},
+					Response:   &TypeRef{Name: "Pet"}, Status: 200,
+				},
+				{
+					ID: "GetPetByName", Method: "GET", Path: "/pets/{name}",
+					Parameters: []Parameter{{Name: "name", GoName: "Name", In: "path", Type: TypeRef{Kind: String}, Required: true}},
+					Response:   &TypeRef{Name: "Pet"}, Status: 200,
+				},
 			},
 		}
 		if _, err := BuildPlan(doc, Options{Module: "example.com/generated"}); err == nil || !strings.Contains(err.Error(), "conflicts") {
@@ -448,12 +458,8 @@ func TestBuildPlanRejectsConflictingRoutesAndRequiredReferenceCycles(t *testing.
 func TestUnsupportedMethodsCallbacksAndEmptyDocumentsAreVisible(t *testing.T) {
 	for _, method := range []string{"options", "trace"} {
 		spec := strings.Replace(sampleSpec, "    get:\n      operationId: health", "    "+method+":\n      operationId: health", 1)
-		doc, err := Parse([]byte(spec))
-		if err != nil {
-			t.Fatalf("Parse %s: %v", method, err)
-		}
-		if _, err = BuildPlan(doc, Options{Module: "example.com/generated"}); !errors.Is(err, ErrUnsupported) {
-			t.Fatalf("BuildPlan %s error = %v, want ErrUnsupported", method, err)
+		if _, err := Parse([]byte(spec)); !errors.Is(err, ErrUnsupported) {
+			t.Fatalf("Parse %s error = %v, want ErrUnsupported", method, err)
 		}
 	}
 

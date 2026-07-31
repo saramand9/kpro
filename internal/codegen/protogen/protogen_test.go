@@ -72,7 +72,7 @@ func TestGeneratorBuildsDeterministicStandardAndKProPlan(t *testing.T) {
 	if len(commands) != 2 {
 		t.Fatalf("runner commands = %d, want 2", len(commands))
 	}
-	if !reflect.DeepEqual(commands[0].Args, commands[1].Args) {
+	if !reflect.DeepEqual(commands[0].Args[1:], commands[1].Args[1:]) {
 		t.Fatalf("protoc args are not deterministic:\n%q\n%q", commands[0].Args, commands[1].Args)
 	}
 	assertCommand(t, commands[0], root, value, source, lookup)
@@ -352,12 +352,20 @@ func assertCommand(
 	goPlugin, _ = filepath.Abs(goPlugin)
 	grpcPlugin, _ := lookup("protoc-gen-go-grpc")
 	grpcPlugin, _ = filepath.Abs(grpcPlugin)
+	if len(command.Args) == 0 || !strings.HasPrefix(command.Args[0], "--proto_path=") {
+		t.Fatalf("command.Args[0] = %q, want isolated proto path", command.Args)
+	}
+	snapshotRoot := strings.TrimPrefix(command.Args[0], "--proto_path=")
 	resolvedRoot, err := resolveRoot(root)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if filepath.Clean(snapshotRoot) == filepath.Clean(resolvedRoot) ||
+		filepath.Clean(snapshotRoot) == filepath.Clean(command.Dir) {
+		t.Fatalf("proto path = %q, want input snapshot distinct from project and output", snapshotRoot)
+	}
 	want := []string{
-		"--proto_path=" + resolvedRoot,
+		"--proto_path=" + snapshotRoot,
 		"--descriptor_set_out=" + descriptorFilename,
 		"--include_imports",
 		"--plugin=protoc-gen-go=" + goPlugin,
