@@ -169,6 +169,7 @@ func TestGenerateOpenAPIApplyCheckAndProtectGeneratedFiles(t *testing.T) {
 		"internal/modules/orders/types/types.gen.go",
 		"internal/modules/orders/contract/contract.gen.go",
 		"internal/modules/orders/kprohttp/routes.gen.go",
+		"internal/modules/orders/kprohttpclient/client.gen.go",
 		codegen.DefaultLockFile,
 	} {
 		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(name))); err != nil {
@@ -207,6 +208,7 @@ func TestGenerateOpenAPIDryRunDoesNotWrite(t *testing.T) {
 		"internal/modules/orders/types/types.gen.go",
 		"internal/modules/orders/contract/contract.gen.go",
 		"internal/modules/orders/kprohttp/routes.gen.go",
+		"internal/modules/orders/kprohttpclient/client.gen.go",
 		codegen.DefaultLockFile,
 	} {
 		_, err := os.Stat(filepath.Join(root, filepath.FromSlash(name)))

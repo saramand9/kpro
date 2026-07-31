@@ -50,7 +50,7 @@ go run ./cmd/kpro new ../orders \
   --profile minimal
 ```
 
-The target must be missing or empty. The source-mode generator auto-detects
+The target must not exist. The source-mode generator auto-detects
 this checkout and records it as a quoted local replacement; pass
 `--kpro-replace <checkout>` when running the tool elsewhere. Current `main`
 contains a source-incompatible dependency-boundary change planned for the next
@@ -62,6 +62,21 @@ generated checked bindings, create-once implementations, a content-addressed
 lock, a stable `cmd/<service>` entry point, and endpoint assembly under
 `internal/kproapp`. Review the generated limits and transport configuration for
 the workload, then add real health checks and follow the production checklist.
+For an HTTP contract, generation also creates a typed client under
+`internal/httpapi/kprohttpclient` that implements the same generated
+`contract.API` interface as the server-side service.
+
+Before editing application code, inspect the contract surface and selected
+endpoint assembly:
+
+```sh
+kpro list api
+kpro describe service
+```
+
+These commands describe version-controlled contracts, not conditional runtime
+registrations. Their JSON form (`--format json`) is suitable for checked
+developer tooling while the catalog remains `v1alpha1`.
 
 To grow a current HTTP-only unified service after its client contract requires
 gRPC:

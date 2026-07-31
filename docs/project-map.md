@@ -34,8 +34,8 @@ for application code.
 | `observability/` | Optional integrations for health, Prometheus, OTel, and Zap. | `healthx/`, `prometheusx/`, `otelx/`, `zapx/` |
 | `eventing/` | Event envelopes, delivery store contracts, GORM outbox, projector runner. | `events/`, `delivery/`, `projector/` |
 | `database/` | Database adapters and lifecycle/resource helpers. | `gorm/`, `redis/`, `es/`, `qdrant/`, `mongo/`, `clickhouse/`, `influx/`, `neo4j/`, `common/` |
-| `cmd/kpro/` | CLI for minimal/unified service scaffolding, transactional API additions, contract generation, and version/environment diagnostics. | `main.go`, `scaffold.go`, `command_add.go`, `command_codegen.go`, `service_project.go`, `templates/profiles/service/`, `templates/service-project/` |
-| `internal/codegen/` | Safe generation planning, manifests, content-addressed locks, compare-and-swap file transactions, and OpenAPI, protobuf, Message, and plugin backends. | `transaction.go`, `manifest/`, `openapi/`, `protogen/`, `messagegen/`, `pluginhost/` |
+| `cmd/kpro/` | CLI for minimal/unified service scaffolding, versioned local overlays, read-only contract catalogs, transactional API additions, generation, and version/environment diagnostics. | `main.go`, `scaffold.go`, `scaffold_template.go`, `command_catalog.go`, `command_add.go`, `command_codegen.go`, `service_project.go`, `templates/profiles/service/`, `templates/service-project/` |
+| `internal/codegen/` | Safe generation planning, manifests, content-addressed locks, compare-and-swap file transactions, descriptor-only protobuf inspection, and OpenAPI, protobuf, Message, and plugin backends. | `transaction.go`, `manifest/`, `openapi/`, `protogen/`, `messagegen/`, `pluginhost/` |
 | `cmd/benchguard/` | Benchmark budget checker used by CI. | `main.go` |
 | `examples/` | Protocol and modular application examples. | `quickstart/`, protocol-specific directories |
 | `benchmark/` | Microbenchmarks, budget config, and comparison fixtures. | `budgets.json`, `protocol_benchmark_test.go`, `compare/` |

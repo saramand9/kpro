@@ -27,8 +27,6 @@ import (
 
 	"github.com/saramand9/kpro/internal/codegen"
 	"github.com/saramand9/kpro/internal/codegen/manifest"
-	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/descriptorpb"
 )
 
 const descriptorFilename = "kpro_descriptor_set.pb"
@@ -100,9 +98,11 @@ func (g Generator) PlanContext(ctx context.Context, value manifest.Manifest, sou
 	if err != nil {
 		return nil, err
 	}
-	if err := validateInput(root, source.Path); err != nil {
-		return nil, err
+	snapshot, err := captureImportClosure(root, source.Path)
+	if err != nil {
+		return nil, fmt.Errorf("proto codegen: validate import closure: %w", err)
 	}
+	source.Path = snapshot.sourcePath
 
 	lookup := g.LookupTool
 	if lookup == nil {
@@ -113,16 +113,22 @@ func (g Generator) PlanContext(ctx context.Context, value manifest.Manifest, sou
 		return nil, err
 	}
 
-	temporary, err := os.MkdirTemp("", "kpro-protoc-*")
+	inputRoot, err := materializeImportSnapshot(snapshot)
+	if err != nil {
+		return nil, fmt.Errorf("proto codegen: %w", err)
+	}
+	defer os.RemoveAll(inputRoot)
+
+	outputRoot, err := os.MkdirTemp("", "kpro-protoc-output-*")
 	if err != nil {
 		return nil, fmt.Errorf("proto codegen: create isolated output directory: %w", err)
 	}
-	defer os.RemoveAll(temporary)
+	defer os.RemoveAll(outputRoot)
 
 	command := Command{
 		Path: tools.protoc,
-		Args: protocArgs(root, value, source, tools),
-		Dir:  temporary,
+		Args: protocArgs(inputRoot, value, source, tools),
+		Dir:  outputRoot,
 	}
 	runner := g.Runner
 	if runner == nil {
@@ -137,23 +143,23 @@ func (g Generator) PlanContext(ctx context.Context, value manifest.Manifest, sou
 		return nil, fmt.Errorf("proto codegen: protoc failed: %w: %s", err, detail)
 	}
 
-	serviceCount, err := readServiceCount(filepath.Join(temporary, descriptorFilename), source.Path)
+	contract, err := loadDescriptorSet(filepath.Join(outputRoot, descriptorFilename), source.Path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("proto codegen: %w", err)
 	}
-	if serviceCount == 0 {
+	if len(contract.Services) == 0 {
 		return nil, fmt.Errorf("proto codegen: source %q declares no gRPC services", source.Path)
 	}
 
-	outputs, packageName, registrations, err := collectGenerated(temporary, source.Package)
+	outputs, packageName, registrations, err := collectGenerated(outputRoot, source.Package)
 	if err != nil {
 		return nil, err
 	}
-	if len(registrations) != serviceCount {
+	if len(registrations) != len(contract.Services) {
 		return nil, fmt.Errorf(
 			"proto codegen: protoc generated %d service registrations for %d declared services",
 			len(registrations),
-			serviceCount,
+			len(contract.Services),
 		)
 	}
 
@@ -203,20 +209,9 @@ func resolveTools(lookup LookupTool) (resolvedTools, error) {
 		{name: "protoc-gen-go", target: &result.protocGo},
 		{name: "protoc-gen-go-grpc", target: &result.protocGoGRPC},
 	} {
-		found, err := lookup(required.name)
+		absolute, err := resolveTool(lookup, required.name)
 		if err != nil {
-			return resolvedTools{}, fmt.Errorf(
-				"proto codegen: required tool %q was not found; install it and ensure it is on PATH: %w",
-				required.name,
-				err,
-			)
-		}
-		if strings.TrimSpace(found) == "" {
-			return resolvedTools{}, fmt.Errorf("proto codegen: required tool %q resolved to an empty path", required.name)
-		}
-		absolute, err := filepath.Abs(found)
-		if err != nil {
-			return resolvedTools{}, fmt.Errorf("proto codegen: resolve tool %q: %w", required.name, err)
+			return resolvedTools{}, fmt.Errorf("proto codegen: %w", err)
 		}
 		*required.target = absolute
 	}
@@ -265,30 +260,6 @@ func resolveRoot(configured string) (string, error) {
 	return resolved, nil
 }
 
-func validateInput(root, portablePath string) error {
-	normalized, err := codegen.SafeRelativePath(portablePath)
-	if err != nil {
-		return fmt.Errorf("proto codegen: unsafe source path %q: %w", portablePath, err)
-	}
-	filename := filepath.Join(root, filepath.FromSlash(normalized))
-	resolved, err := filepath.EvalSymlinks(filename)
-	if err != nil {
-		return fmt.Errorf("proto codegen: resolve source %q: %w", portablePath, err)
-	}
-	relative, err := filepath.Rel(root, resolved)
-	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("proto codegen: source %q resolves outside the project root", portablePath)
-	}
-	info, err := os.Stat(resolved)
-	if err != nil {
-		return fmt.Errorf("proto codegen: inspect source %q: %w", portablePath, err)
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("proto codegen: source %q is not a regular file", portablePath)
-	}
-	return nil
-}
-
 func manifestContains(value manifest.Manifest, source manifest.Source) bool {
 	for _, candidate := range value.Sources {
 		if candidate == source {
@@ -296,23 +267,6 @@ func manifestContains(value manifest.Manifest, source manifest.Source) bool {
 		}
 	}
 	return false
-}
-
-func readServiceCount(filename, sourcePath string) (int, error) {
-	data, err := os.ReadFile(filename)
-	if err != nil {
-		return 0, fmt.Errorf("proto codegen: read descriptor set: %w", err)
-	}
-	var descriptor descriptorpb.FileDescriptorSet
-	if err := proto.Unmarshal(data, &descriptor); err != nil {
-		return 0, fmt.Errorf("proto codegen: decode descriptor set: %w", err)
-	}
-	for _, file := range descriptor.File {
-		if file.GetName() == sourcePath {
-			return len(file.Service), nil
-		}
-	}
-	return 0, fmt.Errorf("proto codegen: descriptor set does not contain source %q", sourcePath)
 }
 
 type registration struct {
