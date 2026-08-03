@@ -28,8 +28,17 @@ upgrading between minor versions.
   configurable `MaxPendingBytes` accounting alongside `SendQueueSize`, plus the
   optional `core.SessionOutboundState` high/low-watermark snapshot.
 - Performance CI now requires three samples for Router, HTTP, outbound-queue,
-  transport dispatch-gate, and codec hot paths; explicit zero budgets enforce
-  the allocation-free outbound accounting and dispatch-gate paths.
+  transport dispatch-gate, codec, and TCP send-admission hot paths; explicit
+  zero budgets enforce allocation-free outbound accounting, batch drain,
+  dispatch-gate, segmented KProV1 encoding, default KProV1 TCP send admission,
+  and the in-memory TCP/WebSocket batch writer loops.
+- `codec.StreamFrameCodec` lets fixed-header stream codecs expose a segmented
+  header-plus-payload representation, while `core.SessionReserveOutboundBuffer`
+  discovers an optional TCP ownership-transfer path for applications that can
+  encode directly into transport-owned payload storage.
+- A source-based KPro/Netty performance baseline separates connection count
+  from active load, records the current architectural gaps, and orders future
+  optimization work without asserting unmeasured cross-framework ratios.
 - OpenAPI generation now emits a bounded, typed HTTP client implementing the
   generated application contract, with checked URL/parameter binding, exact
   success statuses, response media-type validation, and structured
@@ -69,6 +78,12 @@ upgrading between minor versions.
 
 ### Changed
 
+- TCP and WebSocket writers non-blockingly drain bounded FIFO batches and use
+  `net.Buffers` gather submissions subject to `MaxWriteBatchFrames` and
+  `MaxWriteBatchBytes`. TCP additionally bounds reusable idle payload storage
+  with `MaxRetainedBufferBytes`. These new exported config fields are a
+  pre-1.0 source change for positional struct literals; applications should use
+  keyed config literals.
 - Router message invocation state is pooled and route operation names are
   precomputed, reducing the guarded dispatch path from 200 B/3 allocations to
   24 B/1 allocation per operation on the recorded baseline.
@@ -104,6 +119,10 @@ upgrading between minor versions.
 
 ### Fixed
 
+- Batched TCP/WebSocket writes reject silent short writes, release every
+  drained item on failure, clear reusable vector references after completion,
+  and prevent WebSocket data from being written after a close frame. Reused
+  application-visible payload buffers clear their full capacity before handoff.
 - Message transport sends can no longer commit after concurrent session close;
   outbound count/byte reservations are also released on encode errors, codec
   panics, failed writes, and close-time queue drain.

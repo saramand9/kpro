@@ -31,14 +31,16 @@ import (
 )
 
 const (
-	DefaultAddr             = ":8091"
-	DefaultPath             = "/ws"
-	DefaultMaxMessage       = 64 * 1024
-	DefaultMaxConnections   = 10000
-	DefaultSendQueueSize    = 64
-	DefaultReadTimeout      = 90 * time.Second
-	DefaultWriteTimeout     = 5 * time.Second
-	DefaultHandshakeTimeout = 5 * time.Second
+	DefaultAddr                = ":8091"
+	DefaultPath                = "/ws"
+	DefaultMaxMessage          = 64 * 1024
+	DefaultMaxConnections      = 10000
+	DefaultSendQueueSize       = 64
+	DefaultMaxWriteBatchFrames = 16
+	DefaultMaxWriteBatchBytes  = 256 * 1024
+	DefaultReadTimeout         = 90 * time.Second
+	DefaultWriteTimeout        = 5 * time.Second
+	DefaultHandshakeTimeout    = 5 * time.Second
 
 	opContinuation = 0x0
 	opText         = 0x1
@@ -76,9 +78,14 @@ type Config struct {
 	// MaxPendingBytes caps frame payload bytes reserved for encoding, queued, or
 	// currently being written per session. Zero derives SendQueueSize * MaxMessage.
 	MaxPendingBytes int64
+	// MaxWriteBatchFrames caps frames gathered by one non-blocking queue drain.
+	MaxWriteBatchFrames int
+	// MaxWriteBatchBytes caps bytes submitted by one gather-write call. A
+	// single oversized admitted frame is still written to ensure progress.
+	MaxWriteBatchBytes int64
 	// ReadTimeout is applied before each WebSocket frame read.
 	ReadTimeout time.Duration
-	// WriteTimeout is applied before each WebSocket frame write.
+	// WriteTimeout is applied before each WebSocket gather-write batch.
 	WriteTimeout time.Duration
 	// HandshakeTimeout bounds reading the HTTP upgrade headers.
 	HandshakeTimeout time.Duration
@@ -460,6 +467,14 @@ type session struct {
 	done      chan struct{}
 	closeOnce sync.Once
 	writeMu   sync.Mutex
+	// closeRequested is published before a direct close writer waits for
+	// writeMu. The batch writer checks it between byte-bounded submissions so
+	// a close cannot be delayed by every remaining sub-batch.
+	closeRequested      atomic.Bool
+	directCloseComplete atomic.Bool
+	// closing is protected by writeMu and prevents a queued data batch from
+	// being written after a close control frame.
+	closing bool
 }
 
 var _ core.OutboundStateProvider = (*session)(nil)
@@ -720,17 +735,16 @@ func (s *session) handleMessage(handler core.Handler, payload []byte) error {
 }
 
 func (s *session) writeLoop() {
+	writer := newSessionBatchWriter(s.server.config)
 	for {
 		select {
 		case item := <-s.sendQueue.Items():
-			frame := item.Value
-			if err := s.writeWebSocketFrame(frame.opcode, frame.payload); err != nil {
-				item.Done()
+			closeAfterWrite, err := writer.writeAvailable(s, &item)
+			if err != nil {
 				_ = s.Close()
 				return
 			}
-			item.Done()
-			if frame.opcode == opClose {
+			if closeAfterWrite {
 				_ = s.Close()
 				return
 			}
@@ -760,8 +774,21 @@ func (s *session) outboundError(err error) error {
 }
 
 func (s *session) writeWebSocketFrame(opcode byte, payload []byte) error {
+	directClose := opcode == opClose
+	if directClose {
+		s.closeRequested.Store(true)
+	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	if directClose {
+		defer s.directCloseComplete.Store(true)
+	}
+	if s.closing {
+		return nil
+	}
+	if directClose {
+		s.closing = true
+	}
 	if s.server.config.WriteTimeout > 0 {
 		if err := s.raw.SetWriteDeadline(time.Now().Add(s.server.config.WriteTimeout)); err != nil {
 			return err
@@ -964,6 +991,15 @@ func normalizeConfig(config Config) Config {
 	}
 	if config.MaxPendingBytes <= 0 {
 		config.MaxPendingBytes = outbound.ByteLimit(config.SendQueueSize, int64(config.MaxMessage))
+	}
+	if config.MaxWriteBatchFrames <= 0 {
+		config.MaxWriteBatchFrames = DefaultMaxWriteBatchFrames
+	}
+	if config.MaxWriteBatchFrames > config.SendQueueSize {
+		config.MaxWriteBatchFrames = config.SendQueueSize
+	}
+	if config.MaxWriteBatchBytes <= 0 {
+		config.MaxWriteBatchBytes = min(int64(DefaultMaxWriteBatchBytes), config.MaxPendingBytes)
 	}
 	if config.ReadTimeout <= 0 {
 		config.ReadTimeout = DefaultReadTimeout

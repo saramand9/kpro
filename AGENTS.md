@@ -33,6 +33,10 @@ the task explicitly changes that boundary.
    shape.
 6. [docs/production-readiness.md](docs/production-readiness.md) for production
    boundaries and required external validation.
+7. [docs/performance-fast-path.md](docs/performance-fast-path.md) and
+   [docs/netty-performance-baseline.md](docs/netty-performance-baseline.md)
+   before changing TCP/WebSocket batching, buffer ownership, or performance
+   claims.
 
 ## Package Map
 
@@ -89,7 +93,7 @@ or large commit:
 gofmt -w <changed-go-files>
 go mod tidy -diff
 go vet ./...
-go test -bench=. -benchmem ./benchmark > benchmark.out
+go test -p 1 ./core ./transport/httpx ./transport/internal/outbound ./transport/internal/dispatchgate ./transport/tcp ./transport/websocket ./benchmark -run '^$' -bench 'Benchmark(RouterDispatchSync|EndpointServeHTTP|OutboundQueueRoundTrip|OutboundQueueDrainAvailable|GateBeginEnd|KProCodec|SessionSendContiguous|SessionSendSegmented|ReserveOutboundBufferCommit|TCPSessionBatchWrite16x1KiB|WebSocketSessionBatchWrite16x1KiB)$' -benchmem -benchtime=250ms -count=3 > benchmark.out
 go run ./cmd/benchguard -budget benchmark/budgets.json -input benchmark.out
 ```
 

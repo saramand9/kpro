@@ -37,6 +37,11 @@
       "max_bytes_per_op": 0,
       "max_allocs_per_op": 0
     },
+    "BenchmarkOutboundQueueDrainAvailable": {
+      "max_ns_per_op": 20000,
+      "max_bytes_per_op": 0,
+      "max_allocs_per_op": 0
+    },
     "BenchmarkGateBeginEnd": {
       "max_ns_per_op": 200,
       "max_bytes_per_op": 0,
@@ -47,10 +52,40 @@
       "max_bytes_per_op": 1152,
       "max_allocs_per_op": 1
     },
+    "BenchmarkKProCodec/segmented_copy_1KiB": {
+      "max_ns_per_op": 200,
+      "max_bytes_per_op": 0,
+      "max_allocs_per_op": 0
+    },
     "BenchmarkKProCodec/decode_packet_1KiB": {
       "max_ns_per_op": 2000,
       "max_bytes_per_op": 1024,
       "max_allocs_per_op": 1
+    },
+    "BenchmarkSessionSendSegmented": {
+      "max_ns_per_op": 1500,
+      "max_bytes_per_op": 0,
+      "max_allocs_per_op": 0
+    },
+    "BenchmarkSessionSendContiguous": {
+      "max_ns_per_op": 3000,
+      "max_bytes_per_op": 1152,
+      "max_allocs_per_op": 1
+    },
+    "BenchmarkReserveOutboundBufferCommit": {
+      "max_ns_per_op": 1500,
+      "max_bytes_per_op": 128,
+      "max_allocs_per_op": 1
+    },
+    "BenchmarkTCPSessionBatchWrite16x1KiB": {
+      "max_ns_per_op": 10000,
+      "max_bytes_per_op": 0,
+      "max_allocs_per_op": 0
+    },
+    "BenchmarkWebSocketSessionBatchWrite16x1KiB": {
+      "max_ns_per_op": 10000,
+      "max_bytes_per_op": 0,
+      "max_allocs_per_op": 0
     }
   }
 }

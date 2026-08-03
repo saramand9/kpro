@@ -21,6 +21,8 @@ Start with the quickstart and golden path. The remaining guides separate impleme
 | --- | --- |
 | [Production Readiness Checklist](production-readiness.md) | Distinguish built-in mechanisms, required configuration, and external production work. |
 | [Operations and Capacity Planning](operations.md) | Failure recovery, runbooks, overload behavior, performance budgets, sizing controls, and load-test evidence. |
+| [Performance Fast Paths](performance-fast-path.md) | Implemented TCP/WebSocket batching and ownership paths, accurate copy terminology, and the KPro-versus-Netty measurement contract. |
+| [KPro and Netty Performance Baseline](netty-performance-baseline.md) | Interpret Netty concurrency claims, compare the current I/O architectures, and prioritize the next measured optimizations. |
 | [API Stability, Versioning, and Deprecation](api-stability.md) | Current pre-1.0 status, SemVer policy, compatibility surface, and upgrade guidance. |
 | [App Server](app-server.md) | How the current `cmd/app` multi-transport application is assembled and run. |
 
@@ -48,6 +50,7 @@ Start with the quickstart and golden path. The remaining guides separate impleme
 | --- | --- |
 | [Call Flow](call-flow.md) | End-to-end flow across TCP, UDP, WebSocket, HTTP, SSE, and gRPC. |
 | [TCP Internal Flow](tcp-internal-flow.md) | Detailed TCP path from bytes to handler and response writes. |
+| [Performance Fast Paths](performance-fast-path.md) | Segmented frames, bounded payload reuse, gather writes, owned buffers, and future performance gates. |
 | [Network Test Requirements](network-test-requirements.md) | Correctness rules for message-transport tests. |
 
 Diagram assets live under [assets/](assets/).

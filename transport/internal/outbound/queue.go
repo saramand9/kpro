@@ -52,6 +52,7 @@ type Queue[T any] struct {
 	mu sync.Mutex
 
 	items              chan Item[T]
+	finalize           func(T)
 	closed             bool
 	pendingFrames      int
 	pendingBytes       int64
@@ -87,9 +88,21 @@ type Item[T any] struct {
 // New creates a bounded queue. Invalid internal configuration is a programmer
 // error and panics during transport construction.
 func New[T any](config Config) *Queue[T] {
+	return newQueue[T](config, nil)
+}
+
+// NewWithFinalizer creates a bounded queue that invokes finalize exactly once
+// when an admitted item is completed or discarded by Close. The callback runs
+// after queue accounting is released and without holding the queue lock.
+func NewWithFinalizer[T any](config Config, finalize func(T)) *Queue[T] {
+	return newQueue(config, finalize)
+}
+
+func newQueue[T any](config Config, finalize func(T)) *Queue[T] {
 	config = normalizeConfig(config)
 	return &Queue[T]{
 		items:              make(chan Item[T], config.MaxFrames),
+		finalize:           finalize,
 		maxFrames:          config.MaxFrames,
 		maxBytes:           config.MaxBytes,
 		maxWaiters:         config.MaxWaiters,
@@ -260,12 +273,20 @@ func (i *Item[T]) Done() {
 	if i == nil || i.queue == nil {
 		return
 	}
-	i.queue.mu.Lock()
+	queue := i.queue
+	queue.mu.Lock()
+	released := false
+	var value T
 	if i.active {
-		i.queue.releaseLocked(i.bytes)
+		value = i.Value
+		queue.releaseLocked(i.bytes)
 		i.active = false
+		released = true
 	}
-	i.queue.mu.Unlock()
+	queue.mu.Unlock()
+	if released && queue.finalize != nil {
+		queue.finalize(value)
+	}
 }
 
 // Close rejects future reservations and releases every item still queued.
@@ -289,11 +310,28 @@ func (q *Queue[T]) Close() {
 			drained = append(drained, item)
 		default:
 			q.mu.Unlock()
-			for index := range drained {
-				drained[index].Done()
-			}
+			doneAll(drained)
 			return
 		}
+	}
+}
+
+// doneAll completes every item even if a user-supplied internal finalizer
+// panics, then propagates the first panic after queue accounting is consistent.
+func doneAll[T any](items []Item[T]) {
+	var firstPanic any
+	for index := range items {
+		func(item *Item[T]) {
+			defer func() {
+				if recovered := recover(); recovered != nil && firstPanic == nil {
+					firstPanic = recovered
+				}
+			}()
+			item.Done()
+		}(&items[index])
+	}
+	if firstPanic != nil {
+		panic(firstPanic)
 	}
 }
 

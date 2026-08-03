@@ -26,10 +26,10 @@ for application code.
 
 | Path | Primary role | Key files |
 | --- | --- | --- |
-| `core/` | Transport-neutral runtime primitives, message dispatch, and optional session capabilities. | `router.go`, `router_config.go`, `context.go`, `session_lifecycle.go`, `outbound_state.go`, `invocation.go`, `backpressure.go`, `lifecycle.go` |
+| `core/` | Transport-neutral runtime primitives, message dispatch, and optional session capabilities. | `router.go`, `router_config.go`, `context.go`, `session_lifecycle.go`, `outbound_state.go`, `outbound_buffer.go`, `invocation.go`, `backpressure.go`, `lifecycle.go` |
 | `server/` | Dependency-neutral process owner for mounted transport contracts, middleware, readiness, component error provenance, and managed resources. | `server.go`, `mount.go`, `component_error.go`, `lifecycle.go` |
 | `transport/` | Shared transport contracts, optional quiesce/readiness capabilities, handler-error policy, public extension helpers, capability descriptors, validation, built-in protocol packages, and their private dispatch/outbound controls. | `transport.go`, `handler_error.go`, `transportkit/`, `capability.go`, `validation.go`, `internal/dispatchgate/`, `internal/outbound/` |
-| `codec/` | Binary protocol implementation for KPro message traffic. | `kpro.go`, `codec.go` |
+| `codec/` | Binary protocol implementation and optional segmented-frame contract for KPro message traffic. | `kpro.go`, `kpro_segmented.go`, `segmented.go`, `codec.go` |
 | `middleware/` | Reusable invocation middleware. | `recover.go`, `ratelimit.go`, `limit.go`, `metrics.go` |
 | `observability/` | Optional integrations for health, Prometheus, OTel, and Zap. | `healthx/`, `prometheusx/`, `otelx/`, `zapx/` |
 | `eventing/` | Event envelopes, delivery store contracts, GORM outbox, projector runner. | `events/`, `delivery/`, `projector/` |
@@ -39,7 +39,7 @@ for application code.
 | `cmd/benchguard/` | Multi-sample benchmark budget checker used by CI; latency uses a median while memory limits apply to every sample. | `main.go` |
 | `examples/` | Protocol and modular application examples. | `quickstart/`, protocol-specific directories |
 | `benchmark/` | Deterministic hot-path and protocol benchmarks, budget config, and comparison fixtures. | `budgets.json`, `codec_benchmark_test.go`, `protocol_benchmark_test.go`, `compare/` |
-| `docs/` | Guides for adoption, operation, extension, and internal flows. | `README.md`, `quickstart.md`, `golden-path.md`, `operations.md` |
+| `docs/` | Guides for adoption, operation, extension, internal flows, and performance evidence. | `README.md`, `quickstart.md`, `golden-path.md`, `operations.md`, `performance-fast-path.md` |
 
 The compile-time dependency rules for these packages are documented in
 [Dependency Boundaries](dependency-boundaries.md).
