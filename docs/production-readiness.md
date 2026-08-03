@@ -77,6 +77,18 @@ Status terms used below:
 - [ ] **Configure and verify:** Size both outbound limits from encoded payload
   percentiles and slow-consumer tests. Treat `MaxPendingBytes` as retained
   outbound accounting, not a whole-process heap bound.
+- [ ] **Built in:** TCP and WebSocket writers gather bounded FIFO batches.
+  TCP's `MaxRetainedBufferBytes` separately caps idle payload storage retained
+  after writes; it does not replace per-session pending-byte accounting.
+- [ ] **Configure and verify:** Set `MaxWriteBatchFrames`,
+  `MaxWriteBatchBytes`, and TCP `MaxRetainedBufferBytes` from measured
+  throughput, tail-latency, connection-count, and slow-consumer behavior.
+  Treat `net.Buffers` as a non-concatenating gather path whose syscall effect
+  must be measured on the deployment platform, not as kernel zero-copy.
+- [ ] **Configure and verify:** Include TCP payload size-class capacity in
+  memory sizing. `MaxPendingBytes` accounts admitted logical wire bytes, while
+  active pooled capacity rounds non-empty payloads to a 16-byte minimum and
+  then a power of two; `SendQueueSize` supplies the accompanying count bound.
 - [ ] **Built in:** `core.SessionOutboundState` reports optional
   point-in-time pending/max write and byte counts, current/max waiting writers,
   and high/low-watermark hysteresis for built-in message sessions.
@@ -89,6 +101,10 @@ Status terms used below:
   `Send`/`Reply` result as authoritative, including
   `core.ErrSendQueueFull`. TCP, KCP, QUIC, and WebSocket close the session
   on hard outbound-full, while UDP leaves its virtual peer open.
+- [ ] **Configure and verify:** Use `core.SessionReserveOutboundBuffer` only
+  when response encoding can fill the returned bytes directly. Always release
+  an uncommitted reservation, and fall back to `Session.Send` when the optional
+  capability reports unsupported.
 - [ ] **Configure and verify:** Set `RateLimitConfig.IdleTimeout` and `MaxBuckets` for connection/IP limiters, and ensure custom native invocations publish a stable per-connection `ConnDone` signal rather than a request-scoped cancellation channel.
 - [ ] **Configure and verify:** Set transport connection/session/stream caps,
   message or frame limits, both outbound queue limits, and read/write/idle

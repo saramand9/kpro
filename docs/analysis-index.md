@@ -50,6 +50,11 @@ Use this route for a general project assessment:
 9. Check [benchmark/budgets.json](../benchmark/budgets.json) and
    [benchmark/RESULTS.md](../benchmark/RESULTS.md) before making performance
    claims.
+10. Read [performance-fast-path.md](performance-fast-path.md) before changing
+    TCP/WebSocket write batching, buffer ownership, or cross-framework claims.
+11. Use [netty-performance-baseline.md](netty-performance-baseline.md) for the
+    current source-level gap analysis, concurrency terminology, and next
+    performance priorities.
 
 Use this route for code-level runtime analysis:
 
@@ -93,7 +98,7 @@ Use this route for eventing/data analysis:
 | Observability | `observability/healthx/`, `observability/prometheusx/`, `observability/otelx/`, `observability/zapx/` |
 | Event delivery | `eventing/delivery/`, `eventing/projector/` |
 | Scaffolding, template overlays, API catalogs, incremental additions, and code generation | `cmd/kpro/`, `cmd/kpro/scaffold_template.go`, `cmd/kpro/command_catalog.go`, `cmd/kpro/service_project.go`, `cmd/kpro/templates/profiles/service/`, `cmd/kpro/templates/service-project/`, `internal/codegen/`, `docs/code-generation.md` |
-| Performance budgets | `benchmark/`, `cmd/benchguard/` |
+| Performance paths and budgets | `docs/performance-fast-path.md`, `docs/netty-performance-baseline.md`, `benchmark/`, `cmd/benchguard/`, `transport/internal/bufferpool/` |
 
 ## Checks To Reuse
 
@@ -126,7 +131,7 @@ go vet ./...
 Benchmark budget check:
 
 ```sh
-go test -p 1 ./core ./transport/httpx ./transport/internal/outbound ./benchmark -run '^$' -bench 'Benchmark(RouterDispatchSync|EndpointServeHTTP|OutboundQueueRoundTrip|KProCodec)$' -benchmem -benchtime=250ms -count=3 > benchmark.out
+go test -p 1 ./core ./transport/httpx ./transport/internal/outbound ./transport/internal/dispatchgate ./transport/tcp ./transport/websocket ./benchmark -run '^$' -bench 'Benchmark(RouterDispatchSync|EndpointServeHTTP|OutboundQueueRoundTrip|OutboundQueueDrainAvailable|GateBeginEnd|KProCodec|SessionSendContiguous|SessionSendSegmented|ReserveOutboundBufferCommit|TCPSessionBatchWrite16x1KiB|WebSocketSessionBatchWrite16x1KiB)$' -benchmem -benchtime=250ms -count=3 > benchmark.out
 go run ./cmd/benchguard -budget benchmark/budgets.json -input benchmark.out
 ```
 

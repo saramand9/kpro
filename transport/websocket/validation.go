@@ -22,6 +22,8 @@ func (s *Server) Validate() error {
 		configcheck.NonNegativeInt("MaxConnections", s.rawConfig.MaxConnections),
 		configcheck.NonNegativeInt("SendQueueSize", s.rawConfig.SendQueueSize),
 		configcheck.NonNegativeInt64("MaxPendingBytes", s.rawConfig.MaxPendingBytes),
+		configcheck.NonNegativeInt("MaxWriteBatchFrames", s.rawConfig.MaxWriteBatchFrames),
+		configcheck.NonNegativeInt64("MaxWriteBatchBytes", s.rawConfig.MaxWriteBatchBytes),
 		configcheck.NonNegativeDuration("ReadTimeout", s.rawConfig.ReadTimeout),
 		configcheck.NonNegativeDuration("WriteTimeout", s.rawConfig.WriteTimeout),
 		configcheck.NonNegativeDuration("HandshakeTimeout", s.rawConfig.HandshakeTimeout),

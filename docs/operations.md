@@ -500,20 +500,25 @@ Record throughput, latency percentiles, error/rejection category, CPU, heap, all
 
 ## Performance regression budgets
 
-Repository CI runs selected Router, HTTP handler, outbound-queue, and in-memory codec
-microbenchmarks and checks their `ns/op`, `B/op`, and `allocs/op` against
+Repository CI runs selected Router, HTTP handler, outbound-queue, in-memory
+codec, TCP send-admission, and TCP/WebSocket batch-loop microbenchmarks and
+checks their `ns/op`, `B/op`, and `allocs/op` against
 [`benchmark/budgets.json`](../benchmark/budgets.json). Reproduce that guard with:
 
 ```sh
-go test -p 1 ./core ./transport/httpx ./transport/internal/outbound ./benchmark -run '^$' -bench 'Benchmark(RouterDispatchSync|EndpointServeHTTP|OutboundQueueRoundTrip|KProCodec)$' -benchmem -benchtime=250ms -count=3 > benchmark-current.txt
+go test -p 1 ./core ./transport/httpx ./transport/internal/outbound ./transport/internal/dispatchgate ./transport/tcp ./transport/websocket ./benchmark -run '^$' -bench 'Benchmark(RouterDispatchSync|EndpointServeHTTP|OutboundQueueRoundTrip|OutboundQueueDrainAvailable|GateBeginEnd|KProCodec|SessionSendContiguous|SessionSendSegmented|ReserveOutboundBufferCommit|TCPSessionBatchWrite16x1KiB|WebSocketSessionBatchWrite16x1KiB)$' -benchmem -benchtime=250ms -count=3 > benchmark-current.txt
 go run ./cmd/benchguard -budget benchmark/budgets.json -input benchmark-current.txt
 ```
 
 `benchguard` compares median `ns/op` across the repeated samples, while
 every `B/op` and `allocs/op` sample must remain within its hard budget.
-The outbound queue and codec cases are pure in-memory checks and do not contain
-network or disk I/O. The queue budget additionally locks its admission/write
-accounting path to zero heap allocations.
+The outbound queue, codec, and TCP send-admission cases are pure in-memory
+checks and do not contain network or disk I/O. Queue round-trip/drain and the
+default segmented TCP `Session.Send` path are locked to zero heap allocations;
+the explicit owned-buffer path permits one allocation for its public lease
+handle in the warmed 1 KiB case, without a new payload backing allocation per
+operation. The TCP/WebSocket batch-loop guards use an in-memory discard
+connection and do not establish syscall or network performance.
 
 The budgets are intentionally repository-owned regression thresholds for this
 specific code path and CI workload. They do not predict end-to-end service
