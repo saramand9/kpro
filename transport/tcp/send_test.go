@@ -52,7 +52,7 @@ func TestSendQueueFullReturnsOverloadBeforeClosedState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := reservation.Commit([]byte{0}, 1); err != nil {
+	if err := reservation.Commit(outboundFrame{payload: []byte{0}}, 1); err != nil {
 		t.Fatal(err)
 	}
 	session := &session{server: server, sendQueue: queue, done: make(chan struct{})}
@@ -149,6 +149,29 @@ func TestPendingByteConfigDefaultsAndValidation(t *testing.T) {
 	}
 	if err := New(Config{MaxPendingBytes: -1}).Validate(); err == nil || !strings.Contains(err.Error(), "MaxPendingBytes") {
 		t.Fatalf("negative MaxPendingBytes validation error = %v", err)
+	}
+	if server.config.MaxWriteBatchFrames != 2 {
+		t.Fatalf("MaxWriteBatchFrames = %d, want SendQueueSize cap 2", server.config.MaxWriteBatchFrames)
+	}
+	if server.config.MaxWriteBatchBytes != want {
+		t.Fatalf("MaxWriteBatchBytes = %d, want pending-byte cap %d", server.config.MaxWriteBatchBytes, want)
+	}
+	if server.config.MaxRetainedBufferBytes != DefaultMaxRetainedBufferBytes {
+		t.Fatalf("MaxRetainedBufferBytes = %d, want %d", server.config.MaxRetainedBufferBytes, DefaultMaxRetainedBufferBytes)
+	}
+	for _, test := range []struct {
+		name   string
+		config Config
+	}{
+		{name: "MaxWriteBatchFrames", config: Config{MaxWriteBatchFrames: -1}},
+		{name: "MaxWriteBatchBytes", config: Config{MaxWriteBatchBytes: -1}},
+		{name: "MaxRetainedBufferBytes", config: Config{MaxRetainedBufferBytes: -1}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := New(test.config).Validate(); err == nil || !strings.Contains(err.Error(), test.name) {
+				t.Fatalf("negative %s validation error = %v", test.name, err)
+			}
+		})
 	}
 }
 

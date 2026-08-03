@@ -34,15 +34,15 @@ Latest saved benchmark evidence: [RESULTS.md](RESULTS.md).
 ## CI hot-path budgets
 
 CI runs deterministic in-process Router, HTTP handler, outbound-queue,
-transport dispatch-gate, and codec benchmarks separately from localhost
-protocol comparisons. The codec cases call
-`Encode` and `DecodePacket` on in-memory 1 KiB frames; they do not use network
-or disk I/O. Limits live in [budgets.json](budgets.json) and cover `ns/op`,
-`B/op`, and `allocs/op`:
+transport dispatch-gate, codec, TCP send-admission, and TCP/WebSocket
+batch-loop benchmarks separately from localhost protocol comparisons. The
+codec and transport fast-path cases use in-memory 1 KiB frames, drained queues,
+and discard connections; they do not use network or disk I/O. Limits live in
+[budgets.json](budgets.json) and cover `ns/op`, `B/op`, and `allocs/op`:
 
 ```sh
-go test -p 1 ./core ./transport/httpx ./transport/internal/outbound ./transport/internal/dispatchgate ./benchmark -run '^$' \
-  -bench 'Benchmark(RouterDispatchSync|EndpointServeHTTP|OutboundQueueRoundTrip|GateBeginEnd|KProCodec)$' \
+go test -p 1 ./core ./transport/httpx ./transport/internal/outbound ./transport/internal/dispatchgate ./transport/tcp ./transport/websocket ./benchmark -run '^$' \
+  -bench 'Benchmark(RouterDispatchSync|EndpointServeHTTP|OutboundQueueRoundTrip|OutboundQueueDrainAvailable|GateBeginEnd|KProCodec|SessionSendContiguous|SessionSendSegmented|ReserveOutboundBufferCommit|TCPSessionBatchWrite16x1KiB|WebSocketSessionBatchWrite16x1KiB)$' \
   -benchmem -benchtime=250ms -count=3 > benchmark-current.txt
 go run ./cmd/benchguard \
   -budget benchmark/budgets.json \
@@ -70,6 +70,18 @@ normal toolchain accounting variation without permitting another allocation.
 
 Use repeated runs and `benchstat` when evaluating an optimization; passing the
 budget is a regression guard, not evidence that a change is faster.
+
+`BenchmarkSessionSendContiguous` preserves an in-process baseline for the
+legacy contiguous codec/queue shape. `BenchmarkSessionSendSegmented` locks the
+default KProV1 TCP compatibility path to zero heap allocations after pool
+warm-up. The normal `Session.Send` contract still copies caller-owned payload
+bytes before returning.
+`BenchmarkReserveOutboundBufferCommit` covers the explicit ownership-transfer
+path. In the warmed 1 KiB case, its one allocation is the public lease handle;
+the transport does not allocate a new payload backing slice per operation.
+The TCP and WebSocket 16-frame batch benchmarks guard the writer construction
+and completion loops at zero allocations using an in-memory discard
+connection; they do not measure syscalls or network throughput.
 
 Current coverage:
 

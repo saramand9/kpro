@@ -14,6 +14,8 @@ import (
 var (
 	codecBenchmarkBytes   []byte
 	codecBenchmarkMessage core.Message
+	codecBenchmarkHeader  [codec.FrameHeaderSize]byte
+	codecBenchmarkPayload []byte
 )
 
 func BenchmarkKProCodec(b *testing.B) {
@@ -42,6 +44,23 @@ func BenchmarkKProCodec(b *testing.B) {
 			}
 		}
 		codecBenchmarkBytes = encoded
+	})
+
+	b.Run("segmented_copy_1KiB", func(b *testing.B) {
+		b.ReportAllocs()
+		b.SetBytes(int64(len(payload)))
+		copiedPayload := make([]byte, len(payload))
+		var encodeErr error
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			encodeErr = codec.WriteKProV1Header(codecBenchmarkHeader[:], message)
+			if encodeErr != nil {
+				b.Fatalf("write header: %v", encodeErr)
+			}
+			copy(copiedPayload, message.Data)
+		}
+		codecBenchmarkBytes = codecBenchmarkHeader[:]
+		codecBenchmarkPayload = copiedPayload
 	})
 
 	b.Run("decode_packet_1KiB", func(b *testing.B) {

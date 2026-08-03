@@ -535,6 +535,8 @@ See [examples/README.md](examples/README.md) for startup commands.
 - More detailed call-flow diagrams are in [docs/call-flow.md](docs/call-flow.md).
 - TCP internal flow guide is in [docs/tcp-internal-flow.md](docs/tcp-internal-flow.md).
 - Network correctness requirements for message-based transports are in [docs/network-test-requirements.md](docs/network-test-requirements.md).
+- Implemented write fast paths and the Netty comparison contract are in [docs/performance-fast-path.md](docs/performance-fast-path.md).
+- The source-based KPro/Netty performance and concurrency baseline is in [docs/netty-performance-baseline.md](docs/netty-performance-baseline.md).
 - The complete documentation index is [docs/README.md](docs/README.md).
 
 ## Test
@@ -550,7 +552,7 @@ go test -race ./...
 Run the same selected hot-path budget guard used by CI:
 
 ```powershell
-go test -p 1 ./core ./transport/httpx ./transport/internal/outbound ./benchmark -run '^$' -bench 'Benchmark(RouterDispatchSync|EndpointServeHTTP|OutboundQueueRoundTrip|KProCodec)$' -benchmem -benchtime=250ms -count=3 > benchmark-current.txt
+go test -p 1 ./core ./transport/httpx ./transport/internal/outbound ./transport/internal/dispatchgate ./transport/tcp ./transport/websocket ./benchmark -run '^$' -bench 'Benchmark(RouterDispatchSync|EndpointServeHTTP|OutboundQueueRoundTrip|OutboundQueueDrainAvailable|GateBeginEnd|KProCodec|SessionSendContiguous|SessionSendSegmented|ReserveOutboundBufferCommit|TCPSessionBatchWrite16x1KiB|WebSocketSessionBatchWrite16x1KiB)$' -benchmem -benchtime=250ms -count=3 > benchmark-current.txt
 go run ./cmd/benchguard -budget benchmark/budgets.json -input benchmark-current.txt
 ```
 

@@ -21,8 +21,9 @@ UDP 和 WebSocket 的网络输入形式不同，但它们复用同一套 `core.M
 | 模块 | 文件 | 职责 |
 | --- | --- | --- |
 | 组装层 | `server/server.go` | 挂载抽象 message transport，创建 endpoint router，启动 runner |
-| TCP transport | `transport/tcp/server.go` | 监听、accept、创建 session、读循环、写循环 |
-| 协议层 | `codec/kpro.go` | KProV1 frame 的解码和编码 |
+| TCP transport | `transport/tcp/server.go`, `transport/tcp/batch_writer.go` | 监听、accept、创建 session、读循环、分段/批量写循环 |
+| 协议层 | `codec/kpro.go`, `codec/kpro_segmented.go` | KProV1 frame 的解码、连续编码和固定头部编码 |
+| 出站资源 | `transport/internal/outbound/`, `transport/internal/bufferpool/` | 有界队列/字节核算、批量 drain、传输层 payload 复用 |
 | 上下文 | `core/context.go` | 把 `Session + Message` 包装成 handler 可用的 context |
 | 路由调度 | `core/router.go` | 按 `Message.ID` 找 handler，快照 middleware，同步/异步调度，并在执行点构造 `core.Invocation` |
 | 会话抽象 | `core/session.go` | transport 无关的发送、关闭、连接标识接口 |
@@ -245,20 +246,27 @@ ctx.Error(text)
 ```text
 ctx.Reply
   -> session.Send(core.Message{ID, Seq: request.Seq, Data})
-  -> Codec.Encode(response Message)
-  -> sendQueue <- encoded frame
+  -> KProV1: inline header + transport-owned payload copy
+     其他 codec: Codec.Encode(response Message)
+  -> sendQueue <- outbound frame
 ```
 
 真正写 socket 的是 TCP 写 goroutine：
 
 ```text
 session.writeLoop
-  -> 从 sendQueue 取出 encoded frame
-  -> 设置 write deadline
-  -> writeFull(rawConn, frame)
+  -> 从 sendQueue 取第一帧，并非阻塞地 drain 有界 FIFO 前缀
+  -> 按 MaxWriteBatchFrames / MaxWriteBatchBytes 分批
+  -> 每批设置 write deadline
+  -> net.Buffers.WriteTo(rawConn) gather-write header/payload regions
 ```
 
-这个设计把业务 handler 和网络写入解耦。客户端读得慢时，只要 `sendQueue` 还有容量，handler 不会直接卡在 socket write 上；但如果 `sendQueue` 填满，`session.Send` 会关闭 session 并返回 `core.ErrClosed`。
+这个设计把业务 handler 和网络写入解耦。客户端读得慢时，只要
+`sendQueue` 还有帧数和字节容量，handler 不会直接卡在 socket write 上；
+如果容量耗尽，`session.Send` 会关闭 session 并返回
+`core.ErrSendQueueFull`。普通 `Session.Send` 在返回前仍会复制调用方 payload，
+所以调用方可以安全复用原 slice；显式所有权转移路径见
+[Performance Fast Paths](performance-fast-path.md)。
 
 ## 示例：一次 Echo 请求的数据变化
 
@@ -437,25 +445,25 @@ handler result -> response core.Message
 
 ```text
 response core.Message
-  -> Codec.Encode
-  -> []byte KProV1 frame
+  -> 20-byte inline KProV1 header
+  +  transport-owned payload
   -> sendQueue
 ```
 
 数据形态变化为：
 
 ```text
-response core.Message -> encoded response bytes
+response core.Message -> segmented outbound frame
 ```
 
 到这里 handler 已经结束。响应可能还在当前 session 的有界 `sendQueue` 中等待写出。
 
 ### 9. writeLoop 写回客户端
 
-写 goroutine 从 `sendQueue` 中取出 frame：
+写 goroutine 从 `sendQueue` 中取出一个有界批次，并保持 FIFO：
 
 ```text
-sendQueue -> writeFull(net.Conn, frame)
+sendQueue -> net.Buffers{header, payload, ...}.WriteTo(net.Conn)
 ```
 
 客户端收到 KProV1 frame 后解码得到：
@@ -512,7 +520,7 @@ Data = 具体框架错误文本
 错误响应仍然走正常写回链路：
 
 ```text
-ctx.Error -> session.Send -> Codec.Encode -> sendQueue -> writeLoop
+ctx.Error -> session.Send -> outbound frame -> sendQueue -> batch writeLoop
 ```
 
 ## 通过 TCP 看整个框架

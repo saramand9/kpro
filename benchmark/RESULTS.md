@@ -1,6 +1,6 @@
 # KPro benchmark results
 
-## 2026-08-03 hot-path regression baseline
+## 2026-08-03 FastPath regression baseline
 
 Environment:
 
@@ -9,8 +9,15 @@ goos: windows
 goarch: amd64
 go: go1.26.4
 cpu: Intel(R) Core(TM) i5-14400
-source state: main development tree after Router invocation allocation optimization
+source state: main development tree after segmented TCP/WS batching and owned-buffer work
+base commit: d8a4a96 (dirty FastPath working tree)
+source manifest SHA-256: e5b38eb94e5c473fc7929ccc12cf2cfc2540d12bd5d1ee1d7bd369f7401ab171
 ```
+
+The source manifest hashes the sorted path plus Git blob ID of every `*.go`
+file, `go.mod`, `go.sum`, and `benchmark/budgets.json`; it excludes this results
+file and generated benchmark output. This records the exact dirty source
+snapshot measured before it receives a commit ID.
 
 The module baseline in `go.mod` is Go 1.25.12, while this local run used Go
 1.26.4 and the performance workflow uses Go 1.26.5. Compare latency numbers
@@ -20,7 +27,7 @@ budgets intentionally span normal CI toolchain and host variation.
 Command (the same benchmark selection enforced by CI):
 
 ```powershell
-go test -p 1 ./core ./transport/httpx ./transport/internal/outbound ./transport/internal/dispatchgate ./benchmark -run '^$' -bench 'Benchmark(RouterDispatchSync|EndpointServeHTTP|OutboundQueueRoundTrip|GateBeginEnd|KProCodec)$' -benchmem -benchtime=250ms -count=3 | Tee-Object -FilePath benchmark-current.txt
+go test -p 1 ./core ./transport/httpx ./transport/internal/outbound ./transport/internal/dispatchgate ./transport/tcp ./transport/websocket ./benchmark -run '^$' -bench 'Benchmark(RouterDispatchSync|EndpointServeHTTP|OutboundQueueRoundTrip|OutboundQueueDrainAvailable|GateBeginEnd|KProCodec|SessionSendContiguous|SessionSendSegmented|ReserveOutboundBufferCommit|TCPSessionBatchWrite16x1KiB|WebSocketSessionBatchWrite16x1KiB)$' -benchmem -benchtime=250ms -count=3 | Tee-Object -FilePath benchmark-current.txt
 go run ./cmd/benchguard -budget benchmark/budgets.json -input benchmark-current.txt
 ```
 
@@ -28,21 +35,36 @@ Observed aggregate result (`ns/op` median; `B/op` and `allocs/op`
 maximum across three samples):
 
 ```text
-BenchmarkRouterDispatchSync/no_middleware                   1710.0 ns/op     24 B/op     1 allocs/op
-BenchmarkRouterDispatchSync/one_middleware                  1777.0 ns/op     24 B/op     1 allocs/op
-BenchmarkRouterDispatchSync/four_middlewares                1783.0 ns/op     24 B/op     1 allocs/op
-BenchmarkEndpointServeHTTP/direct                           119.2 ns/op    136 B/op     3 allocs/op
-BenchmarkEndpointServeHTTP/middleware                       185.6 ns/op    328 B/op     4 allocs/op
-BenchmarkEndpointServeHTTP/middleware_headers_meta          487.1 ns/op   1048 B/op    11 allocs/op
-BenchmarkOutboundQueueRoundTrip                              83.6 ns/op      0 B/op     0 allocs/op
-BenchmarkGateBeginEnd                                        14.0 ns/op      0 B/op     0 allocs/op
-BenchmarkKProCodec/encode_1KiB                              417.0 ns/op   1152 B/op     1 allocs/op
-BenchmarkKProCodec/decode_packet_1KiB                       360.8 ns/op   1024 B/op     1 allocs/op
+BenchmarkRouterDispatchSync/no_middleware                   1745.0 ns/op     24 B/op     1 allocs/op
+BenchmarkRouterDispatchSync/one_middleware                  1736.0 ns/op     24 B/op     1 allocs/op
+BenchmarkRouterDispatchSync/four_middlewares                1740.0 ns/op     24 B/op     1 allocs/op
+BenchmarkEndpointServeHTTP/direct                            123.2 ns/op    136 B/op     3 allocs/op
+BenchmarkEndpointServeHTTP/middleware                        189.2 ns/op    328 B/op     4 allocs/op
+BenchmarkEndpointServeHTTP/middleware_headers_meta           518.4 ns/op   1048 B/op    11 allocs/op
+BenchmarkOutboundQueueRoundTrip                               82.5 ns/op      0 B/op     0 allocs/op
+BenchmarkOutboundQueueDrainAvailable                       5455.0 ns/op      0 B/op     0 allocs/op
+BenchmarkGateBeginEnd                                         12.7 ns/op      0 B/op     0 allocs/op
+BenchmarkSessionSendContiguous                               343.2 ns/op   1152 B/op     1 allocs/op
+BenchmarkSessionSendSegmented                                210.4 ns/op      0 B/op     0 allocs/op
+BenchmarkReserveOutboundBufferCommit                         236.3 ns/op     64 B/op     1 allocs/op
+BenchmarkTCPSessionBatchWrite16x1KiB                        1692.0 ns/op      0 B/op     0 allocs/op
+BenchmarkWebSocketSessionBatchWrite16x1KiB                  1724.0 ns/op      0 B/op     0 allocs/op
+BenchmarkKProCodec/encode_1KiB                               219.8 ns/op   1152 B/op     1 allocs/op
+BenchmarkKProCodec/segmented_copy_1KiB                         9.6 ns/op      0 B/op     0 allocs/op
+BenchmarkKProCodec/decode_packet_1KiB                        207.8 ns/op   1024 B/op     1 allocs/op
 ```
 
 These short microbenchmarks are allocation-regression evidence, not capacity
-claims. `benchmark/budgets.json` is the pass/fail contract; latency ceilings
-include CI noise headroom while allocation ceilings intentionally remain tight.
+claims. The TCP send cases drain an in-memory queue and do not write a socket.
+The normal segmented send includes its payload ownership copy; the owned path
+reports the public lease-handle allocation. The batch-loop cases use an
+in-memory discard connection, so they include frame gathering and completion
+but no socket or kernel work. In this run the segmented send's median in-memory
+admission time was about 39% lower than the contiguous
+baseline, while removing its per-operation payload/frame allocation. This is
+not an end-to-end network improvement claim. `benchmark/budgets.json` is the
+pass/fail contract; latency ceilings include CI noise headroom while allocation
+ceilings intentionally remain tight.
 The older end-to-end and third-party comparisons below describe historical
 implementations and should not be used as a current framework ranking.
 

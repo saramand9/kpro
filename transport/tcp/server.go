@@ -16,19 +16,22 @@ import (
 	"github.com/saramand9/kpro/codec"
 	"github.com/saramand9/kpro/core"
 	transportapi "github.com/saramand9/kpro/transport"
+	"github.com/saramand9/kpro/transport/internal/bufferpool"
 	"github.com/saramand9/kpro/transport/internal/dispatchgate"
 	"github.com/saramand9/kpro/transport/internal/outbound"
 	"github.com/saramand9/kpro/transport/internal/serveutil"
-	"github.com/saramand9/kpro/transport/internal/streamutil"
 )
 
 const (
-	DefaultAddr           = ":8088"
-	DefaultMaxFrameSize   = 64 * 1024
-	DefaultMaxConnections = 10000
-	DefaultSendQueueSize  = 64
-	DefaultReadTimeout    = 90 * time.Second
-	DefaultWriteTimeout   = 5 * time.Second
+	DefaultAddr                   = ":8088"
+	DefaultMaxFrameSize           = 64 * 1024
+	DefaultMaxConnections         = 10000
+	DefaultSendQueueSize          = 64
+	DefaultMaxWriteBatchFrames    = 16
+	DefaultMaxWriteBatchBytes     = 256 * 1024
+	DefaultMaxRetainedBufferBytes = 4 * 1024 * 1024
+	DefaultReadTimeout            = 90 * time.Second
+	DefaultWriteTimeout           = 5 * time.Second
 )
 
 // Config controls TCP listener, codec, queue, and timeout settings.
@@ -37,7 +40,8 @@ type Config struct {
 	Addr string
 	// Codec decodes and encodes stream frames. Nil uses codec.KProV1().
 	Codec codec.StreamCodec
-	// MaxFrameSize limits decoded frame payload size.
+	// MaxFrameSize limits decoded inbound frame payload size. Outbound writes
+	// are bounded independently by MaxPendingBytes and the selected codec.
 	MaxFrameSize uint32
 	// MaxConnections caps active TCP sessions.
 	MaxConnections int
@@ -47,9 +51,18 @@ type Config struct {
 	// MaxPendingBytes caps bytes reserved for encoding, queued, or currently
 	// being written per session. Zero derives SendQueueSize * (MaxFrameSize + frame header).
 	MaxPendingBytes int64
+	// MaxWriteBatchFrames caps frames gathered by one non-blocking queue drain.
+	MaxWriteBatchFrames int
+	// MaxWriteBatchBytes caps bytes submitted by one gather-write call. A
+	// single oversized admitted frame is still written to ensure progress.
+	MaxWriteBatchBytes int64
+	// MaxRetainedBufferBytes caps idle payload memory kept by the shared
+	// size-class pool. Queue limits bound admitted wire bytes and frame count;
+	// active size-class capacity can be larger than logical payload bytes.
+	MaxRetainedBufferBytes int64
 	// ReadTimeout is applied before each frame read.
 	ReadTimeout time.Duration
-	// WriteTimeout is applied before each frame write.
+	// WriteTimeout is applied before each gather-write batch.
 	WriteTimeout time.Duration
 	// HandlerErrorPolicy defaults to closing the affected session.
 	HandlerErrorPolicy transportapi.HandlerErrorPolicy
@@ -66,6 +79,7 @@ type Server struct {
 	accepting   bool
 	started     bool
 	dispatch    *dispatchgate.Gate
+	payloadPool *bufferpool.Pool
 
 	nextID    uint64
 	active    int64
@@ -76,12 +90,17 @@ type Server struct {
 
 // New creates a TCP transport with normalized defaults.
 func New(config Config) *Server {
+	normalized := normalizeConfig(config)
 	return &Server{
-		config:    normalizeConfig(config),
+		config:    normalized,
 		rawConfig: config,
 		accepting: true,
 		dispatch:  dispatchgate.New(),
-		ready:     make(chan struct{}),
+		payloadPool: bufferpool.New(bufferpool.Config{
+			MaxRetainedBytes: normalized.MaxRetainedBufferBytes,
+			MaxPooledSize:    DefaultMaxFrameSize,
+		}),
+		ready: make(chan struct{}),
 	}
 }
 
@@ -284,7 +303,7 @@ type session struct {
 	id        uint64
 	server    *Server
 	raw       net.Conn
-	sendQueue *outbound.Queue[[]byte]
+	sendQueue *outbound.Queue[outboundFrame]
 	done      chan struct{}
 	closeOnce sync.Once
 }
@@ -315,16 +334,21 @@ func (s *session) Send(msg core.Message) error {
 		return core.ErrClosed
 	default:
 	}
-	reservation, err := s.sendQueue.Reserve(outbound.EstimateBytes(len(msg.Data), codec.FrameHeaderSize))
+	headerBytes := int64(codec.FrameHeaderSize)
+	if headerSize, ok := segmentedHeaderSize(s.server.config.Codec); ok {
+		headerBytes = int64(headerSize)
+	}
+	reservation, err := s.sendQueue.Reserve(outbound.EstimateBytes(len(msg.Data), headerBytes))
 	if err != nil {
 		return s.outboundError(err)
 	}
 	defer reservation.Cancel()
-	frame, err := s.server.config.Codec.Encode(msg)
+	frame, err := s.encodeOutboundFrame(msg)
 	if err != nil {
 		return err
 	}
-	if err := reservation.Commit(frame, int64(len(frame))); err != nil {
+	if err := reservation.Commit(frame, frame.wireBytes()); err != nil {
+		frame.release()
 		return s.outboundError(err)
 	}
 	return nil
@@ -456,33 +480,26 @@ func (s *session) readLoop(handler core.Handler) {
 }
 
 func (s *session) writeLoop() {
+	writer := newSessionBatchWriter(s.server.config)
 	for {
 		select {
 		case item := <-s.sendQueue.Items():
-			data := item.Value
-			if s.server.config.WriteTimeout > 0 {
-				if err := s.raw.SetWriteDeadline(time.Now().Add(s.server.config.WriteTimeout)); err != nil {
-					item.Done()
-					_ = s.Close()
-					return
-				}
-			}
-			if err := streamutil.WriteFull(s.raw, data); err != nil {
-				item.Done()
+			if err := writer.writeAvailable(s, &item); err != nil {
 				_ = s.Close()
 				return
 			}
-			item.Done()
 		case <-s.done:
 			return
 		}
 	}
 }
 
-func newSessionOutboundQueue(config Config) *outbound.Queue[[]byte] {
-	return outbound.New[[]byte](outbound.Config{
+func newSessionOutboundQueue(config Config) *outbound.Queue[outboundFrame] {
+	return outbound.NewWithFinalizer(outbound.Config{
 		MaxFrames: config.SendQueueSize,
 		MaxBytes:  config.MaxPendingBytes,
+	}, func(frame outboundFrame) {
+		frame.release()
 	})
 }
 
@@ -516,6 +533,18 @@ func normalizeConfig(config Config) Config {
 	if config.MaxPendingBytes <= 0 {
 		maxFrameBytes := int64(config.MaxFrameSize) + int64(codec.FrameHeaderSize)
 		config.MaxPendingBytes = outbound.ByteLimit(config.SendQueueSize, maxFrameBytes)
+	}
+	if config.MaxWriteBatchFrames <= 0 {
+		config.MaxWriteBatchFrames = DefaultMaxWriteBatchFrames
+	}
+	if config.MaxWriteBatchFrames > config.SendQueueSize {
+		config.MaxWriteBatchFrames = config.SendQueueSize
+	}
+	if config.MaxWriteBatchBytes <= 0 {
+		config.MaxWriteBatchBytes = min(int64(DefaultMaxWriteBatchBytes), config.MaxPendingBytes)
+	}
+	if config.MaxRetainedBufferBytes <= 0 {
+		config.MaxRetainedBufferBytes = DefaultMaxRetainedBufferBytes
 	}
 	if config.ReadTimeout <= 0 {
 		config.ReadTimeout = DefaultReadTimeout
