@@ -6,6 +6,7 @@ package core
 import (
 	"context"
 	"strconv"
+	"sync"
 )
 
 const messageOperationPrefix = "message/"
@@ -104,6 +105,12 @@ type BaseInvocation struct {
 	cleanup   func()
 }
 
+var messageInvocationPool = sync.Pool{
+	New: func() any {
+		return new(BaseInvocation)
+	},
+}
+
 // NewInvocation builds an invocation and defensively copies metadata maps.
 func NewInvocation(opts InvocationOptions) *BaseInvocation {
 	ctx := opts.Context
@@ -130,23 +137,52 @@ func NewInvocation(opts InvocationOptions) *BaseInvocation {
 // callbacks. Release is a no-op on the common background-context path.
 func NewMessageInvocation(ctx context.Context, msgCtx Context) *BaseInvocation {
 	msg := msgCtx.Message()
+	invocation := new(BaseInvocation)
+	initializeMessageInvocation(invocation, ctx, msgCtx, msg, MessageOperation(msg.ID))
+	return invocation
+}
+
+// acquireMessageInvocation builds the Router's request-scoped message view.
+// The returned invocation is valid only until releaseMessageInvocation. Public
+// constructors remain independently owned and are never placed in this pool.
+func acquireMessageInvocation(ctx context.Context, msgCtx Context, operation string) *BaseInvocation {
+	invocation := messageInvocationPool.Get().(*BaseInvocation)
+	initializeMessageInvocation(invocation, ctx, msgCtx, msgCtx.Message(), operation)
+	return invocation
+}
+
+func releaseMessageInvocation(invocation *BaseInvocation) {
+	if invocation == nil {
+		return
+	}
+	invocation.Release()
+	*invocation = BaseInvocation{}
+	messageInvocationPool.Put(invocation)
+}
+
+func initializeMessageInvocation(
+	invocation *BaseInvocation,
+	ctx context.Context,
+	msgCtx Context,
+	msg Message,
+	operation string,
+) {
 	done := SessionDone(msgCtx.Session())
 	invocationCtx, cleanup := mergeSessionContext(ctx, done)
-	invocation := NewInvocation(InvocationOptions{
-		Context:   invocationCtx,
-		Transport: msgCtx.Transport(),
-		Operation: MessageOperation(msg.ID),
-		ConnID:    msgCtx.ConnID(),
-		Remote:    msgCtx.RemoteAddr(),
-		Headers:   msg.Headers,
-		Meta:      msg.Meta,
-		Payload:   msg.Data,
-		Native:    msgCtx,
-		Done:      done,
-		ConnDone:  done,
-	})
-	invocation.cleanup = cleanup
-	return invocation
+	*invocation = BaseInvocation{
+		ctx:       invocationCtx,
+		transport: msgCtx.Transport(),
+		operation: operation,
+		connID:    msgCtx.ConnID(),
+		remote:    msgCtx.RemoteAddr(),
+		headers:   cloneStringMap(msg.Headers),
+		meta:      cloneAnyMap(msg.Meta),
+		payload:   msg.Data,
+		native:    msgCtx,
+		done:      done,
+		connDone:  done,
+		cleanup:   cleanup,
+	}
 }
 
 // MessageOperation returns the stable operation name for a message id.

@@ -26,9 +26,9 @@ for application code.
 
 | Path | Primary role | Key files |
 | --- | --- | --- |
-| `core/` | Transport-neutral runtime primitives and message dispatch. | `router.go`, `router_config.go`, `context.go`, `session_lifecycle.go`, `invocation.go`, `backpressure.go`, `lifecycle.go` |
+| `core/` | Transport-neutral runtime primitives, message dispatch, and optional session capabilities. | `router.go`, `router_config.go`, `context.go`, `session_lifecycle.go`, `outbound_state.go`, `invocation.go`, `backpressure.go`, `lifecycle.go` |
 | `server/` | Dependency-neutral process owner for mounted transport contracts, middleware, readiness, component error provenance, and managed resources. | `server.go`, `mount.go`, `component_error.go`, `lifecycle.go` |
-| `transport/` | Shared transport contracts, readiness, handler-error policy, public extension helpers, capability descriptors, validation, and built-in protocol packages. | `transport.go`, `handler_error.go`, `transportkit/`, `capability.go`, `validation.go` |
+| `transport/` | Shared transport contracts, optional quiesce/readiness capabilities, handler-error policy, public extension helpers, capability descriptors, validation, built-in protocol packages, and their private dispatch/outbound controls. | `transport.go`, `handler_error.go`, `transportkit/`, `capability.go`, `validation.go`, `internal/dispatchgate/`, `internal/outbound/` |
 | `codec/` | Binary protocol implementation for KPro message traffic. | `kpro.go`, `codec.go` |
 | `middleware/` | Reusable invocation middleware. | `recover.go`, `ratelimit.go`, `limit.go`, `metrics.go` |
 | `observability/` | Optional integrations for health, Prometheus, OTel, and Zap. | `healthx/`, `prometheusx/`, `otelx/`, `zapx/` |
@@ -36,9 +36,9 @@ for application code.
 | `database/` | Database adapters and lifecycle/resource helpers. | `gorm/`, `redis/`, `es/`, `qdrant/`, `mongo/`, `clickhouse/`, `influx/`, `neo4j/`, `common/` |
 | `cmd/kpro/` | CLI for minimal/unified service scaffolding, versioned local overlays, read-only contract catalogs, transactional API additions, generation, and version/environment diagnostics. | `main.go`, `scaffold.go`, `scaffold_template.go`, `command_catalog.go`, `command_add.go`, `command_codegen.go`, `service_project.go`, `templates/profiles/service/`, `templates/service-project/` |
 | `internal/codegen/` | Safe generation planning, manifests, content-addressed locks, compare-and-swap file transactions, descriptor-only protobuf inspection, and OpenAPI, protobuf, Message, and plugin backends. | `transaction.go`, `manifest/`, `openapi/`, `protogen/`, `messagegen/`, `pluginhost/` |
-| `cmd/benchguard/` | Benchmark budget checker used by CI. | `main.go` |
+| `cmd/benchguard/` | Multi-sample benchmark budget checker used by CI; latency uses a median while memory limits apply to every sample. | `main.go` |
 | `examples/` | Protocol and modular application examples. | `quickstart/`, protocol-specific directories |
-| `benchmark/` | Microbenchmarks, budget config, and comparison fixtures. | `budgets.json`, `protocol_benchmark_test.go`, `compare/` |
+| `benchmark/` | Deterministic hot-path and protocol benchmarks, budget config, and comparison fixtures. | `budgets.json`, `codec_benchmark_test.go`, `protocol_benchmark_test.go`, `compare/` |
 | `docs/` | Guides for adoption, operation, extension, and internal flows. | `README.md`, `quickstart.md`, `golden-path.md`, `operations.md` |
 
 The compile-time dependency rules for these packages are documented in
@@ -73,9 +73,30 @@ run-context cancellation, explicit Shutdown, or runner failure
   -> close managed resources after successful runner stop
 ```
 
-Message transports do not promise reply drain. They stop or close sessions and
-writer paths; outbound sends and replies are at-most-once, and shutdown does not
-confirm queued or in-flight delivery.
+A message `server.Endpoint` has an additional ordered shutdown boundary:
+
+```text
+Endpoint.Shutdown(ctx)
+  -> optional transport.Quiescer stops new transport dispatch
+     while preserving established outbound writers
+  -> Router stops new admission
+  -> Router drains already accepted sync and async handlers within its bound
+  -> terminal message transport Shutdown(ctx)
+```
+
+Each later phase is still attempted if quiesce or Router drain returns an
+error. TCP, KCP, QUIC, UDP, and WebSocket implement the optional first phase.
+A third-party transport without it skips directly to Router drain, so its read
+loop may remain active during that compatibility fallback. KCP cannot close
+its listener during quiesce because established sessions share that UDP socket;
+it accepts and closes new raw sessions and defers listener close to terminal
+shutdown. QUIC closes its connection listener but accepts and cancels new
+streams on retained connections until terminal shutdown.
+
+Even a successful Router drain only means accepted handlers completed while
+sessions were available for their final send attempts. Message transports do
+not promise reply drain: outbound sends and replies are at-most-once, and
+shutdown does not confirm queued or in-flight delivery to the peer.
 
 Message transport dispatch follows this path:
 
@@ -89,7 +110,9 @@ client bytes/datagram/frame
   -> registered message handler
   -> core.ContextOf(ctx) reads the optional core.ContextProvider capability
   -> ctx.Reply or session.Send
+  -> reserve one pending-write slot and estimated encoded bytes
   -> codec encode
+  -> reconcile actual encoded bytes and publish to the outbound queue
   -> transport write
 ```
 
@@ -132,10 +155,31 @@ use `core.ErrorKind`; internal causes remain available to logs and traces while
 HTTP, gRPC, and message responses use stable non-sensitive text.
 
 Use `core.RouterConfig` when message traffic needs explicit worker, queue,
-per-session in-flight, global in-flight, idle, and shutdown behavior. Treat
-Router shutdown as bounded handler completion rather than wire-level reply
-delivery, and treat Router and transport limits as admission controls, not
-business validation.
+per-session in-flight, global in-flight, waiting-dispatch, idle, and shutdown
+behavior. Under `BackpressureWait`, blocked dispatches default to 1024
+Router-wide and 16 per session. One dispatch holds one ticket across every
+global, per-session, and queue wait stage; Snapshot and Prometheus distinguish
+global from per-session ticket rejection. Treat Router shutdown as bounded
+handler completion rather than wire-level reply delivery, and treat Router and
+transport limits as admission controls, not business validation.
+
+`Router.Shutdown` drains accepted sync and async work, including accepted sync
+tasks observed after the session closes during graceful drain.
+`Router.Close` remains immediate best-effort sync-queue cancellation and does
+not wait; accepted async work and a sync task already ready in a scheduler race
+can still start.
+
+TCP, KCP, QUIC message streams, UDP peers, and WebSocket sessions share the
+same internal outbound accounting model: `SendQueueSize` caps pending writes
+and `MaxPendingBytes` caps estimated/actual bytes across encoding
+reservations, queued writes, and the writer-owned write. The internal queue
+tracks high/low-watermark hysteresis and the five built-ins expose a public
+point-in-time view through `core.SessionOutboundState`, including
+current/maximum waiting writers. They also expose the optional,
+context-cancelable `core.SessionWaitOutboundWritable` capability, bounded to
+`SendQueueSize` waiters per session by default. `Writable` and a successful
+wait are advisory and reserve no capacity; `Send` is the authoritative
+admission operation.
 
 HTTP-style endpoints require explicit timeout and body-size decisions. The
 production checklist records which limits are built in and which remain
@@ -146,6 +190,10 @@ application or platform work.
 Add a transport by implementing the common contracts in `transport/`, including
 descriptors, validation, and listener readiness. Reuse bounded public helpers
 from `transport/transportkit` rather than importing `transport/internal`.
+Custom sessions with outbound queues may implement the optional
+`core.OutboundStateProvider` and `core.OutboundWritableWaiter`; custom
+message transports may implement `transport.Quiescer`. The base
+`core.Session` and `transport.MessageServer` contracts remain unchanged.
 Follow [extending-kpro.md](extending-kpro.md) and
 mirror existing package tests for lifecycle, capacity, closed-session sends,
 handler-error policy, readiness ordering, and cancellation.

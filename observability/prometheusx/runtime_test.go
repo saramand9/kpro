@@ -20,16 +20,21 @@ func TestRuntimeCollectorsExposeLifecycleAndBackpressure(t *testing.T) {
 		t.Fatal(err)
 	}
 	router, err := NewRouterCollector(fakeRouterSnapshotter{stats: core.RouterStats{
-		State:           core.StateRunning,
-		Inflight:        3,
-		MaxInflight:     100,
-		Sessions:        2,
-		SyncQueueDepth:  1,
-		AsyncQueueDepth: 4,
-		Accepted:        20,
-		Completed:       17,
-		Rejected:        2,
-		Waited:          5,
+		State:                          core.StateRunning,
+		Inflight:                       3,
+		MaxInflight:                    100,
+		WaitingDispatches:              7,
+		MaxWaitingDispatches:           64,
+		MaxWaitingDispatchesPerSession: 4,
+		Sessions:                       2,
+		SyncQueueDepth:                 1,
+		AsyncQueueDepth:                4,
+		Accepted:                       20,
+		Completed:                      17,
+		Rejected:                       2,
+		Waited:                         5,
+		GlobalWaitRejected:             6,
+		SessionWaitRejected:            9,
 	}}, RuntimeCollectorConfig{Name: "tcp"})
 	if err != nil {
 		t.Fatal(err)
@@ -59,7 +64,12 @@ func TestRuntimeCollectorsExposeLifecycleAndBackpressure(t *testing.T) {
 		`kpro_lifecycle_state{component="server",name="orders",state="running"} 1`,
 		`kpro_router_inflight{kind="current",router="tcp"} 3`,
 		`kpro_router_inflight{kind="limit",router="tcp"} 100`,
+		`kpro_router_waiting_dispatches{kind="current",router="tcp"} 7`,
+		`kpro_router_waiting_dispatches{kind="global_limit",router="tcp"} 64`,
+		`kpro_router_waiting_dispatches{kind="per_session_limit",router="tcp"} 4`,
 		`kpro_router_dispatch_total{outcome="rejected",router="tcp"} 2`,
+		`kpro_router_dispatch_total{outcome="global_wait_rejected",router="tcp"} 6`,
+		`kpro_router_dispatch_total{outcome="session_wait_rejected",router="tcp"} 9`,
 	}
 	for _, value := range wanted {
 		if !strings.Contains(body, value) {

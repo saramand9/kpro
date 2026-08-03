@@ -42,8 +42,7 @@ construction and component preflight validation, transport capability
 descriptors, `cmd/kpro` service scaffolding, versioned local template overlays,
 contract code generation, typed OpenAPI HTTP clients, a read-only contract
 catalog, optional OTel/Prometheus/Zap/health packages, and CI-enforced
-Router/HTTP
-microbenchmark budgets. OTel exporters,
+Router/HTTP/outbound/codec microbenchmark budgets. OTel exporters,
 telemetry backends, deployment sizing, and workload-specific validation remain
 application or platform responsibilities.
 
@@ -499,8 +498,20 @@ See [examples/README.md](examples/README.md) for startup commands.
 - WebSocket upgrades default to a same-host `Origin` check when the header is
   present; use `Config.CheckOrigin` for an explicit cross-origin allowlist.
 - HTTP/3 shutdown sends GOAWAY and drains accepted requests until its deadline.
-  Message transports instead provide a bounded stop with at-most-once replies,
-  not a reply-delivery guarantee.
+  A mounted message Endpoint optionally quiesces new transport dispatch, drains
+  accepted Router work, and then shuts down the transport. The five built-in
+  message transports implement that optional phase; custom transports without
+  it fall back to Router drain followed by transport shutdown. This is still
+  an at-most-once reply boundary, not a reply-delivery guarantee.
+- `core.BackpressureWait` has independent blocked-caller bounds (1024 globally
+  and 16 per session by default). A dispatch consumes only one wait ticket even
+  when it crosses global, per-session, and queue admission stages.
+- Built-in message sessions expose optional, bounded
+  `core.SessionWaitOutboundWritable` support. Success is advisory and reserves
+  no capacity for the next `Send`; the send result remains authoritative.
+- `Router.Shutdown` drains accepted sync and async work. `Router.Close` is the
+  immediate best-effort path and is not a synchronization barrier proving that
+  no already-ready queued handler can begin.
 - QUIC uses bidirectional QUIC streams as `core.Session` instances and runs KPro messages directly over them. `quic.Config.MaxConnections` caps physical QUIC connections, while `MaxStreams` independently caps active bidirectional stream sessions.
 - `server.Server.Use(...)` installs unified `core.Middleware` for TCP, KCP, QUIC, UDP, WebSocket, HTTP, HTTPS, HTTP/3, SSE and gRPC endpoints mounted before or after the call.
 - `core.Middleware` runs on `core.Invocation`; TCP, KCP, QUIC, UDP and WebSocket build the invocation at real handler execution time after Router scheduling.
@@ -539,13 +550,14 @@ go test -race ./...
 Run the same selected hot-path budget guard used by CI:
 
 ```powershell
-go test ./core ./transport/httpx -run '^$' -bench 'Benchmark(RouterDispatchSync|EndpointServeHTTP)$' -benchmem -benchtime=250ms -count=1 > benchmark-current.txt
+go test -p 1 ./core ./transport/httpx ./transport/internal/outbound ./benchmark -run '^$' -bench 'Benchmark(RouterDispatchSync|EndpointServeHTTP|OutboundQueueRoundTrip|KProCodec)$' -benchmem -benchtime=250ms -count=3 > benchmark-current.txt
 go run ./cmd/benchguard -budget benchmark/budgets.json -input benchmark-current.txt
 ```
 
 The thresholds in [benchmark/budgets.json](benchmark/budgets.json) are
-regression guards, not service capacity or latency guarantees. CI also tests
-and vets the comparison module:
+regression guards, not service capacity or latency guarantees. `benchguard`
+uses median `ns/op` across samples and requires every `B/op` and
+`allocs/op` sample to pass. CI also tests and vets the comparison module:
 
 ```powershell
 cd .\benchmark\compare

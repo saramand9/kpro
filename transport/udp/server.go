@@ -16,6 +16,8 @@ import (
 	"github.com/saramand9/kpro/codec"
 	"github.com/saramand9/kpro/core"
 	transportapi "github.com/saramand9/kpro/transport"
+	"github.com/saramand9/kpro/transport/internal/dispatchgate"
+	"github.com/saramand9/kpro/transport/internal/outbound"
 	"github.com/saramand9/kpro/transport/internal/serveutil"
 )
 
@@ -39,8 +41,12 @@ type Config struct {
 	MaxPacketSize int
 	// MaxSessions caps active virtual peer sessions.
 	MaxSessions int
-	// SendQueueSize is the per-peer outbound packet queue length.
+	// SendQueueSize caps per-peer writes across encoding reservations, the
+	// queue, and the transport writer.
 	SendQueueSize int
+	// MaxPendingBytes caps bytes reserved for encoding, queued, or currently
+	// being written per peer. Zero derives SendQueueSize * MaxPacketSize.
+	MaxPendingBytes int64
 	// SessionIdleTimeout closes virtual sessions with no recent packets.
 	SessionIdleTimeout time.Duration
 	// CleanupInterval controls how often idle UDP sessions are swept.
@@ -62,7 +68,9 @@ type Server struct {
 	mu        sync.Mutex
 	sessions  map[string]*packetSession
 	closed    bool
+	accepting bool
 	started   bool
+	dispatch  *dispatchgate.Gate
 	ready     chan struct{}
 	readyOnce sync.Once
 }
@@ -74,6 +82,8 @@ func New(config Config) *Server {
 		rawConfig: config,
 		sessions:  make(map[string]*packetSession),
 		clockBase: time.Now(),
+		accepting: true,
+		dispatch:  dispatchgate.New(),
 		ready:     make(chan struct{}),
 	}
 }
@@ -149,7 +159,7 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 	for {
 		n, remote, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			if ctx.Err() != nil || s.isClosed() {
+			if ctx.Err() != nil || !s.isAccepting() {
 				return nil
 			}
 			return err
@@ -165,27 +175,41 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 		if !ok {
 			continue
 		}
-		if msg.ID == core.MsgHeartbeat {
-			_ = session.Send(core.Message{ID: core.MsgPong, Seq: msg.Seq})
-			continue
+		if !s.dispatch.Begin() {
+			return nil
 		}
-		err = transportapi.InvokeHandler(handler, session, msg)
-		if !transportapi.ContinueAfterHandlerError(
-			s.config.HandlerErrorPolicy,
-			s.config.OnHandlerError,
-			session,
-			msg,
-			err,
-		) {
-			_ = session.Close()
-		}
+		func() {
+			defer s.dispatch.End()
+			if msg.ID == core.MsgHeartbeat {
+				_ = session.Send(core.Message{ID: core.MsgPong, Seq: msg.Seq})
+				return
+			}
+			err = transportapi.InvokeHandler(handler, session, msg)
+			keepReading := transportapi.ContinueAfterHandlerError(
+				s.config.HandlerErrorPolicy,
+				s.config.OnHandlerError,
+				session,
+				msg,
+				err,
+			)
+			if !keepReading {
+				// Linearize the close-policy decision with Quiesce, then close
+				// outside the server lock.
+				s.mu.Lock()
+				closeSession := s.accepting && !s.closed
+				s.mu.Unlock()
+				if closeSession {
+					_ = session.Close()
+				}
+			}
+		}()
 	}
 }
 
 func (s *Server) claimStart() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if s.closed || !s.accepting {
 		return core.ErrClosed
 	}
 	if s.started {
@@ -197,7 +221,7 @@ func (s *Server) claimStart() error {
 
 func (s *Server) rollbackStart() {
 	s.mu.Lock()
-	if !s.closed && s.conn == nil {
+	if !s.closed && s.accepting && s.conn == nil {
 		s.started = false
 	}
 	s.mu.Unlock()
@@ -206,7 +230,7 @@ func (s *Server) rollbackStart() {
 func (s *Server) publishConn(conn *net.UDPConn) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if s.closed || !s.accepting {
 		return false
 	}
 	s.conn = conn
@@ -219,10 +243,24 @@ func (s *Server) isClosed() bool {
 	return s.closed
 }
 
+func (s *Server) isAccepting() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.accepting && !s.closed
+}
+
+// Quiesce stops datagram reads and virtual-session admission while preserving
+// the UDP socket for established peer-session writers until Shutdown.
+func (s *Server) Quiesce(context.Context) error {
+	return s.stopAdmissionAndReads()
+}
+
 // Shutdown closes the UDP socket and all virtual sessions.
 func (s *Server) Shutdown(context.Context) error {
+	stopErr := s.stopAdmissionAndReads()
 	s.mu.Lock()
 	s.closed = true
+	s.accepting = false
 	conn := s.conn
 	sessions := make([]*packetSession, 0, len(s.sessions))
 	for _, session := range s.sessions {
@@ -239,7 +277,24 @@ func (s *Server) Shutdown(context.Context) error {
 	for _, session := range sessions {
 		_ = session.Close()
 	}
-	return closeErr
+	return errors.Join(stopErr, closeErr)
+}
+
+func (s *Server) stopAdmissionAndReads() error {
+	s.mu.Lock()
+	s.accepting = false
+	conn := s.conn
+	s.mu.Unlock()
+	// Publish the cleanup/session-admission boundary under the same lock used
+	// by closeIdleSessions before closing the handler dispatch gate.
+	s.dispatch.Stop()
+	if conn == nil {
+		return nil
+	}
+	if err := conn.SetReadDeadline(time.Now()); err != nil && !errors.Is(err, net.ErrClosed) {
+		return err
+	}
+	return nil
 }
 
 func (s *Server) signalReady() {
@@ -255,7 +310,7 @@ func (s *Server) getOrCreateSession(addr *net.UDPAddr) (*packetSession, bool) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if s.closed || !s.accepting {
 		return nil, false
 	}
 	if session := s.sessions[key]; session != nil && !session.isClosed() {
@@ -272,7 +327,7 @@ func (s *Server) getOrCreateSession(addr *net.UDPAddr) (*packetSession, bool) {
 		key:       key,
 		server:    s,
 		remote:    &remote,
-		sendQueue: make(chan []byte, s.config.SendQueueSize),
+		sendQueue: newSessionOutboundQueue(s.config),
 		done:      make(chan struct{}),
 	}
 	session.lastActive.Store(s.activityTick(now))
@@ -307,6 +362,10 @@ func (s *Server) closeIdleSessions(now time.Time) {
 		return
 	}
 	s.mu.Lock()
+	if !s.accepting || s.closed {
+		s.mu.Unlock()
+		return
+	}
 	for _, session := range s.sessions {
 		if session.idleSince(now) >= s.config.SessionIdleTimeout {
 			session.closeLocked()
@@ -331,13 +390,17 @@ type packetSession struct {
 	server *Server
 	remote *net.UDPAddr
 
-	sendQueue chan []byte
+	sendQueue *outbound.Queue[[]byte]
 	done      chan struct{}
 	closeOnce sync.Once
 
 	closed     atomic.Bool
 	lastActive atomic.Int64
 }
+
+var _ core.OutboundStateProvider = (*packetSession)(nil)
+var _ core.OutboundWritableWaiter = (*packetSession)(nil)
+var _ transportapi.Quiescer = (*Server)(nil)
 
 func (s *packetSession) ID() uint64 {
 	return s.id
@@ -359,25 +422,25 @@ func (s *packetSession) Send(msg core.Message) error {
 	if s.server.udpConn() == nil {
 		return core.ErrClosed
 	}
+	select {
+	case <-s.done:
+		return core.ErrClosed
+	default:
+	}
+	reservation, err := s.sendQueue.Reserve(outbound.EstimateBytes(len(msg.Data), codec.FrameHeaderSize))
+	if err != nil {
+		return s.outboundError(err)
+	}
+	defer reservation.Cancel()
 	packet, err := s.server.config.Codec.EncodePacket(msg)
 	if err != nil {
 		return err
 	}
 	s.touch()
-
-	select {
-	case <-s.done:
-		return core.ErrClosed
-	default:
+	if err := reservation.Commit(packet, int64(len(packet))); err != nil {
+		return s.outboundError(err)
 	}
-	select {
-	case s.sendQueue <- packet:
-		return nil
-	case <-s.done:
-		return core.ErrClosed
-	default:
-		return core.ErrSendQueueFull
-	}
+	return nil
 }
 
 func (s *packetSession) Close() error {
@@ -387,10 +450,50 @@ func (s *packetSession) Close() error {
 	return nil
 }
 
+func (s *packetSession) OutboundState() core.OutboundState {
+	if s == nil || s.sendQueue == nil {
+		return core.OutboundState{Closed: true}
+	}
+	snapshot := s.sendQueue.Snapshot()
+	return core.OutboundState{
+		Closed:             snapshot.Closed,
+		Writable:           snapshot.Writable,
+		AboveHighWatermark: snapshot.AboveHighWatermark,
+		PendingWrites:      snapshot.PendingFrames,
+		MaxPendingWrites:   snapshot.MaxFrames,
+		PendingBytes:       snapshot.PendingBytes,
+		MaxPendingBytes:    snapshot.MaxBytes,
+		WaitingWriters:     snapshot.WaitingWriters,
+		MaxWaitingWriters:  snapshot.MaxWaitingWriters,
+		LowWatermarkBytes:  snapshot.LowWatermarkBytes,
+		HighWatermarkBytes: snapshot.HighWatermarkBytes,
+	}
+}
+
+func (s *packetSession) WaitOutboundWritable(ctx context.Context) error {
+	if s == nil || s.sendQueue == nil {
+		return core.ErrClosed
+	}
+	err := s.sendQueue.WaitWritable(ctx)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, outbound.ErrClosed):
+		return core.ErrClosed
+	case errors.Is(err, outbound.ErrTooManyWaiters):
+		return core.ErrTooManyOutboundWaiters
+	default:
+		return err
+	}
+}
+
 // closeLocked closes and removes the session while server.mu serializes it
 // with packet activity updates and idle cleanup.
 func (s *packetSession) closeLocked() {
 	s.closeOnce.Do(func() {
+		if s.sendQueue != nil {
+			s.sendQueue.Close()
+		}
 		s.closed.Store(true)
 		close(s.done)
 		if s.server.sessions[s.key] == s {
@@ -402,19 +505,41 @@ func (s *packetSession) closeLocked() {
 func (s *packetSession) writeLoop() {
 	for {
 		select {
-		case packet := <-s.sendQueue:
+		case item := <-s.sendQueue.Items():
+			packet := item.Value
 			conn := s.server.udpConn()
 			if conn == nil {
+				item.Done()
 				_ = s.Close()
 				return
 			}
 			if _, err := conn.WriteToUDP(packet, s.remote); err != nil {
+				item.Done()
 				_ = s.Close()
 				return
 			}
+			item.Done()
 		case <-s.done:
 			return
 		}
+	}
+}
+
+func newSessionOutboundQueue(config Config) *outbound.Queue[[]byte] {
+	return outbound.New[[]byte](outbound.Config{
+		MaxFrames: config.SendQueueSize,
+		MaxBytes:  config.MaxPendingBytes,
+	})
+}
+
+func (s *packetSession) outboundError(err error) error {
+	switch err {
+	case outbound.ErrClosed:
+		return core.ErrClosed
+	case outbound.ErrFull:
+		return core.ErrSendQueueFull
+	default:
+		return err
 	}
 }
 
@@ -459,6 +584,9 @@ func normalizeConfig(config Config) Config {
 	}
 	if config.SendQueueSize <= 0 {
 		config.SendQueueSize = DefaultSendQueueSize
+	}
+	if config.MaxPendingBytes <= 0 {
+		config.MaxPendingBytes = outbound.ByteLimit(config.SendQueueSize, int64(config.MaxPacketSize))
 	}
 	if config.SessionIdleTimeout <= 0 {
 		config.SessionIdleTimeout = DefaultSessionIdleTimeout

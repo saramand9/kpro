@@ -21,13 +21,38 @@ Status terms used below:
   late listener, connection, or session publication.
 - [ ] **Configure and verify:** Handle `SIGINT` and `SIGTERM`, call `Server.Shutdown` with a deadline, and test drain behavior with real clients.
 - [ ] **Configure and verify:** Make the process shutdown budget longer than the slowest accepted request, stream drain, and resource close path.
+- [ ] **Built in:** A Server-mounted message `Endpoint` first calls the
+  optional `transport.Quiescer`, then stops Router admission and drains
+  accepted sync/async handlers, and finally invokes terminal transport
+  shutdown. Explicit `Endpoint.Shutdown(ctx)` passes the caller context to
+  all applicable phases; serve-context cancellation is intercepted until
+  Router drain completes. An earlier phase error does not skip terminal
+  shutdown, and errors are retained together.
+- [ ] **Built in:** TCP, KCP, QUIC, UDP, and WebSocket implement quiesce while
+  retaining existing outbound writers. KCP keeps its shared listener/session
+  UDP socket open, accepts and closes new raw sessions, and closes the listener
+  only in terminal shutdown. QUIC closes new connection admission but accepts
+  and cancels new streams on retained connections until terminal shutdown.
+- [ ] **Configure and verify:** Require a custom message transport to implement
+  `transport.Quiescer` when new reads/dispatch must stop before Router drain.
+  The compatible fallback skips that phase and cannot provide the same
+  transport-side cutover.
+- [ ] **Built in:** `Router.Shutdown` drains accepted sync/async work even
+  when a session closes during graceful drain. `Router.Close` is an immediate
+  best-effort sync-queue cancellation path that does not wait; accepted async
+  work and already-ready sync work can still start.
+- [ ] **Configure and verify:** Always give endpoint/server shutdown an explicit
+  total deadline; a Router may apply its own drain timeout when the caller has
+  none, but that does not replace a process-level stop bound.
 - [ ] **Built in:** HTTP/3 shutdown sends GOAWAY and waits for active requests
   until the shutdown deadline; deadline expiry force-closes remaining
   connections and is reported to the caller.
 - [ ] **Configure and verify:** Treat message-transport shutdown as a bounded
-  stop with at-most-once outbound replies, not a delivery barrier. Add message
-  IDs, acknowledgements, retry, and idempotency where delivery must be
-  recoverable.
+  stop with at-most-once outbound replies, not a delivery barrier. Terminal
+  transport shutdown does not wait for queued or writer-owned bytes to flush,
+  and KPro currently has no separate outbound-drain phase. Add message IDs,
+  acknowledgements, bounded retry, and idempotency, or own an explicit
+  application-level drain where delivery must be recoverable.
 - [ ] **Built in:** SSE stream contexts cancel when endpoint shutdown begins;
   handlers must observe `Context.Done()` and return rather than detach work.
 - [ ] **Built in:** Serving and shutdown errors use `*server.ComponentError` to retain component name, lifecycle phase, and the original `errors.Is`/`errors.As` chain.
@@ -36,10 +61,38 @@ Status terms used below:
 
 ## Limits and overload
 
-- [ ] **Built in:** Message routing provides bounded sync and async queues, global and per-session in-flight caps, and selectable backpressure behavior through `core.RouterConfig`.
-- [ ] **Configure and verify:** Set router queue, worker, in-flight, idle, and shutdown values from a measured workload rather than accepting defaults without review.
+- [ ] **Built in:** Message routing provides bounded sync/async queues,
+  global/per-session in-flight caps, and selectable backpressure behavior
+  through `core.RouterConfig`. `BackpressureWait` separately caps blocked
+  dispatches at 1024 globally and 16 per session by default, with one ticket
+  retained across all admission stages of one dispatch.
+- [ ] **Configure and verify:** Set router queue, worker, in-flight, waiting,
+  idle, and shutdown values from a measured workload rather than accepting
+  defaults without review. Alert separately on global and per-session wait
+  rejection.
+- [ ] **Built in:** TCP, KCP, QUIC message streams, UDP, and WebSocket enforce
+  both per-session pending-write count (`SendQueueSize`) and accounted-byte
+  (`MaxPendingBytes`) limits. They reserve estimated capacity before encoding
+  and reconcile it with the actual encoded size before queue publication.
+- [ ] **Configure and verify:** Size both outbound limits from encoded payload
+  percentiles and slow-consumer tests. Treat `MaxPendingBytes` as retained
+  outbound accounting, not a whole-process heap bound.
+- [ ] **Built in:** `core.SessionOutboundState` reports optional
+  point-in-time pending/max write and byte counts, current/max waiting writers,
+  and high/low-watermark hysteresis for built-in message sessions.
+- [ ] **Built in:** `core.SessionWaitOutboundWritable` discovers optional,
+  context-cancelable advisory waiting. Built-in sessions bound waiters per
+  session to `SendQueueSize` by default; a successful wait reserves no
+  capacity for the next send.
+- [ ] **Configure and verify:** Use `OutboundState.Writable` only as a
+  telemetry or proactive-throttling hint. Always handle the subsequent
+  `Send`/`Reply` result as authoritative, including
+  `core.ErrSendQueueFull`. TCP, KCP, QUIC, and WebSocket close the session
+  on hard outbound-full, while UDP leaves its virtual peer open.
 - [ ] **Configure and verify:** Set `RateLimitConfig.IdleTimeout` and `MaxBuckets` for connection/IP limiters, and ensure custom native invocations publish a stable per-connection `ConnDone` signal rather than a request-scoped cancellation channel.
-- [ ] **Configure and verify:** Set transport connection/session/stream caps, message or frame limits, outbound queue sizes, and read/write/idle timeouts.
+- [ ] **Configure and verify:** Set transport connection/session/stream caps,
+  message or frame limits, both outbound queue limits, and read/write/idle
+  timeouts.
 - [ ] **Configure and verify:** Set HTTP `ReadTimeout`, `WriteTimeout`, `IdleTimeout`, `ShutdownTimeout`, and `MaxBodyBytes` explicitly. HTTP read/write/idle defaults are not an operational policy.
 - [ ] **Configure and verify:** Set HTTP/3 `MaxConnections`, `MaxBodyBytes`, `MaxHeaderBytes`, handshake/read/write/idle/shutdown timeouts, and QUIC/TLS policy explicitly.
 - [ ] **Configure and verify:** Keep HTTP/3 `Allow0RTT` disabled unless every accepted route is idempotent or protected against replay. A nested `QUICConfig.Allow0RTT` does not override the safe top-level default.
@@ -91,12 +144,18 @@ The repository CI requires live MySQL and PostgreSQL for its `dbintegration` sui
 - [ ] **Built in:** Use the active `RunHandle.WaitReady` result as the listener-readiness input before allowing an application readiness check to succeed; `Server.WaitReady` remains a compatibility view.
 - [ ] **Configure and verify:** Keep `healthx.Config.ExposeErrors` disabled unless disclosing dependency errors on the probe endpoint is acceptable.
 - [ ] **Built in:** `prometheusx` exposes invocation count, in-flight, and duration collectors labeled only by transport, stable operation, and result.
-- [ ] **Built in:** Additional `prometheusx` collectors expose bounded server/Router lifecycle and admission snapshots, and explicit eventing backlog/projector names.
+- [ ] **Built in:** Additional `prometheusx` collectors expose bounded
+  server/Router lifecycle and admission snapshots, including current/global/
+  per-session waiting capacity and distinct global/session wait-rejection
+  counters, plus explicit eventing backlog/projector names.
 - [ ] **Configure and verify:** Keep operation names bounded by registered routes/methods; never substitute raw URLs, peers, connection IDs, tenant IDs, or arbitrary metadata as metric labels.
 - [ ] **Built in:** `zapx` emits structured completion/error/panic/slow-call logs, and `otelx` starts server spans and extracts propagation with a supplied or global provider/propagator.
 - [ ] **External:** The application must configure, own, flush, and shut down its OpenTelemetry SDK, sampler, and exporter. KPro does not select or ship a production exporter configuration.
 - [ ] **Configure and verify:** Review peer/connection trace attributes and `zapx.Config.IncludeRemote` against privacy, redaction, retention, and telemetry-cost policy.
 - [ ] **Configure and verify:** Include transport, operation, error category, saturation, queue rejection, and dependency latency signals without unbounded labels.
+- [ ] **Configure and verify:** If exporting session outbound state, aggregate
+  it without connection IDs or peer addresses as labels; a state snapshot is
+  advisory and must not replace send-error counters.
 - [ ] **External:** Connect Prometheus exposition, structured logs, traces, and alerts to the application's selected telemetry stack. KPro does not provide a hosted backend.
 - [ ] **External:** Define service-level indicators, objectives, paging thresholds, dashboards, log retention, and trace sampling.
 - [ ] **Configure and verify:** Correlate a request or message across handler, database transaction, event delivery, and projector without logging credentials or sensitive payloads.
@@ -106,6 +165,14 @@ The repository CI requires live MySQL and PostgreSQL for its `dbintegration` sui
 - [ ] Use a supported Go 1.25 or 1.26 patch release; repository CI currently verifies Go 1.25.12 and 1.26.5.
 - [ ] Run `go mod verify` and `govulncheck ./...`; triage every reachable finding before release and retain the report. A clean call-graph scan is not a complete image or deployment scan.
 - [ ] Run unit, race, protocol integration, and database integration tests for the exact build.
+- [ ] Preserve the repository failure/concurrency cases for global and
+  per-session Router waiter exhaustion, cancellation cleanup, quiesce-before-
+  drain ordering, accepted sync work after session close, outbound waiter
+  exhaustion, concurrent Send/close, and writer-owned accounting.
+- [ ] Preserve the deterministic near-`MaxInt64` outbound-queue test. The
+  default high watermark is calculated as `MaxBytes - MaxBytes/5` to avoid the
+  multiplication overflow of `MaxBytes*4/5`; this arithmetic test is not a
+  claim that such a queue size is operationally appropriate.
 - [ ] Generate `coverage.out`, inspect package-level gaps, and meet the repository's 55% aggregate framework floor without treating the percentage as proof of scenario coverage.
 - [ ] Run the repository `cmd/benchguard` command against `benchmark/budgets.json`; investigate rather than blindly widening a failed hot-path budget.
 - [ ] Treat repository performance budgets as regression thresholds for their CI workload, not as application latency or capacity objectives.

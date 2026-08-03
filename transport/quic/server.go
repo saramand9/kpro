@@ -15,6 +15,8 @@ import (
 	"github.com/saramand9/kpro/codec"
 	"github.com/saramand9/kpro/core"
 	transportapi "github.com/saramand9/kpro/transport"
+	"github.com/saramand9/kpro/transport/internal/dispatchgate"
+	"github.com/saramand9/kpro/transport/internal/outbound"
 	"github.com/saramand9/kpro/transport/internal/serveutil"
 	"github.com/saramand9/kpro/transport/internal/streamutil"
 )
@@ -39,8 +41,13 @@ type Config struct {
 	MaxStreams   int
 	// MaxConnections caps active physical QUIC connections. MaxStreams caps
 	// active bidirectional message streams across those connections.
-	MaxConnections       int
-	SendQueueSize        int
+	MaxConnections int
+	// SendQueueSize caps per-stream writes across encoding reservations, the
+	// queue, and the transport writer.
+	SendQueueSize int
+	// MaxPendingBytes caps bytes reserved for encoding, queued, or currently
+	// being written per stream. Zero derives SendQueueSize * (MaxFrameSize + frame header).
+	MaxPendingBytes      int64
 	ReadTimeout          time.Duration
 	WriteTimeout         time.Duration
 	HandshakeIdleTimeout time.Duration
@@ -63,6 +70,9 @@ type Server struct {
 	lifecycleMu sync.Mutex
 	accepting   bool
 	started     bool
+	dispatch    *dispatchgate.Gate
+	acceptCtx   context.Context
+	acceptStop  context.CancelFunc
 
 	nextID      uint64
 	active      int64
@@ -76,11 +86,15 @@ type Server struct {
 func New(config Config) *Server {
 	rawConfig := config
 	config = cloneOwnedConfig(config)
+	acceptCtx, acceptStop := context.WithCancel(context.Background())
 	return &Server{
-		config:    normalizeConfig(config),
-		rawConfig: rawConfig,
-		accepting: true,
-		ready:     make(chan struct{}),
+		config:     normalizeConfig(config),
+		rawConfig:  rawConfig,
+		accepting:  true,
+		dispatch:   dispatchgate.New(),
+		acceptCtx:  acceptCtx,
+		acceptStop: acceptStop,
+		ready:      make(chan struct{}),
 	}
 }
 
@@ -194,14 +208,14 @@ func (s *Server) publishListener(listener *quicgo.Listener) bool {
 	return true
 }
 
+// Quiesce stops connection, stream, and message admission while preserving
+// established streams and their outbound writers until Shutdown.
+func (s *Server) Quiesce(context.Context) error {
+	return s.stopAdmissionAndReads()
+}
+
 func (s *Server) Shutdown(context.Context) error {
-	s.lifecycleMu.Lock()
-	s.accepting = false
-	ln := s.ln
-	s.lifecycleMu.Unlock()
-	if ln != nil {
-		_ = ln.Close()
-	}
+	stopErr := s.stopAdmissionAndReads()
 	s.connections.Range(func(key, _ interface{}) bool {
 		if conn, ok := key.(*quicgo.Conn); ok {
 			_ = conn.CloseWithError(0, "server shutting down")
@@ -214,7 +228,32 @@ func (s *Server) Shutdown(context.Context) error {
 		}
 		return true
 	})
-	return nil
+	return stopErr
+}
+
+func (s *Server) stopAdmissionAndReads() error {
+	s.lifecycleMu.Lock()
+	s.accepting = false
+	s.dispatch.Stop()
+	ln := s.ln
+	s.lifecycleMu.Unlock()
+	s.acceptStop()
+	var stopErr error
+	if ln != nil {
+		if err := ln.Close(); err != nil && !errors.Is(err, quicgo.ErrServerClosed) {
+			stopErr = errors.Join(stopErr, err)
+		}
+	}
+	now := time.Now()
+	s.sessions.Range(func(_, value interface{}) bool {
+		if session, ok := value.(*session); ok {
+			if err := session.stream.SetReadDeadline(now); err != nil {
+				stopErr = errors.Join(stopErr, err)
+			}
+		}
+		return true
+	})
+	return stopErr
 }
 
 func (s *Server) acceptStreams(conn *quicgo.Conn, handler core.Handler) {
@@ -224,8 +263,17 @@ func (s *Server) acceptStreams(conn *quicgo.Conn, handler core.Handler) {
 		s.releaseConnectionSlot()
 	}()
 	for {
-		stream, err := conn.AcceptStream(conn.Context())
+		stream, err := conn.AcceptStream(s.acceptCtx)
 		if err != nil {
+			if s.dispatch.Stopped() {
+				s.rejectStreamsUntilClosed(conn)
+			}
+			return
+		}
+		if !s.isAccepting() {
+			stream.CancelRead(0)
+			stream.CancelWrite(0)
+			s.rejectStreamsUntilClosed(conn)
 			return
 		}
 		if !s.tryAcquireStreamSlot() {
@@ -239,15 +287,29 @@ func (s *Server) acceptStreams(conn *quicgo.Conn, handler core.Handler) {
 			server:    s,
 			conn:      conn,
 			stream:    stream,
-			sendQueue: make(chan []byte, s.config.SendQueueSize),
+			sendQueue: newSessionOutboundQueue(s.config),
 			done:      make(chan struct{}),
 		}
 		if !s.registerSession(session, handler) {
 			stream.CancelRead(0)
 			stream.CancelWrite(0)
 			s.releaseStreamSlot()
+			if s.dispatch.Stopped() {
+				s.rejectStreamsUntilClosed(conn)
+			}
 			return
 		}
+	}
+}
+
+func (s *Server) rejectStreamsUntilClosed(conn *quicgo.Conn) {
+	for {
+		stream, err := conn.AcceptStream(conn.Context())
+		if err != nil {
+			return
+		}
+		stream.CancelRead(0)
+		stream.CancelWrite(0)
 	}
 }
 
@@ -324,10 +386,14 @@ type session struct {
 	server    *Server
 	conn      *quicgo.Conn
 	stream    *quicgo.Stream
-	sendQueue chan []byte
+	sendQueue *outbound.Queue[[]byte]
 	done      chan struct{}
 	closeOnce sync.Once
 }
+
+var _ core.OutboundStateProvider = (*session)(nil)
+var _ core.OutboundWritableWaiter = (*session)(nil)
+var _ transportapi.Quiescer = (*Server)(nil)
 
 func (s *session) ID() uint64 {
 	return s.id
@@ -351,30 +417,72 @@ func (s *session) Send(msg core.Message) error {
 		return core.ErrClosed
 	default:
 	}
+	reservation, err := s.sendQueue.Reserve(outbound.EstimateBytes(len(msg.Data), codec.FrameHeaderSize))
+	if err != nil {
+		return s.outboundError(err)
+	}
+	defer reservation.Cancel()
 	frame, err := s.server.config.Codec.Encode(msg)
 	if err != nil {
 		return err
 	}
-	select {
-	case s.sendQueue <- frame:
-		return nil
-	case <-s.done:
-		return core.ErrClosed
-	default:
-		_ = s.Close()
-		return core.ErrSendQueueFull
+	if err := reservation.Commit(frame, int64(len(frame))); err != nil {
+		return s.outboundError(err)
 	}
+	return nil
 }
 
 func (s *session) Close() error {
 	s.closeOnce.Do(func() {
+		if s.sendQueue != nil {
+			s.sendQueue.Close()
+		}
 		close(s.done)
-		s.stream.CancelRead(0)
-		_ = s.stream.Close()
+		if s.stream != nil {
+			s.stream.CancelRead(0)
+			_ = s.stream.Close()
+		}
 		s.server.sessions.Delete(s.id)
 		s.server.releaseStreamSlot()
 	})
 	return nil
+}
+
+func (s *session) OutboundState() core.OutboundState {
+	if s == nil || s.sendQueue == nil {
+		return core.OutboundState{Closed: true}
+	}
+	snapshot := s.sendQueue.Snapshot()
+	return core.OutboundState{
+		Closed:             snapshot.Closed,
+		Writable:           snapshot.Writable,
+		AboveHighWatermark: snapshot.AboveHighWatermark,
+		PendingWrites:      snapshot.PendingFrames,
+		MaxPendingWrites:   snapshot.MaxFrames,
+		PendingBytes:       snapshot.PendingBytes,
+		MaxPendingBytes:    snapshot.MaxBytes,
+		WaitingWriters:     snapshot.WaitingWriters,
+		MaxWaitingWriters:  snapshot.MaxWaitingWriters,
+		LowWatermarkBytes:  snapshot.LowWatermarkBytes,
+		HighWatermarkBytes: snapshot.HighWatermarkBytes,
+	}
+}
+
+func (s *session) WaitOutboundWritable(ctx context.Context) error {
+	if s == nil || s.sendQueue == nil {
+		return core.ErrClosed
+	}
+	err := s.sendQueue.WaitWritable(ctx)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, outbound.ErrClosed):
+		return core.ErrClosed
+	case errors.Is(err, outbound.ErrTooManyWaiters):
+		return core.ErrTooManyOutboundWaiters
+	default:
+		return err
+	}
 }
 
 func (s *Server) releaseStreamSlot() {
@@ -387,33 +495,68 @@ func (s *session) start(handler core.Handler) {
 }
 
 func (s *session) readLoop(handler core.Handler) {
-	defer s.Close()
+	preserveSession := false
+	defer func() {
+		if preserveSession {
+			return
+		}
+		// Linearize the close-policy decision with Quiesce, but keep network
+		// teardown outside the lifecycle lock.
+		s.server.lifecycleMu.Lock()
+		closeSession := s.server.accepting
+		s.server.lifecycleMu.Unlock()
+		if closeSession {
+			_ = s.Close()
+		}
+	}()
 	for {
+		if s.server.dispatch.Stopped() {
+			preserveSession = true
+			return
+		}
 		if s.server.config.ReadTimeout > 0 {
 			if err := s.stream.SetReadDeadline(time.Now().Add(s.server.config.ReadTimeout)); err != nil {
+				preserveSession = s.server.dispatch.Stopped()
 				return
 			}
 		}
+		if s.server.dispatch.Stopped() {
+			preserveSession = true
+			return
+		}
 		result, err := s.server.config.Codec.Read(s.stream, s.server.config.MaxFrameSize)
 		if err != nil {
+			preserveSession = s.server.dispatch.Stopped()
 			if err == io.EOF {
 				return
 			}
 			return
 		}
 		msg := result.Message
-		if msg.ID == core.MsgHeartbeat {
-			_ = s.Send(core.Message{ID: core.MsgPong, Seq: msg.Seq})
-			continue
+		if !s.server.dispatch.Begin() {
+			preserveSession = true
+			return
 		}
-		err = transportapi.InvokeHandler(handler, s, msg)
-		if !transportapi.ContinueAfterHandlerError(
-			s.server.config.HandlerErrorPolicy,
-			s.server.config.OnHandlerError,
-			s,
-			msg,
-			err,
-		) {
+		keepReading := func() bool {
+			defer s.server.dispatch.End()
+			if msg.ID == core.MsgHeartbeat {
+				_ = s.Send(core.Message{ID: core.MsgPong, Seq: msg.Seq})
+				return true
+			}
+			err = transportapi.InvokeHandler(handler, s, msg)
+			return transportapi.ContinueAfterHandlerError(
+				s.server.config.HandlerErrorPolicy,
+				s.server.config.OnHandlerError,
+				s,
+				msg,
+				err,
+			)
+		}()
+		if s.server.dispatch.Stopped() {
+			preserveSession = true
+			return
+		}
+		if !keepReading {
 			return
 		}
 	}
@@ -422,20 +565,43 @@ func (s *session) readLoop(handler core.Handler) {
 func (s *session) writeLoop() {
 	for {
 		select {
-		case data := <-s.sendQueue:
+		case item := <-s.sendQueue.Items():
+			data := item.Value
 			if s.server.config.WriteTimeout > 0 {
 				if err := s.stream.SetWriteDeadline(time.Now().Add(s.server.config.WriteTimeout)); err != nil {
+					item.Done()
 					_ = s.Close()
 					return
 				}
 			}
 			if err := streamutil.WriteFull(s.stream, data); err != nil {
+				item.Done()
 				_ = s.Close()
 				return
 			}
+			item.Done()
 		case <-s.done:
 			return
 		}
+	}
+}
+
+func newSessionOutboundQueue(config Config) *outbound.Queue[[]byte] {
+	return outbound.New[[]byte](outbound.Config{
+		MaxFrames: config.SendQueueSize,
+		MaxBytes:  config.MaxPendingBytes,
+	})
+}
+
+func (s *session) outboundError(err error) error {
+	switch err {
+	case outbound.ErrClosed:
+		return core.ErrClosed
+	case outbound.ErrFull:
+		_ = s.Close()
+		return core.ErrSendQueueFull
+	default:
+		return err
 	}
 }
 
@@ -457,6 +623,10 @@ func normalizeConfig(config Config) Config {
 	}
 	if config.SendQueueSize <= 0 {
 		config.SendQueueSize = DefaultSendQueueSize
+	}
+	if config.MaxPendingBytes <= 0 {
+		maxFrameBytes := int64(config.MaxFrameSize) + int64(codec.FrameHeaderSize)
+		config.MaxPendingBytes = outbound.ByteLimit(config.SendQueueSize, maxFrameBytes)
 	}
 	if config.ReadTimeout <= 0 {
 		config.ReadTimeout = DefaultReadTimeout

@@ -19,6 +19,9 @@ func TestErrorKindsClassifyFrameworkSentinels(t *testing.T) {
 		{ErrSendQueueFull, ErrorKindOverloaded},
 		{ErrTooManyInflight, ErrorKindOverloaded},
 		{ErrGlobalInflightLimit, ErrorKindOverloaded},
+		{ErrGlobalWaitingDispatchLimit, ErrorKindOverloaded},
+		{ErrSessionWaitingDispatchLimit, ErrorKindOverloaded},
+		{ErrTooManyOutboundWaiters, ErrorKindOverloaded},
 	}
 	for _, test := range tests {
 		if got := ErrorKindOf(test.err); got != test.kind {
@@ -73,7 +76,10 @@ func TestPublicErrorMessageUsesStableSafeText(t *testing.T) {
 }
 
 func TestIsDispatchRejection(t *testing.T) {
-	if !IsDispatchRejection(ErrNoHandler) || !IsDispatchRejection(ErrDispatchQueueFull) {
+	if !IsDispatchRejection(ErrNoHandler) ||
+		!IsDispatchRejection(ErrDispatchQueueFull) ||
+		!IsDispatchRejection(ErrGlobalWaitingDispatchLimit) ||
+		!IsDispatchRejection(ErrSessionWaitingDispatchLimit) {
 		t.Fatal("Router rejection was not classified as handled")
 	}
 	if IsDispatchRejection(errors.New("handler failed")) {

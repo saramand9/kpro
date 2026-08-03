@@ -70,6 +70,7 @@ type RouterCollector struct {
 
 	lifecycle *prometheus.Desc
 	inflight  *prometheus.Desc
+	waiting   *prometheus.Desc
 	sessions  *prometheus.Desc
 	queue     *prometheus.Desc
 	dispatch  *prometheus.Desc
@@ -93,6 +94,8 @@ func NewRouterCollector(source RouterSnapshotter, config RuntimeCollectorConfig)
 			"Current router lifecycle state.", []string{"state"}, prometheus.Labels{"router": config.Name}),
 		inflight: prometheus.NewDesc(fqName("router_inflight"),
 			"Accepted router work currently queued or running.", []string{"kind"}, prometheus.Labels{"router": config.Name}),
+		waiting: prometheus.NewDesc(fqName("router_waiting_dispatches"),
+			"Dispatch callers holding bounded wait capacity.", []string{"kind"}, prometheus.Labels{"router": config.Name}),
 		sessions: prometheus.NewDesc(fqName("router_sessions"),
 			"Current router session executors.", nil, prometheus.Labels{"router": config.Name}),
 		queue: prometheus.NewDesc(fqName("router_queue_depth"),
@@ -106,6 +109,7 @@ func NewRouterCollector(source RouterSnapshotter, config RuntimeCollectorConfig)
 func (c *RouterCollector) Describe(channel chan<- *prometheus.Desc) {
 	channel <- c.lifecycle
 	channel <- c.inflight
+	channel <- c.waiting
 	channel <- c.sessions
 	channel <- c.queue
 	channel <- c.dispatch
@@ -117,6 +121,9 @@ func (c *RouterCollector) Collect(channel chan<- prometheus.Metric) {
 	channel <- prometheus.MustNewConstMetric(c.lifecycle, prometheus.GaugeValue, 1, snapshot.State.String())
 	channel <- prometheus.MustNewConstMetric(c.inflight, prometheus.GaugeValue, float64(snapshot.Inflight), "current")
 	channel <- prometheus.MustNewConstMetric(c.inflight, prometheus.GaugeValue, float64(snapshot.MaxInflight), "limit")
+	channel <- prometheus.MustNewConstMetric(c.waiting, prometheus.GaugeValue, float64(snapshot.WaitingDispatches), "current")
+	channel <- prometheus.MustNewConstMetric(c.waiting, prometheus.GaugeValue, float64(snapshot.MaxWaitingDispatches), "global_limit")
+	channel <- prometheus.MustNewConstMetric(c.waiting, prometheus.GaugeValue, float64(snapshot.MaxWaitingDispatchesPerSession), "per_session_limit")
 	channel <- prometheus.MustNewConstMetric(c.sessions, prometheus.GaugeValue, float64(snapshot.Sessions))
 	channel <- prometheus.MustNewConstMetric(c.queue, prometheus.GaugeValue, float64(snapshot.SyncQueueDepth), "sync")
 	channel <- prometheus.MustNewConstMetric(c.queue, prometheus.GaugeValue, float64(snapshot.AsyncQueueDepth), "async")
@@ -129,6 +136,8 @@ func (c *RouterCollector) Collect(channel chan<- prometheus.Metric) {
 		{outcome: "dropped", value: snapshot.Dropped},
 		{outcome: "rejected", value: snapshot.Rejected},
 		{outcome: "waited", value: snapshot.Waited},
+		{outcome: "global_wait_rejected", value: snapshot.GlobalWaitRejected},
+		{outcome: "session_wait_rejected", value: snapshot.SessionWaitRejected},
 	}
 	for _, counter := range counters {
 		channel <- prometheus.MustNewConstMetric(c.dispatch, prometheus.CounterValue, float64(counter.value), counter.outcome)

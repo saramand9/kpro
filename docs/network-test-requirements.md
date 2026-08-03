@@ -197,7 +197,19 @@ Transport tests must cover configured limits:
 - Async queue full.
 - Max in-flight requests per session.
 - Router closed while requests are being dispatched.
-- Small send queue with paced read/write.
+- `BackpressureWait` global and per-session waiter limits, including a hot
+  session rejection while a different session can still use remaining global
+  wait capacity.
+- Waiter cancellation and Router/session close release the one ticket held by
+  a dispatch across global, per-session, and queue wait stages.
+- Small `SendQueueSize` and `MaxPendingBytes` with paced read/write.
+- Outbound high/low-watermark transitions under a slow writer.
+- `SessionWaitOutboundWritable` immediate success, wake, context
+  cancellation, session close, and per-session waiter-limit rejection;
+  `WaitingWriters` must return to zero on every terminal path.
+- The default outbound high watermark near `math.MaxInt64` is positive and
+  equals `MaxBytes - MaxBytes/5`; this catches multiplication overflow without
+  treating such a limit as a deployment recommendation.
 
 Expected behavior:
 
@@ -206,6 +218,10 @@ Expected behavior:
 - Error responses keep the original request `Seq`.
 - The connection does not silently drop accepted requests without a traceable
   response unless the protocol fault requires connection close.
+- TCP, KCP, QUIC, and WebSocket hard outbound-full results close the affected
+  session; UDP reports `core.ErrSendQueueFull` without closing its virtual
+  peer. A successful writable wait reserves no next-send capacity in either
+  case.
 
 ### R10: Transport Fragmentation And Batching
 
@@ -246,8 +262,31 @@ Tests should include graceful and partial close behavior:
 
 - Client half-closes after completed round trips.
 - Server shutdown closes listener and active sessions.
-- Already-sent responses are flushed when the transport design promises it.
+- Quiesce is idempotent, prevents handler dispatch after its boundary, and
+  leaves an already established writer usable by an accepted handler.
+- Endpoint shutdown orders optional transport quiesce before Router drain and
+  terminal transport shutdown. A quiesce/drain error does not skip shutdown,
+  and returned errors preserve every failed phase.
+- TCP, UDP, and WebSocket stop their new admission/read paths. KCP keeps its
+  shared UDP listener open for established writers, accepts and closes new raw
+  sessions without registration/dispatch, and closes that listener only at
+  terminal shutdown. QUIC closes its connection listener but accepts and
+  cancels new streams on retained connections without session registration or
+  handler dispatch until terminal shutdown.
+- A third-party transport without `transport.Quiescer` is tested against the
+  documented Router-drain-then-shutdown compatibility path rather than the
+  stronger receive-side cutover.
+- Endpoint shutdown lets already accepted handlers finish their final send
+  attempt and queue admission before transport shutdown. Terminal shutdown
+  does not wait for queued/writer-owned bytes to flush to the network, so this
+  is not a peer-delivery assertion.
+- Graceful Router shutdown executes accepted sync work even if the session
+  closes during drain. Immediate `Router.Close` is tested for cleanup but
+  must not be asserted as a barrier that prevents every already-ready task from
+  starting.
 - Blocked queues unblock on session close or router shutdown.
+- A `Send` blocked inside a test codec cannot commit after concurrent session
+  close has linearized, and all reservation/write accounting returns to zero.
 
 ## Minimum Scenario Matrix
 
@@ -262,6 +301,10 @@ Every message-based transport should eventually cover this matrix:
 | Unknown handler error | Yes |
 | Heartbeat to pong | Yes |
 | Queue full errors | Yes |
+| Global/per-session Router waiter isolation | Yes |
+| Outbound writable wait wake/cancel/bound | Yes |
+| Pending-byte limit and watermark transitions | Yes |
+| Concurrent Send/close admission ordering | Yes |
 | Max in-flight errors | Yes |
 | Router closed errors | Yes |
 | Multi-connection isolation | Yes, when the transport supports connections |
@@ -269,7 +312,7 @@ Every message-based transport should eventually cover this matrix:
 | Flags preservation | Yes |
 | Transport batching or fragmentation | Yes, when applicable |
 | Protocol fault input | Yes |
-| Close and shutdown behavior | Yes |
+| Quiesce, close, and shutdown ordering | Yes |
 
 Connectionless transports such as UDP should replace multi-connection isolation
 with peer/session isolation if the transport maps remote addresses to sessions.

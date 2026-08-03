@@ -37,12 +37,14 @@ func TestRouterConfigValidateIsStrictButNewRouterRemainsCompatible(t *testing.T)
 		t.Fatalf("zero RouterConfig validation error = %v", err)
 	}
 	invalid := RouterConfig{
-		SyncQueueSize:      -1,
-		AsyncWorkers:       -1,
-		AsyncQueueSize:     -1,
-		MaxInflight:        -1,
-		SessionIdleTimeout: -time.Second,
-		Backpressure:       BackpressurePolicy(99),
+		SyncQueueSize:                  -1,
+		AsyncWorkers:                   -1,
+		AsyncQueueSize:                 -1,
+		MaxInflight:                    -1,
+		MaxWaitingDispatches:           -1,
+		MaxWaitingDispatchesPerSession: -1,
+		SessionIdleTimeout:             -time.Second,
+		Backpressure:                   BackpressurePolicy(99),
 	}
 	if err := invalid.Validate(); err == nil {
 		t.Fatal("invalid RouterConfig passed validation")
@@ -51,10 +53,25 @@ func TestRouterConfigValidateIsStrictButNewRouterRemainsCompatible(t *testing.T)
 	router := NewRouter(invalid)
 	if router.config.SyncQueueSize != DefaultSyncQueueSize ||
 		router.config.MaxInflight != DefaultMaxInflight ||
+		router.config.MaxWaitingDispatches != DefaultMaxWaitingDispatches ||
+		router.config.MaxWaitingDispatchesPerSession != DefaultMaxWaitingDispatchesPerSession ||
 		router.config.Backpressure != BackpressureReject {
 		t.Fatalf("NewRouter() did not preserve compatibility normalization: %+v", router.config)
 	}
 	shutdownAdmissionRouter(t, router)
+
+	capped := NewRouter(RouterConfig{
+		MaxInflight:           2,
+		MaxInflightPerSession: 8,
+		MaxWaitingDispatches:  2,
+	})
+	if capped.config.MaxWaitingDispatchesPerSession != 2 {
+		t.Fatalf(
+			"default per-session waiting limit = %d, want global cap 2",
+			capped.config.MaxWaitingDispatchesPerSession,
+		)
+	}
+	shutdownAdmissionRouter(t, capped)
 }
 
 func TestRouterLifecycle(t *testing.T) {
@@ -213,7 +230,7 @@ func TestRouterGlobalCapacityWaitHonorsContext(t *testing.T) {
 		t.Fatalf("waiting DispatchContext() error = %v, want deadline exceeded", err)
 	}
 	stats := router.Snapshot()
-	if stats.Inflight != 1 || stats.Waited != 1 || stats.Rejected != 1 {
+	if stats.Inflight != 1 || stats.WaitingDispatches != 0 || stats.Waited != 1 || stats.Rejected != 1 {
 		t.Fatalf("stats after canceled wait = %+v", stats)
 	}
 
@@ -221,6 +238,220 @@ func TestRouterGlobalCapacityWaitHonorsContext(t *testing.T) {
 	waitForRouterCompleted(t, router, 1)
 	if got := router.Snapshot().Inflight; got != 0 {
 		t.Fatalf("inflight after completion = %d, want 0", got)
+	}
+}
+
+func TestRouterBoundsWaitingDispatches(t *testing.T) {
+	config := testRouterConfig(BackpressureWait)
+	config.MaxInflight = 1
+	config.MaxWaitingDispatches = 2
+	router := NewRouter(config)
+	defer shutdownAdmissionRouter(t, router)
+
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	router.HandleSync(1, func(ctx Context) error {
+		if ctx.Message().Seq == 1 {
+			close(firstStarted)
+			<-releaseFirst
+		}
+		return nil
+	})
+	if err := router.Dispatch(NewContext(newAdmissionSession(1), Message{ID: 1, Seq: 1})); err != nil {
+		t.Fatalf("first Dispatch() error = %v", err)
+	}
+	waitClosedForAdmissionTest(t, firstStarted, "first handler did not start")
+
+	results := make(chan error, 2)
+	for sequence := uint64(2); sequence <= 3; sequence++ {
+		sequence := sequence
+		go func() {
+			results <- router.DispatchContext(
+				context.Background(),
+				NewContext(newAdmissionSession(sequence), Message{ID: 1, Seq: sequence}),
+			)
+		}()
+	}
+	waitForWaitingDispatches(t, router, 2)
+
+	err := router.DispatchContext(
+		context.Background(),
+		NewContext(newAdmissionSession(4), Message{ID: 1, Seq: 4}),
+	)
+	if !errors.Is(err, ErrGlobalWaitingDispatchLimit) || ErrorKindOf(err) != ErrorKindOverloaded {
+		t.Fatalf("overflow DispatchContext() error = %v, want bounded overload", err)
+	}
+	stats := router.Snapshot()
+	if stats.WaitingDispatches != 2 ||
+		stats.MaxWaitingDispatches != 2 ||
+		stats.GlobalWaitRejected != 1 ||
+		stats.SessionWaitRejected != 0 ||
+		stats.Rejected != 1 {
+		t.Fatalf("stats at waiter limit = %+v", stats)
+	}
+
+	close(releaseFirst)
+	for range 2 {
+		if err := waitAdmissionResult(t, results); err != nil {
+			t.Fatalf("waiting DispatchContext() error = %v", err)
+		}
+	}
+	waitForRouterCompleted(t, router, 3)
+	stats = router.Snapshot()
+	if stats.WaitingDispatches != 0 ||
+		stats.Waited != 2 ||
+		stats.Accepted != 3 ||
+		stats.Completed != 3 ||
+		stats.GlobalWaitRejected != 1 {
+		t.Fatalf("final waiter stats = %+v", stats)
+	}
+}
+
+func TestRouterIsolatesWaitingDispatchesPerSession(t *testing.T) {
+	config := testRouterConfig(BackpressureWait)
+	config.MaxInflight = 2
+	config.MaxInflightPerSession = 1
+	config.MaxWaitingDispatches = 2
+	config.MaxWaitingDispatchesPerSession = 1
+	router := NewRouter(config)
+	defer shutdownAdmissionRouter(t, router)
+
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	router.HandleSync(1, func(ctx Context) error {
+		if ctx.Message().Seq == 1 {
+			close(firstStarted)
+			<-releaseFirst
+		}
+		return nil
+	})
+	hotSession := newAdmissionSession(1)
+	if err := router.Dispatch(NewContext(hotSession, Message{ID: 1, Seq: 1})); err != nil {
+		t.Fatalf("first Dispatch() error = %v", err)
+	}
+	waitClosedForAdmissionTest(t, firstStarted, "first handler did not start")
+
+	hotResult := make(chan error, 1)
+	go func() {
+		hotResult <- router.DispatchContext(
+			context.Background(),
+			NewContext(hotSession, Message{ID: 1, Seq: 2}),
+		)
+	}()
+	waitForWaitingDispatches(t, router, 1)
+
+	err := router.DispatchContext(
+		context.Background(),
+		NewContext(hotSession, Message{ID: 1, Seq: 3}),
+	)
+	if !errors.Is(err, ErrSessionWaitingDispatchLimit) || ErrorKindOf(err) != ErrorKindOverloaded {
+		t.Fatalf("hot-session overflow error = %v, want session wait limit", err)
+	}
+
+	coldResult := make(chan error, 1)
+	go func() {
+		coldResult <- router.DispatchContext(
+			context.Background(),
+			NewContext(newAdmissionSession(2), Message{ID: 1, Seq: 4}),
+		)
+	}()
+	waitForWaitingDispatches(t, router, 2)
+	stats := router.Snapshot()
+	if stats.MaxWaitingDispatchesPerSession != 1 ||
+		stats.GlobalWaitRejected != 0 ||
+		stats.SessionWaitRejected != 1 ||
+		stats.Rejected != 1 {
+		t.Fatalf("stats after per-session isolation = %+v", stats)
+	}
+
+	close(releaseFirst)
+	if err := waitAdmissionResult(t, hotResult); err != nil {
+		t.Fatalf("hot waiting DispatchContext() error = %v", err)
+	}
+	if err := waitAdmissionResult(t, coldResult); err != nil {
+		t.Fatalf("cold waiting DispatchContext() error = %v", err)
+	}
+	waitForRouterCompleted(t, router, 3)
+	stats = router.Snapshot()
+	if stats.WaitingDispatches != 0 ||
+		stats.Waited != 2 ||
+		stats.Accepted != 3 ||
+		stats.Completed != 3 ||
+		stats.SessionWaitRejected != 1 {
+		t.Fatalf("final per-session waiter stats = %+v", stats)
+	}
+}
+
+func TestRouterReusesOneWaitTicketAcrossAdmissionStages(t *testing.T) {
+	config := testRouterConfig(BackpressureWait)
+	config.MaxInflight = 2
+	config.MaxInflightPerSession = 1
+	config.MaxWaitingDispatches = 1
+	config.MaxWaitingDispatchesPerSession = 1
+	router := NewRouter(config)
+	defer shutdownAdmissionRouter(t, router)
+
+	hotStarted := make(chan struct{})
+	coldStarted := make(chan struct{})
+	releaseHot := make(chan struct{})
+	releaseCold := make(chan struct{})
+	router.HandleSync(1, func(ctx Context) error {
+		switch ctx.Message().Seq {
+		case 1:
+			close(hotStarted)
+			<-releaseHot
+		case 2:
+			close(coldStarted)
+			<-releaseCold
+		}
+		return nil
+	})
+	hotSession := newAdmissionSession(1)
+	coldSession := newAdmissionSession(2)
+	if err := router.Dispatch(NewContext(hotSession, Message{ID: 1, Seq: 1})); err != nil {
+		t.Fatalf("hot Dispatch() error = %v", err)
+	}
+	if err := router.Dispatch(NewContext(coldSession, Message{ID: 1, Seq: 2})); err != nil {
+		t.Fatalf("cold Dispatch() error = %v", err)
+	}
+	waitClosedForAdmissionTest(t, hotStarted, "hot handler did not start")
+	waitClosedForAdmissionTest(t, coldStarted, "cold handler did not start")
+
+	result := make(chan error, 1)
+	go func() {
+		result <- router.DispatchContext(
+			context.Background(),
+			NewContext(hotSession, Message{ID: 1, Seq: 3}),
+		)
+	}()
+	waitForWaitingDispatches(t, router, 1)
+
+	close(releaseCold)
+	waitForRouterCompleted(t, router, 1)
+	select {
+	case err := <-result:
+		t.Fatalf("dispatch returned while hot session remained full: %v", err)
+	default:
+	}
+	stats := router.Snapshot()
+	if stats.WaitingDispatches != 1 ||
+		stats.Inflight != 2 ||
+		stats.GlobalWaitRejected != 0 ||
+		stats.SessionWaitRejected != 0 {
+		t.Fatalf("cross-stage wait consumed another ticket: %+v", stats)
+	}
+
+	close(releaseHot)
+	if err := waitAdmissionResult(t, result); err != nil {
+		t.Fatalf("cross-stage DispatchContext() error = %v", err)
+	}
+	waitForRouterCompleted(t, router, 3)
+	stats = router.Snapshot()
+	if stats.WaitingDispatches != 0 ||
+		stats.Waited != 1 ||
+		stats.Accepted != 3 ||
+		stats.Rejected != 0 {
+		t.Fatalf("final cross-stage waiter stats = %+v", stats)
 	}
 }
 
@@ -297,6 +528,60 @@ func TestRouterSyncQueueWaitHonorsContextWithoutLeakingAdmission(t *testing.T) {
 
 	close(release)
 	waitForRouterCompleted(t, router, 2)
+}
+
+func TestRouterShutdownReturnsStableErrorToSyncQueueWaiter(t *testing.T) {
+	config := testRouterConfig(BackpressureWait)
+	config.SyncQueueSize = 1
+	config.MaxInflight = 3
+	config.MaxInflightPerSession = 3
+	router := NewRouter(config)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	router.HandleSync(1, func(ctx Context) error {
+		if ctx.Message().Seq == 1 {
+			close(started)
+			<-release
+		}
+		return nil
+	})
+	session := newAdmissionSession(1)
+	if err := router.Dispatch(NewContext(session, Message{ID: 1, Seq: 1})); err != nil {
+		t.Fatalf("first Dispatch() error = %v", err)
+	}
+	waitClosedForAdmissionTest(t, started, "first handler did not start")
+	if err := router.Dispatch(NewContext(session, Message{ID: 1, Seq: 2})); err != nil {
+		t.Fatalf("queued Dispatch() error = %v", err)
+	}
+
+	waitResult := make(chan error, 1)
+	go func() {
+		waitResult <- router.DispatchContext(
+			context.Background(),
+			NewContext(session, Message{ID: 1, Seq: 3}),
+		)
+	}()
+	waitForWaitingDispatches(t, router, 1)
+	shutdownResult := make(chan error, 1)
+	go func() { shutdownResult <- router.Shutdown(context.Background()) }()
+
+	if err := waitAdmissionResult(t, waitResult); !errors.Is(err, ErrRouterClosed) {
+		t.Fatalf("waiting DispatchContext() error = %v, want %v", err, ErrRouterClosed)
+	}
+	stats := router.Snapshot()
+	if stats.WaitingDispatches != 0 || stats.Inflight != 2 || stats.Rejected != 1 {
+		t.Fatalf("stats after shutdown rejected queue waiter = %+v", stats)
+	}
+
+	close(release)
+	if err := waitAdmissionResult(t, shutdownResult); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	stats = router.Snapshot()
+	if stats.Inflight != 0 || stats.Completed != 2 || stats.Dropped != 0 {
+		t.Fatalf("final shutdown waiter stats = %+v", stats)
+	}
 }
 
 func TestRouterRejectsWhenAsyncQueueIsFull(t *testing.T) {
@@ -409,6 +694,18 @@ func waitForRouterCompleted(t *testing.T, router *Router, want uint64) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("completed = %d, want %d", router.Snapshot().Completed, want)
+}
+
+func waitForWaitingDispatches(t *testing.T, router *Router, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if router.Snapshot().WaitingDispatches == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("waiting dispatches = %d, want %d", router.Snapshot().WaitingDispatches, want)
 }
 
 func waitClosedForAdmissionTest(t *testing.T, done <-chan struct{}, message string) {

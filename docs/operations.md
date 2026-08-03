@@ -79,12 +79,63 @@ its context, including a gRPC handler that ignores its RPC context. A
 connection explicitly hijacked through `net/http` is no longer owned by the
 server and must be tracked and closed by the hijacking component.
 
-Message transport shutdown is a bounded stop, not a reply-delivery barrier. It
-closes acceptance, session, and writer paths; outbound sends and replies are
-at-most-once, and shutdown does not confirm that queued or in-flight replies
-reached the peer. Applications that require retryable delivery should add
-message identifiers, idempotency, and an application-level acknowledgement
-protocol.
+For a message transport mounted as `server.Endpoint`, endpoint shutdown has
+three ordered phases:
+
+1. call `Quiesce(ctx)` when the transport implements the optional
+   `transport.Quiescer`;
+2. call `Router.Shutdown(ctx)` to close Router admission and drain already
+   accepted sync and async handlers;
+3. call the transport's terminal `Shutdown(ctx)`.
+
+TCP, KCP, QUIC, UDP, and WebSocket implement `transport.Quiescer`. Their
+quiesce phase stops new handler dispatch and message reads while preserving
+established sessions and their outbound writer paths, so accepted handlers can
+attempt a final reply during Router drain. Quiesce, Router-drain, and transport
+errors do not skip later phases and are joined for the caller. A third-party
+transport without `Quiescer` uses the compatibility fallback of Router drain
+followed by transport shutdown; that fallback cannot prevent the transport
+from continuing to read while the Router is draining, so implement the
+optional phase when a hard dispatch cutover is required.
+
+KCP has one protocol-specific boundary: established sessions share the
+listener's UDP socket. Its quiesce phase therefore keeps that listener open,
+continuously accepts and closes newly arriving raw KCP sessions, and blocks
+their registration/dispatch. The terminal shutdown phase closes the shared
+listener after accepted application work drains.
+
+QUIC closes its top-level connection listener during quiesce but retains
+established connections and streams for outbound writes. For those connections
+it continues accepting and immediately canceling newly opened streams until
+terminal shutdown, without publishing them as sessions or dispatching a
+handler.
+
+An explicit `Endpoint.Shutdown(ctx)` passes its context to all applicable
+phases. Cancellation of the context supplied to
+`Endpoint.ListenAndServe` is intercepted by the endpoint so it does not reach
+the transport before Router drain; that path uses the Router's configured
+`ShutdownTimeout` when applying its internal drain bound. Pass an explicit
+deadline to `Server.Shutdown` when the total process stop must be bounded.
+
+`Router.Shutdown` executes accepted per-session sync work as well as accepted
+async work, including sync tasks whose session closes during the graceful
+drain. `Router.Close` is deliberately the immediate path: it closes admission
+and asks session executors to release queued sync contexts, but it does not
+wait. A sync task already ready in a scheduler race can still begin, and
+accepted async queue work may still execute. Do not use `Close` as proof that
+no accepted handler started; use `Shutdown` when accepted work must be
+drained.
+
+That ordering is a bounded handler-drain mechanism, not a reply-delivery
+barrier. A handler completing, or even a successful `Send` placing its reply in
+the outbound queue, does not confirm that the queued or in-flight bytes reached
+the peer. The built-in terminal transport `Shutdown` closes sessions and
+outbound queues; it does not wait for queued or writer-owned items to flush to
+the network. KPro does not currently expose a separate outbound-drain phase.
+Message sends remain at-most-once. Applications that require evidence of
+network/application receipt should add message identifiers, idempotency,
+acknowledgements, and bounded retry, or own an explicit application-level
+outbound drain before calling terminal shutdown.
 
 HTTP/3 has a different protocol-specific path: endpoint shutdown stops new
 work, sends GOAWAY, and waits for active requests/connections to finish until
@@ -134,13 +185,108 @@ Message routing has two admission policies:
 - `core.BackpressureReject` returns immediately when bounded capacity is exhausted;
 - `core.BackpressureWait` waits for capacity until the router or session closes; callers that own a `core.Router` should use `DispatchContext` to add a request deadline.
 
+`BackpressureWait` also bounds blocked callers independently from accepted
+in-flight work. `MaxWaitingDispatches` defaults to 1024 Router-wide and
+`MaxWaitingDispatchesPerSession` defaults to 16; normalization caps those
+defaults by the corresponding global/per-session in-flight limits. A dispatch
+acquires a ticket only when it first has to block, retains that same ticket
+while it crosses global, per-session, and sync/async queue admission stages,
+and releases it when `DispatchContext` returns. It never consumes one waiter
+per stage. This bounds wait-state retention and prevents one session from
+occupying every Router-wide waiter slot under the defaults. If both values are
+set explicitly, keep the per-session limit below the global limit to preserve
+that isolation.
+
 Expected saturation errors include `core.ErrDispatchQueueFull`,
 `core.ErrSendQueueFull`, `core.ErrTooManyInflight`, and
-`core.ErrGlobalInflightLimit`. They retain their specific `errors.Is` identity
-and classify as `core.ErrorKindOverloaded`. Use
+`core.ErrGlobalInflightLimit`. Wait-specific saturation can additionally
+return `core.ErrGlobalWaitingDispatchLimit`,
+`core.ErrSessionWaitingDispatchLimit`, or
+`core.ErrTooManyOutboundWaiters`. They retain their specific `errors.Is`
+identity and classify as `core.ErrorKindOverloaded`. Use
 `core.WithErrorKind(kind, err)` for application errors that need the same
 protocol-neutral mapping, and `core.PublicErrorMessage(err)` when implementing
 a custom response boundary. Do not send `err.Error()` to an untrusted peer.
+
+TCP, KCP, QUIC message streams, UDP peers, and WebSocket sessions use two
+per-session outbound hard limits:
+
+- `SendQueueSize` caps pending writes by count;
+- `MaxPendingBytes` caps accounted bytes across encoding reservations,
+  queued writes, and the write currently owned by the transport writer.
+
+`Send` reserves one write and an estimated payload-plus-frame-header byte
+count before invoking the codec, then reconciles that reservation against the
+actual encoded size before publishing the write. Encoding failure, rejected
+commit, and completed/failed writes release their matching capacity. Queue
+close releases queued items; an in-progress encoder reservation or
+writer-owned item remains accounted until its owner cancels, commits, or calls
+completion. Zero `MaxPendingBytes` derives a transport-specific default from
+`SendQueueSize` and the configured maximum frame, packet, or message size;
+TCP/KCP/QUIC use `SendQueueSize * (MaxFrameSize + FrameHeaderSize)`,
+UDP uses `SendQueueSize * MaxPacketSize`, and WebSocket uses
+`SendQueueSize * MaxMessage`. Set both limits explicitly from workload
+evidence. The byte budget accounts outbound frame reservations and retained
+frames; it is not a process heap limit. In particular, an
+application-supplied codec can allocate temporary working memory or return a
+frame larger than the pre-encode estimate before the actual-size commit rejects
+it.
+
+The queue also maintains byte-watermark hysteresis. Built-ins expose its
+point-in-time view through the optional `core.OutboundStateProvider`; use
+`core.SessionOutboundState` without widening the base `core.Session`
+interface:
+
+```go
+state, ok := core.SessionOutboundState(ctx.Session())
+if ok && !state.Writable {
+	// Advisory only: shed or defer optional work and record bounded telemetry.
+}
+if err := ctx.Reply(replyID, payload); err != nil {
+	// This result is authoritative; state may have changed after the snapshot.
+	return err
+}
+```
+
+`PendingWrites` and `PendingBytes` include encoding reservations, queued
+writes, and a writer-owned write. `Writable` is false when the queue is
+closed, a hard count/byte cap is reached, or the high-watermark state is
+active. That high-watermark state clears only after bytes drain to the low
+watermark, avoiding rapid state flapping. It is an observation/throttling
+hint, not a reservation: `Send` can still succeed above the high watermark
+until a hard count or byte cap is reached, or fail after a writable snapshot
+because another sender consumed capacity. `Send`/`Reply` remains the
+authoritative admission result. TCP, KCP, QUIC, and WebSocket close the
+affected session on a hard outbound-full result; UDP returns
+`core.ErrSendQueueFull` without closing the virtual peer.
+
+Code that explicitly prefers bounded waiting over shedding can use the
+optional capability without changing `core.Session`:
+
+```go
+supported, err := core.SessionWaitOutboundWritable(ctx, session)
+if supported && err != nil {
+	return err
+}
+return session.Send(message)
+```
+
+The five built-in message sessions support this helper. Waiting is
+context-cancelable and bounded per session; the default maximum number of
+waiting writers equals that session's `SendQueueSize`. Exceeding it returns
+`core.ErrTooManyOutboundWaiters`. `OutboundState.WaitingWriters` and
+`MaxWaitingWriters` expose current and configured counts.
+
+A successful wait is advisory: it reports a writable point in the
+high/low-watermark state and does not reserve a frame or byte capacity for the
+caller's next `Send`. Another sender may win the race, so always handle the
+`Send` result. This distinction matters for TCP, KCP, QUIC, and WebSocket:
+their hard outbound-full result closes the affected session. If an application
+chooses to wait instead of shedding, call the helper before `Send`; do not
+interpret `ErrSendQueueFull` as a retry signal on the same stream session.
+UDP returns `ErrSendQueueFull` without closing its virtual peer, but the wait
+is still advisory and any retry policy needs its own deadline and idempotency
+decision.
 
 Built-in HTTP maps rate limiting to 429, payload limits to 413, overload to 503,
 and unknown/recovered failures to a generic 500. SSE uses the same mapping
@@ -292,12 +438,12 @@ production-like scenarios before setting limits. See the
 
 | Layer | Primary controls | What they bound |
 | --- | --- | --- |
-| Message router | `SyncQueueSize`, `AsyncWorkers`, `AsyncQueueSize`, `MaxInflightPerSession`, `MaxInflight`, `Backpressure`, `SessionIdleTimeout`, `ShutdownTimeout` | retained work, concurrency, fairness, and bounded handler completion during Router shutdown; not transport reply delivery |
-| TCP | `MaxConnections`, `MaxFrameSize`, `SendQueueSize`, `ReadTimeout`, `WriteTimeout` | connection state, parsing, slow readers/writers |
-| KCP | TCP-like controls plus `SendWindow`, `ReceiveWindow`, `MTU`, shard and congestion settings | sessions, buffers, loss/retransmission behavior |
-| QUIC message streams | `MaxConnections`, `MaxStreams`, `MaxFrameSize`, `SendQueueSize`, read/write, handshake, and idle timeouts | physical connection state, message streams, framing, handshakes, idle peers |
-| UDP | `MaxSessions`, `MaxPacketSize`, `SendQueueSize`, `SessionIdleTimeout`, `CleanupInterval` | virtual-peer state, datagrams, idle retention |
-| WebSocket | `MaxConnections`, `MaxMessage`, `SendQueueSize`, `HandshakeTimeout`, `ReadTimeout`, `WriteTimeout`, `CheckOrigin` | upgraded sessions, HTTP upgrade/origin policy, reassembled messages, and slow peers |
+| Message router | `SyncQueueSize`, `AsyncWorkers`, `AsyncQueueSize`, `MaxInflightPerSession`, `MaxInflight`, `MaxWaitingDispatches`, `MaxWaitingDispatchesPerSession`, `Backpressure`, `SessionIdleTimeout`, `ShutdownTimeout` | retained and blocked work, concurrency, per-session wait fairness, and bounded handler completion during Router shutdown; not transport reply delivery |
+| TCP | `MaxConnections`, `MaxFrameSize`, `SendQueueSize`, `MaxPendingBytes`, `ReadTimeout`, `WriteTimeout` | connection state, parsing, pending write count/bytes, slow readers/writers |
+| KCP | TCP-like controls including `SendQueueSize` and `MaxPendingBytes`, plus `SendWindow`, `ReceiveWindow`, `MTU`, shard and congestion settings | sessions, pending writes, buffers, loss/retransmission behavior |
+| QUIC message streams | `MaxConnections`, `MaxStreams`, `MaxFrameSize`, `SendQueueSize`, `MaxPendingBytes`, read/write, handshake, and idle timeouts | physical connection state, message streams, framing, pending write count/bytes, handshakes, idle peers |
+| UDP | `MaxSessions`, `MaxPacketSize`, `SendQueueSize`, `MaxPendingBytes`, `SessionIdleTimeout`, `CleanupInterval` | virtual-peer state, datagrams, pending write count/bytes, idle retention |
+| WebSocket | `MaxConnections`, `MaxMessage`, `SendQueueSize`, `MaxPendingBytes`, `HandshakeTimeout`, `ReadTimeout`, `WriteTimeout`, `CheckOrigin` | upgraded sessions, HTTP upgrade/origin policy, reassembled messages, pending write count/bytes, and slow peers |
 | HTTP/HTTPS | `ReadTimeout`, `WriteTimeout`, `IdleTimeout`, `ShutdownTimeout`, `MaxBodyBytes` | requests, bodies, keep-alive residence, drain |
 | HTTP/3 | `MaxConnections`, `MaxBodyBytes`, `MaxHeaderBytes`, handshake/read/write/idle/shutdown timeouts, TLS and QUIC settings | physical connections, request bodies, streams, headers, drain; `Allow0RTT` is a replay-sensitive opt-in, not a capacity control |
 | SSE | `MaxStreams`, `HandshakeTimeout`, `IdleTimeout`, `WriteTimeout`, `ShutdownTimeout` | active streams, request headers, keep-alive residence, initial stream flush, per-event `Send` writes and flushes, and drain |
@@ -312,6 +458,10 @@ do not divide one by the other as a global saturation ratio. Under
 `BackpressureWait`, handler-initiated reentrant work must call
 `DispatchContext` with a deadline: the current handler can already own the
 global or per-session capacity that the nested dispatch is waiting for.
+`RouterStats.WaitingDispatches` is the current Router-wide ticket count;
+`MaxWaitingDispatches` and `MaxWaitingDispatchesPerSession` expose its two
+limits, while `GlobalWaitRejected` and `SessionWaitRejected` distinguish
+which bound rejected new waiting work.
 
 ## Estimation and measurement
 
@@ -324,11 +474,11 @@ expected DB concurrency ≈ DB-operation rate × observed DB hold time
 
 Add a burst and uncertainty margin supported by tests. If required concurrency exceeds CPU, downstream pool, or latency objectives, reduce service time or scale capacity before raising in-flight limits.
 
-A useful upper-bound inventory for message-path memory is:
+A useful capacity-inventory estimate for message-path memory is:
 
 ```text
 session state
-+ sessions × outbound queue capacity × average encoded response retained
++ sessions × MaxPendingBytes of accounted outbound reservations/writes
 + active sync sessions × sync queue capacity × average queued task retained
 + async queue capacity × average queued task retained
 + running handlers × average decoded payload and handler working set
@@ -350,14 +500,20 @@ Record throughput, latency percentiles, error/rejection category, CPU, heap, all
 
 ## Performance regression budgets
 
-Repository CI runs selected Router and HTTP handler microbenchmarks and checks
-their `ns/op`, `B/op`, and `allocs/op` against
+Repository CI runs selected Router, HTTP handler, outbound-queue, and in-memory codec
+microbenchmarks and checks their `ns/op`, `B/op`, and `allocs/op` against
 [`benchmark/budgets.json`](../benchmark/budgets.json). Reproduce that guard with:
 
 ```sh
-go test ./core ./transport/httpx -run '^$' -bench 'Benchmark(RouterDispatchSync|EndpointServeHTTP)$' -benchmem -benchtime=250ms -count=1 > benchmark-current.txt
+go test -p 1 ./core ./transport/httpx ./transport/internal/outbound ./benchmark -run '^$' -bench 'Benchmark(RouterDispatchSync|EndpointServeHTTP|OutboundQueueRoundTrip|KProCodec)$' -benchmem -benchtime=250ms -count=3 > benchmark-current.txt
 go run ./cmd/benchguard -budget benchmark/budgets.json -input benchmark-current.txt
 ```
+
+`benchguard` compares median `ns/op` across the repeated samples, while
+every `B/op` and `allocs/op` sample must remain within its hard budget.
+The outbound queue and codec cases are pure in-memory checks and do not contain
+network or disk I/O. The queue budget additionally locks its admission/write
+accounting path to zero heap allocations.
 
 The budgets are intentionally repository-owned regression thresholds for this
 specific code path and CI workload. They do not predict end-to-end service
@@ -403,12 +559,20 @@ started/completed invocations, errors, panics, in-flight work, and latency.
 `core.Router.Snapshot` and `server.Endpoint.Snapshot` expose Router admission,
 queue, in-flight, session, rejection, and lifecycle counters. Database resources
 provide health checks, and GORM/ClickHouse expose SQL pool stats.
+For a live message session, `core.SessionOutboundState` optionally exposes
+pending/max writes and bytes, current/max waiting writers, and
+high/low-watermark state. It is a point-in-time advisory signal; the following
+`Send` result remains authoritative.
 
 The optional observability packages add concrete integration points:
 
 - `prometheusx` registers invocation collectors with transport, stable
   operation, and result labels, plus bounded lifecycle/Router and explicit
-  backlog/projector collectors;
+  backlog/projector collectors. Router waiting capacity appears in
+  `kpro_router_waiting_dispatches` with `kind="current"`,
+  `kind="global_limit"`, or `kind="per_session_limit"` under the default
+  namespace; `kpro_router_dispatch_total` adds the bounded outcomes
+  `global_wait_rejected` and `session_wait_rejected`;
 - `zapx` writes structured completion, failure, panic, and slow-call logs using
   an application-supplied logger;
 - `otelx` creates server spans and extracts propagation using a supplied/global

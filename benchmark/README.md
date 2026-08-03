@@ -33,14 +33,17 @@ Latest saved benchmark evidence: [RESULTS.md](RESULTS.md).
 
 ## CI hot-path budgets
 
-CI runs deterministic in-process Router and HTTP handler benchmarks separately
-from localhost protocol comparisons. Limits live in [budgets.json](budgets.json)
-and cover `ns/op`, `B/op`, and `allocs/op`:
+CI runs deterministic in-process Router, HTTP handler, outbound-queue,
+transport dispatch-gate, and codec benchmarks separately from localhost
+protocol comparisons. The codec cases call
+`Encode` and `DecodePacket` on in-memory 1 KiB frames; they do not use network
+or disk I/O. Limits live in [budgets.json](budgets.json) and cover `ns/op`,
+`B/op`, and `allocs/op`:
 
 ```sh
-go test ./core ./transport/httpx -run '^$' \
-  -bench 'Benchmark(RouterDispatchSync|EndpointServeHTTP)$' \
-  -benchmem -benchtime=250ms -count=1 > benchmark-current.txt
+go test -p 1 ./core ./transport/httpx ./transport/internal/outbound ./transport/internal/dispatchgate ./benchmark -run '^$' \
+  -bench 'Benchmark(RouterDispatchSync|EndpointServeHTTP|OutboundQueueRoundTrip|GateBeginEnd|KProCodec)$' \
+  -benchmem -benchtime=250ms -count=3 > benchmark-current.txt
 go run ./cmd/benchguard \
   -budget benchmark/budgets.json \
   -input benchmark-current.txt
@@ -50,6 +53,20 @@ Latency ceilings are deliberately wider than local results because shared CI
 hardware varies. Allocation and byte budgets are tighter and should only be
 raised with a documented reason. The workflow uploads the raw benchmark output
 so a failed or changed run remains inspectable.
+
+`benchguard` keeps every repeated sample. It compares the median `ns/op` with
+the latency ceiling, while every `B/op` and `allocs/op` sample must remain
+within budget. Required benchmarks and required metrics must be present. This
+keeps timing outliers from dominating CI without allowing a memory regression
+to be hidden by aggregation. Explicit zero limits enforce zero allocation;
+omitting a metric leaves it unguarded. The repository budget also requires at
+least three samples per benchmark, so a weakened `-count` cannot silently pass.
+Version 1 budget files without that field remain valid and require one sample.
+
+After the Router invocation allocation optimization, all three guarded Router
+cases measure `24 B/op` and `1 alloc/op` on the saved local baseline. Their
+budgets are capped at `64 B/op` and `1 alloc/op`; the wider byte ceiling allows
+normal toolchain accounting variation without permitting another allocation.
 
 Use repeated runs and `benchstat` when evaluating an optimization; passing the
 budget is a regression guard, not evidence that a change is faster.

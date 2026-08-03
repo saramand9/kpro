@@ -15,6 +15,30 @@ type Server interface {
 }
 ```
 
+A message transport should also implement the optional two-phase shutdown
+capability when it can stop new application dispatch without immediately
+destroying established writer paths:
+
+```go
+type Quiescer interface {
+	Quiesce(context.Context) error
+}
+```
+
+For a mounted message Endpoint the order is `Quiesce`, Router drain, then
+terminal `Shutdown`. `Quiesce` must be idempotent, stop new session/message
+admission and handler dispatch, preserve existing outbound writers, and honor
+its context for any blocking transport work. TCP, KCP, QUIC, UDP, and
+WebSocket implement this capability. A component without it remains compatible
+but falls back to Router-drain-then-`Shutdown`; that fallback cannot guarantee
+that its receive loop stopped during drain.
+
+Do not assume quiesce always means closing the listener. KCP sessions share the
+listener's UDP socket, so its built-in implementation keeps the socket alive
+for established writers, continuously accepts and closes new raw sessions,
+blocks registration/dispatch, and closes the listener only during terminal
+`Shutdown`.
+
 Its live peer object implements `core.Session`:
 
 ```go
@@ -28,6 +52,44 @@ type Session interface {
 ```
 
 Also implement the optional `core.SessionLifecycle` capability by returning a `Done() <-chan struct{}` that closes exactly once. Router cancellation and per-session cleanup are more precise when this signal exists.
+
+A queue-backed session may also implement `core.OutboundStateProvider`.
+Its `OutboundState` snapshot should count reservations currently being encoded,
+queued writes, and a write owned by the writer, and should report the exact
+hard count/byte limits and high/low watermarks used by that queue. Consumers
+discover the capability without changing `core.Session`:
+
+```go
+if state, ok := core.SessionOutboundState(session); ok && !state.Writable {
+	observeOrThrottleOptionalWork(state) // Advisory snapshot only.
+}
+if err := session.Send(message); err != nil {
+	return err // Authoritative result for this Send call; not peer delivery.
+}
+```
+
+`Writable` should use high/low-watermark hysteresis so it does not flap at
+one threshold, but it must remain a hint. State can change immediately after
+the snapshot, and a hard count or byte limit may still reject `Send`.
+
+A session may additionally implement `core.OutboundWritableWaiter` for
+context-cancelable waiting:
+
+```go
+supported, err := core.SessionWaitOutboundWritable(ctx, session)
+if supported && err != nil {
+	return err
+}
+return session.Send(message)
+```
+
+Bound the number of callers retained by `WaitOutboundWritable`; the built-in
+sessions use `SendQueueSize` as the default per-session waiter cap and report
+current/max counts as `OutboundState.WaitingWriters` and
+`MaxWaitingWriters`. Return `core.ErrTooManyOutboundWaiters` when the bound
+is full and `core.ErrClosed` after close. Success is advisory and must not
+reserve capacity for the next `Send`. Another sender can consume capacity
+first, so the subsequent send result remains authoritative.
 
 Message handlers obtain middleware-updated cancellation, deadlines, tracing,
 and values with `core.ContextOf(messageCtx)`. The helper reads the optional
@@ -143,13 +205,30 @@ route are handled and safely reported inside the Router. Never block the read
 loop on slow telemetry, and do not rely on an observer panic to alter the
 session policy.
 
-The send and shutdown paths should have bounded outbound queues, explicit
-slow-consumer behavior, idempotent close, a context-aware bounded stop, and no
-goroutine left waiting forever on an unresponsive peer. Message sends are
-at-most-once: shutdown closes acceptance, session, and writer paths and does not
-promise that queued or in-flight replies reach the peer. Verify partial frames,
-malformed packets, duplicate shutdown calls, remote disconnect, queue
-saturation, and cancellation under the race detector.
+Match the built-in send-path bounds with both a pending-write count limit
+(`SendQueueSize`) and an accounted-byte limit (`MaxPendingBytes`).
+Atomically reserve both before calling the codec, cancel the reservation on
+encoding failure, reconcile it with the actual encoded size before publishing
+the write, and release queued items during close-time drain. A reservation
+whose encoder is still running and a writer-owned item must remain accounted
+until their matching encoder or writer completion path releases them. This
+prevents a queue of many small writes and a few large writes from defeating
+each other's limit. The private
+`transport/internal/outbound` implementation is not an extension API; implement
+equivalent ownership in the custom transport or an application-owned helper.
+
+The send and shutdown paths should also define explicit slow-consumer behavior,
+idempotent close, a context-aware bounded stop, and no goroutine left waiting
+forever on an unresponsive peer. Explicit `Endpoint.Shutdown(ctx)` uses that
+caller context for quiesce, Router drain, and terminal transport shutdown.
+Context cancellation observed by `Endpoint.ListenAndServe` is intercepted
+until Router drain completes, so a transport must not depend solely on
+receiving the original canceled context; its idempotent `Shutdown` must stop
+serving too. Quiesce or Router errors do not skip terminal shutdown. Message
+sends are at-most-once: handler completion and queue admission do not promise
+that queued or in-flight replies reach the peer. Verify partial frames,
+malformed packets, duplicate quiesce/shutdown calls, remote disconnect,
+count/byte/waiter saturation, and cancellation under the race detector.
 
 Mount and route the implementation like a built-in message transport:
 
@@ -192,6 +271,15 @@ Use `codec.StreamCodec` for transports that read an unbounded byte stream and `c
 Stream codecs must return one complete read result, tolerate fragmented reads, reject declared lengths over the supplied maximum before allocating, and make EOF versus truncated-frame behavior explicit. Packet codecs must reject trailing or malformed data and never assume a datagram is trustworthy because its boundary is intact.
 
 Both codec forms should have deterministic encode/decode tests, maximum-size boundary tests, fuzz tests for decoding, and wire fixtures shared with every non-Go client.
+
+Built-in message transports reserve
+`len(Message.Data) + codec.FrameHeaderSize` bytes before invoking a
+configured codec, then reconcile the actual encoded length. The estimate is
+exact for `codec.KProV1`. A custom
+codec that emits a larger frame can allocate that frame before commit rejects
+it at `MaxPendingBytes`, so the outbound byte limit is retained-frame
+accounting rather than a universal heap bound. Keep custom codec expansion
+bounded and include its temporary allocations in workload tests.
 
 ## Add middleware
 

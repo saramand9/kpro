@@ -33,6 +33,110 @@ func TestTCPRejectsNilHandlerWithoutBinding(t *testing.T) {
 	}
 }
 
+func TestQuiesceStopsDispatchAndPreservesEstablishedSessionWriter(t *testing.T) {
+	var handled atomic.Int32
+	handlerStarted := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	sessionReady := make(chan core.Session, 1)
+	server, addr, stop := startTCPTestServer(t, Config{
+		Addr:         freeTCPTestAddr(t),
+		Codec:        codec.KProV1(),
+		ReadTimeout:  time.Second,
+		WriteTimeout: time.Second,
+	}, func(ctx core.Context) error {
+		if handled.Add(1) == 1 {
+			sessionReady <- ctx.Session()
+			close(handlerStarted)
+			<-releaseHandler
+			if err := ctx.Reply(91, []byte("accepted-before-quiesce")); err != nil {
+				return err
+			}
+			return errors.New("handler completed with error after quiesce")
+		}
+		return nil
+	})
+	defer stop()
+
+	conn, err := net.DialTimeout("tcp", addr, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	writeTCPTestMessage(t, conn, core.Message{ID: 90, Seq: 1})
+	select {
+	case <-handlerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first handler did not start")
+	}
+	session := <-sessionReady
+
+	quiesceDone := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		quiesceDone <- server.Quiesce(ctx)
+	}()
+	waitForTCPDispatchStop(t, server)
+	select {
+	case err := <-quiesceDone:
+		if err != nil {
+			t.Fatalf("Quiesce() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Quiesce waited for an already admitted handler")
+	}
+	if err := server.Quiesce(context.Background()); err != nil {
+		t.Fatalf("second Quiesce() error = %v", err)
+	}
+
+	// The second frame may reach the established socket, but it crossed the
+	// quiesce boundary and must never enter the application handler.
+	writeTCPTestMessage(t, conn, core.Message{ID: 90, Seq: 2})
+	close(releaseHandler)
+
+	result, err := codec.KProV1().Read(conn, DefaultMaxFrameSize)
+	if err != nil {
+		t.Fatalf("read handler reply after Quiesce: %v", err)
+	}
+	if result.Message.ID != 91 || string(result.Message.Data) != "accepted-before-quiesce" {
+		t.Fatalf("handler reply after Quiesce = %+v", result.Message)
+	}
+	select {
+	case <-core.SessionDone(session):
+		t.Fatal("Quiesce closed the established session")
+	default:
+	}
+
+	if err := session.Send(core.Message{ID: 92, Data: []byte("writer-still-open")}); err != nil {
+		t.Fatalf("Send() after Quiesce error = %v", err)
+	}
+	result, err = codec.KProV1().Read(conn, DefaultMaxFrameSize)
+	if err != nil {
+		t.Fatalf("read direct Send after Quiesce: %v", err)
+	}
+	if result.Message.ID != 92 || string(result.Message.Data) != "writer-still-open" {
+		t.Fatalf("direct Send after Quiesce = %+v", result.Message)
+	}
+
+	time.Sleep(25 * time.Millisecond)
+	if got := handled.Load(); got != 1 {
+		t.Fatalf("handled messages after Quiesce = %d, want 1", got)
+	}
+	if extra, dialErr := net.DialTimeout("tcp", addr, 50*time.Millisecond); dialErr == nil {
+		_ = extra.Close()
+		t.Fatal("new TCP connection succeeded after Quiesce")
+	}
+
+	if err := server.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown() after Quiesce error = %v", err)
+	}
+	select {
+	case <-core.SessionDone(session):
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not close the quiesced session")
+	}
+}
+
 func TestPartialFrameReadTimeoutClosesConnection(t *testing.T) {
 	var handled atomic.Int32
 	server, addr, stop := startTCPTestServer(t, Config{
@@ -237,6 +341,18 @@ func waitForTCPActiveCount(t *testing.T, server *Server, want int64) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("active tcp sessions = %d, want %d", atomic.LoadInt64(&server.active), want)
+}
+
+func waitForTCPDispatchStop(t *testing.T, server *Server) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if server.dispatch.Stopped() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("TCP dispatch gate did not stop")
 }
 
 func writeTCPTestMessage(t *testing.T, conn net.Conn, message core.Message) {
