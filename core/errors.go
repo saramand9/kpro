@@ -108,6 +108,8 @@ func IsDispatchRejection(err error) bool {
 		errors.Is(err, ErrDispatchQueueFull) ||
 		errors.Is(err, ErrTooManyInflight) ||
 		errors.Is(err, ErrGlobalInflightLimit) ||
+		errors.Is(err, ErrGlobalWaitingDispatchLimit) ||
+		errors.Is(err, ErrSessionWaitingDispatchLimit) ||
 		errors.Is(err, ErrClosed) ||
 		errors.Is(err, context.Canceled) ||
 		errors.Is(err, context.DeadlineExceeded)
@@ -145,4 +147,13 @@ var (
 	ErrTooManyInflight = &classifiedError{kind: ErrorKindOverloaded, message: "too many in-flight messages", cause: ErrOverloaded}
 	// ErrGlobalInflightLimit reports that the Router-wide in-flight limit was reached.
 	ErrGlobalInflightLimit = &classifiedError{kind: ErrorKindOverloaded, message: "global in-flight limit reached", cause: ErrOverloaded}
+	// ErrGlobalWaitingDispatchLimit reports that BackpressureWait reached the
+	// Router-wide bound on blocked dispatch callers.
+	ErrGlobalWaitingDispatchLimit = &classifiedError{kind: ErrorKindOverloaded, message: "global waiting-dispatch limit reached", cause: ErrOverloaded}
+	// ErrSessionWaitingDispatchLimit reports that one session reached its bound
+	// on blocked dispatch callers.
+	ErrSessionWaitingDispatchLimit = &classifiedError{kind: ErrorKindOverloaded, message: "session waiting-dispatch limit reached", cause: ErrOverloaded}
+	// ErrTooManyOutboundWaiters reports that a session reached its bound on
+	// callers waiting for advisory outbound writability.
+	ErrTooManyOutboundWaiters = &classifiedError{kind: ErrorKindOverloaded, message: "outbound writable waiter limit reached", cause: ErrOverloaded}
 )

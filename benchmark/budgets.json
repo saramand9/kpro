@@ -1,20 +1,21 @@
 {
   "version": 1,
+  "minimum_samples": 3,
   "benchmarks": {
     "BenchmarkRouterDispatchSync/no_middleware": {
       "max_ns_per_op": 10000,
-      "max_bytes_per_op": 256,
-      "max_allocs_per_op": 3
+      "max_bytes_per_op": 64,
+      "max_allocs_per_op": 1
     },
     "BenchmarkRouterDispatchSync/one_middleware": {
       "max_ns_per_op": 12000,
-      "max_bytes_per_op": 256,
-      "max_allocs_per_op": 3
+      "max_bytes_per_op": 64,
+      "max_allocs_per_op": 1
     },
     "BenchmarkRouterDispatchSync/four_middlewares": {
       "max_ns_per_op": 15000,
-      "max_bytes_per_op": 256,
-      "max_allocs_per_op": 3
+      "max_bytes_per_op": 64,
+      "max_allocs_per_op": 1
     },
     "BenchmarkEndpointServeHTTP/direct": {
       "max_ns_per_op": 2000,
@@ -30,6 +31,26 @@
       "max_ns_per_op": 6000,
       "max_bytes_per_op": 1280,
       "max_allocs_per_op": 11
+    },
+    "BenchmarkOutboundQueueRoundTrip": {
+      "max_ns_per_op": 1000,
+      "max_bytes_per_op": 0,
+      "max_allocs_per_op": 0
+    },
+    "BenchmarkGateBeginEnd": {
+      "max_ns_per_op": 200,
+      "max_bytes_per_op": 0,
+      "max_allocs_per_op": 0
+    },
+    "BenchmarkKProCodec/encode_1KiB": {
+      "max_ns_per_op": 2000,
+      "max_bytes_per_op": 1152,
+      "max_allocs_per_op": 1
+    },
+    "BenchmarkKProCodec/decode_packet_1KiB": {
+      "max_ns_per_op": 2000,
+      "max_bytes_per_op": 1024,
+      "max_allocs_per_op": 1
     }
   }
 }

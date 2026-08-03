@@ -19,6 +19,18 @@ type Component interface {
 	Shutdown(context.Context) error
 }
 
+// Quiescer is the optional first phase of message transport shutdown.
+// Quiesce stops new admission and handler dispatch while preserving already
+// established sessions and their outbound writer path. Shutdown remains the
+// terminal phase that closes those sessions and releases transport resources.
+// Implementations must be safe to call repeatedly and honor ctx for
+// transport-specific stopping work. Quiesce does not drain application
+// handlers admitted before its boundary; callers should quiesce the transport,
+// drain their application dispatcher, and then call Shutdown.
+type Quiescer interface {
+	Quiesce(context.Context) error
+}
+
 // MessageServer is implemented by message transports that dispatch
 // core.Context handlers.
 type MessageServer interface {

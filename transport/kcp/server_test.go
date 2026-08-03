@@ -156,12 +156,20 @@ func TestKCPHandlerErrorContinuePolicyKeepsSessionUsable(t *testing.T) {
 }
 
 func TestKCPSendQueueFullReturnsOverloadBeforeClosedState(t *testing.T) {
-	server := New(Config{Codec: codec.KProV1()})
-	session := &session{server: server, sendQueue: make(chan []byte), done: make(chan struct{})}
+	server := New(Config{Codec: codec.KProV1(), SendQueueSize: 1})
+	queue := newSessionOutboundQueue(server.config)
+	reservation, err := queue.Reserve(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reservation.Commit([]byte{0}, 1); err != nil {
+		t.Fatal(err)
+	}
+	session := &session{server: server, sendQueue: queue, done: make(chan struct{})}
 	// Prevent this focused unit from dereferencing a real KCP session while
 	// retaining the Send path's close-on-overload behavior.
 	session.closeOnce.Do(func() {})
-	err := session.Send(core.Message{ID: testMsgEcho})
+	err = session.Send(core.Message{ID: testMsgEcho})
 	if !errors.Is(err, core.ErrSendQueueFull) {
 		t.Fatalf("Send() error = %v, want %v", err, core.ErrSendQueueFull)
 	}

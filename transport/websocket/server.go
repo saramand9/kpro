@@ -24,6 +24,8 @@ import (
 	"github.com/saramand9/kpro/codec"
 	"github.com/saramand9/kpro/core"
 	transportapi "github.com/saramand9/kpro/transport"
+	"github.com/saramand9/kpro/transport/internal/dispatchgate"
+	"github.com/saramand9/kpro/transport/internal/outbound"
 	"github.com/saramand9/kpro/transport/internal/serveutil"
 	"github.com/saramand9/kpro/transport/internal/streamutil"
 )
@@ -68,8 +70,12 @@ type Config struct {
 	MaxMessage int
 	// MaxConnections caps active upgraded WebSocket sessions.
 	MaxConnections int
-	// SendQueueSize is the per-session outbound frame queue length.
+	// SendQueueSize caps per-session writes across encoding reservations, the
+	// queue, and the transport writer.
 	SendQueueSize int
+	// MaxPendingBytes caps frame payload bytes reserved for encoding, queued, or
+	// currently being written per session. Zero derives SendQueueSize * MaxMessage.
+	MaxPendingBytes int64
 	// ReadTimeout is applied before each WebSocket frame read.
 	ReadTimeout time.Duration
 	// WriteTimeout is applied before each WebSocket frame write.
@@ -99,6 +105,7 @@ type Server struct {
 	lifecycleMu sync.Mutex
 	accepting   bool
 	started     bool
+	dispatch    *dispatchgate.Gate
 	upgrades    sync.WaitGroup
 	upgrading   sync.Map
 
@@ -115,6 +122,7 @@ func New(config Config) *Server {
 		config:          normalizeConfig(config),
 		rawConfig:       config,
 		accepting:       true,
+		dispatch:        dispatchgate.New(),
 		ready:           make(chan struct{}),
 		shutdownTimeout: 5 * time.Second,
 	}
@@ -226,40 +234,65 @@ func (s *Server) buildHTTPServer(handler core.Handler) *http.Server {
 	}
 }
 
+// Quiesce stops HTTP upgrades and WebSocket message reads while preserving
+// established sessions and their outbound writers until Shutdown.
+func (s *Server) Quiesce(ctx context.Context) error {
+	stopErr := s.stopAdmissionAndReads()
+	upgradeErr := waitGroupContext(ctx, &s.upgrades)
+	return errors.Join(stopErr, upgradeErr)
+}
+
 // Shutdown closes active WebSocket sessions and stops the HTTP server.
 func (s *Server) Shutdown(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	s.lifecycleMu.Lock()
-	s.accepting = false
-	server := s.server
-	listener := s.listener
-	s.lifecycleMu.Unlock()
-
-	s.upgrading.Range(func(key, _ interface{}) bool {
-		if conn, ok := key.(net.Conn); ok {
-			_ = conn.Close()
-		}
-		return true
-	})
+	stopErr := s.stopAdmissionAndReads()
 	s.sessions.Range(func(_, value interface{}) bool {
 		if session, ok := value.(*session); ok {
 			_ = session.Close()
 		}
 		return true
 	})
-	var serverErr error
+	upgradeErr := waitGroupContext(ctx, &s.upgrades)
+	return errors.Join(stopErr, upgradeErr)
+}
+
+func (s *Server) stopAdmissionAndReads() error {
+	s.lifecycleMu.Lock()
+	s.accepting = false
+	s.dispatch.Stop()
+	server := s.server
+	listener := s.listener
+	s.lifecycleMu.Unlock()
+
+	var stopErr error
 	if server != nil {
-		serverErr = server.Shutdown(ctx)
+		if err := server.Close(); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
+			stopErr = errors.Join(stopErr, err)
+		}
 	}
 	if listener != nil {
 		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-			serverErr = errors.Join(serverErr, err)
+			stopErr = errors.Join(stopErr, err)
 		}
 	}
-	upgradeErr := waitGroupContext(ctx, &s.upgrades)
-	return errors.Join(serverErr, upgradeErr)
+	s.upgrading.Range(func(key, _ interface{}) bool {
+		if conn, ok := key.(net.Conn); ok {
+			_ = conn.Close()
+		}
+		return true
+	})
+	now := time.Now()
+	s.sessions.Range(func(_, value interface{}) bool {
+		if session, ok := value.(*session); ok {
+			if err := session.raw.SetReadDeadline(now); err != nil && !errors.Is(err, net.ErrClosed) {
+				stopErr = errors.Join(stopErr, err)
+			}
+		}
+		return true
+	})
+	return stopErr
 }
 
 func (s *Server) signalReady() {
@@ -327,6 +360,16 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request, handler core.Ha
 	}
 	s.upgrading.Store(conn, struct{}{})
 	defer s.upgrading.Delete(conn)
+	// Hijacked connections are no longer owned by net/http. Recheck admission
+	// after publishing the connection so Quiesce either observes it in
+	// upgrading or this path closes it after the quiesce boundary.
+	s.lifecycleMu.Lock()
+	accepting := s.accepting
+	s.lifecycleMu.Unlock()
+	if !accepting {
+		_ = conn.Close()
+		return
+	}
 	if s.config.HandshakeTimeout > 0 {
 		if err := conn.SetWriteDeadline(time.Now().Add(s.config.HandshakeTimeout)); err != nil {
 			_ = conn.Close()
@@ -350,7 +393,7 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request, handler core.Ha
 		server:    s,
 		raw:       conn,
 		reader:    rw.Reader,
-		sendQueue: make(chan wsFrame, s.config.SendQueueSize),
+		sendQueue: newSessionOutboundQueue(s.config),
 		done:      make(chan struct{}),
 	}
 	if !s.registerSession(session, handler) {
@@ -413,11 +456,15 @@ type session struct {
 	server    *Server
 	raw       net.Conn
 	reader    *bufio.Reader
-	sendQueue chan wsFrame
+	sendQueue *outbound.Queue[wsFrame]
 	done      chan struct{}
 	closeOnce sync.Once
 	writeMu   sync.Mutex
 }
+
+var _ core.OutboundStateProvider = (*session)(nil)
+var _ core.OutboundWritableWaiter = (*session)(nil)
+var _ transportapi.Quiescer = (*Server)(nil)
 
 func (s *session) ID() uint64 {
 	return s.id
@@ -441,21 +488,71 @@ func (s *session) Send(msg core.Message) error {
 		return core.ErrClosed
 	default:
 	}
+	reservation, err := s.sendQueue.Reserve(outbound.EstimateBytes(len(msg.Data), codec.FrameHeaderSize))
+	if err != nil {
+		return s.outboundError(err)
+	}
+	defer reservation.Cancel()
 	packet, err := s.server.config.Codec.EncodePacket(msg)
 	if err != nil {
 		return err
 	}
-	return s.enqueue(wsFrame{opcode: opBinary, payload: packet})
+	if err := reservation.Commit(wsFrame{opcode: opBinary, payload: packet}, int64(len(packet))); err != nil {
+		return s.outboundError(err)
+	}
+	return nil
 }
 
 func (s *session) Close() error {
 	s.closeOnce.Do(func() {
+		if s.sendQueue != nil {
+			s.sendQueue.Close()
+		}
 		close(s.done)
-		_ = s.raw.Close()
+		if s.raw != nil {
+			_ = s.raw.Close()
+		}
 		s.server.sessions.Delete(s.id)
 		s.server.releaseConnectionSlot()
 	})
 	return nil
+}
+
+func (s *session) OutboundState() core.OutboundState {
+	if s == nil || s.sendQueue == nil {
+		return core.OutboundState{Closed: true}
+	}
+	snapshot := s.sendQueue.Snapshot()
+	return core.OutboundState{
+		Closed:             snapshot.Closed,
+		Writable:           snapshot.Writable,
+		AboveHighWatermark: snapshot.AboveHighWatermark,
+		PendingWrites:      snapshot.PendingFrames,
+		MaxPendingWrites:   snapshot.MaxFrames,
+		PendingBytes:       snapshot.PendingBytes,
+		MaxPendingBytes:    snapshot.MaxBytes,
+		WaitingWriters:     snapshot.WaitingWriters,
+		MaxWaitingWriters:  snapshot.MaxWaitingWriters,
+		LowWatermarkBytes:  snapshot.LowWatermarkBytes,
+		HighWatermarkBytes: snapshot.HighWatermarkBytes,
+	}
+}
+
+func (s *session) WaitOutboundWritable(ctx context.Context) error {
+	if s == nil || s.sendQueue == nil {
+		return core.ErrClosed
+	}
+	err := s.sendQueue.WaitWritable(ctx)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, outbound.ErrClosed):
+		return core.ErrClosed
+	case errors.Is(err, outbound.ErrTooManyWaiters):
+		return core.ErrTooManyOutboundWaiters
+	default:
+		return err
+	}
 }
 
 func (s *session) start(handler core.Handler) {
@@ -469,87 +566,134 @@ func (s *session) enqueue(frame wsFrame) error {
 		return core.ErrClosed
 	default:
 	}
-	select {
-	case s.sendQueue <- frame:
-		return nil
-	case <-s.done:
-		return core.ErrClosed
-	default:
-		_ = s.Close()
-		return core.ErrSendQueueFull
+	reservation, err := s.sendQueue.Reserve(int64(len(frame.payload)))
+	if err != nil {
+		return s.outboundError(err)
 	}
+	if err := reservation.Commit(frame, int64(len(frame.payload))); err != nil {
+		return s.outboundError(err)
+	}
+	return nil
 }
 
 func (s *session) readLoop(handler core.Handler) {
-	defer s.Close()
+	preserveSession := false
+	defer func() {
+		if preserveSession {
+			return
+		}
+		// Linearize the close-policy decision with Quiesce, but keep network
+		// teardown outside the lifecycle lock.
+		s.server.lifecycleMu.Lock()
+		closeSession := s.server.accepting
+		s.server.lifecycleMu.Unlock()
+		if closeSession {
+			_ = s.Close()
+		}
+	}()
 	var fragmentOpcode byte
 	var fragmentPayload []byte
 
 	for {
+		if s.server.dispatch.Stopped() {
+			preserveSession = true
+			return
+		}
 		if s.server.config.ReadTimeout > 0 {
 			if err := s.raw.SetReadDeadline(time.Now().Add(s.server.config.ReadTimeout)); err != nil {
+				preserveSession = s.server.dispatch.Stopped()
 				return
 			}
+		}
+		if s.server.dispatch.Stopped() {
+			preserveSession = true
+			return
 		}
 		frame, err := readFrame(s.reader, s.server.config.MaxMessage)
 		if err != nil {
+			preserveSession = s.server.dispatch.Stopped()
 			return
 		}
-		switch frame.opcode {
-		case opClose:
-			if err := validateClosePayload(frame.payload); err != nil {
-				_ = s.writeWebSocketFrame(opClose, closePayload(1002, "protocol error"))
-				return
-			}
-			_ = s.writeWebSocketFrame(opClose, frame.payload)
-			return
-		case opPing:
-			_ = s.enqueue(wsFrame{opcode: opPong, payload: frame.payload})
-			continue
-		case opPong:
-			continue
-		case opText, opBinary:
-			if fragmentOpcode != 0 {
-				return
-			}
-			if !frame.fin {
-				fragmentOpcode = frame.opcode
-				fragmentPayload = append(fragmentPayload[:0], frame.payload...)
-				continue
-			}
-			if frame.opcode == opText && !utf8.Valid(frame.payload) {
-				_ = s.writeWebSocketFrame(opClose, closePayload(1007, "invalid text"))
-				return
-			}
-			if err := s.handleMessage(handler, frame.payload); err != nil {
-				return
-			}
-		case opContinuation:
-			if fragmentOpcode == 0 {
-				return
-			}
-			payload, err := appendFragment(fragmentPayload, frame.payload, s.server.config.MaxMessage)
-			if err != nil {
-				return
-			}
-			fragmentPayload = payload
-			if !frame.fin {
-				continue
-			}
-			completeOpcode := fragmentOpcode
-			completePayload := fragmentPayload
-			fragmentOpcode = 0
-			fragmentPayload = nil
-			if completeOpcode == opText && !utf8.Valid(completePayload) {
-				_ = s.writeWebSocketFrame(opClose, closePayload(1007, "invalid text"))
-				return
-			}
-			if err := s.handleMessage(handler, completePayload); err != nil {
-				return
-			}
-		default:
+		if !s.server.dispatch.Begin() {
+			preserveSession = true
 			return
 		}
+		keepReading := func() bool {
+			defer s.server.dispatch.End()
+			return s.processFrame(handler, frame, &fragmentOpcode, &fragmentPayload)
+		}()
+		if s.server.dispatch.Stopped() {
+			preserveSession = true
+			return
+		}
+		if !keepReading {
+			return
+		}
+	}
+}
+
+func (s *session) processFrame(
+	handler core.Handler,
+	frame wsFrame,
+	fragmentOpcode *byte,
+	fragmentPayload *[]byte,
+) bool {
+	switch frame.opcode {
+	case opClose:
+		if err := validateClosePayload(frame.payload); err != nil {
+			_ = s.writeWebSocketFrame(opClose, closePayload(1002, "protocol error"))
+			return false
+		}
+		_ = s.writeWebSocketFrame(opClose, frame.payload)
+		return false
+	case opPing:
+		_ = s.enqueue(wsFrame{opcode: opPong, payload: frame.payload})
+		return true
+	case opPong:
+		return true
+	case opText, opBinary:
+		if *fragmentOpcode != 0 {
+			return false
+		}
+		if !frame.fin {
+			*fragmentOpcode = frame.opcode
+			*fragmentPayload = append((*fragmentPayload)[:0], frame.payload...)
+			return true
+		}
+		if frame.opcode == opText && !utf8.Valid(frame.payload) {
+			_ = s.writeWebSocketFrame(opClose, closePayload(1007, "invalid text"))
+			return false
+		}
+		if err := s.handleMessage(handler, frame.payload); err != nil {
+			return false
+		}
+		return true
+	case opContinuation:
+		if *fragmentOpcode == 0 {
+			return false
+		}
+		payload, err := appendFragment(*fragmentPayload, frame.payload, s.server.config.MaxMessage)
+		if err != nil {
+			return false
+		}
+		*fragmentPayload = payload
+		if !frame.fin {
+			return true
+		}
+		completeOpcode := *fragmentOpcode
+		completePayload := *fragmentPayload
+		*fragmentOpcode = 0
+		*fragmentPayload = nil
+		if completeOpcode == opText && !utf8.Valid(completePayload) {
+			_ = s.writeWebSocketFrame(opClose, closePayload(1007, "invalid text"))
+			return false
+		}
+		if err := s.handleMessage(handler, completePayload); err != nil {
+			return false
+		}
+		return true
+	default:
+		return false
 	}
 }
 
@@ -578,11 +722,14 @@ func (s *session) handleMessage(handler core.Handler, payload []byte) error {
 func (s *session) writeLoop() {
 	for {
 		select {
-		case frame := <-s.sendQueue:
+		case item := <-s.sendQueue.Items():
+			frame := item.Value
 			if err := s.writeWebSocketFrame(frame.opcode, frame.payload); err != nil {
+				item.Done()
 				_ = s.Close()
 				return
 			}
+			item.Done()
 			if frame.opcode == opClose {
 				_ = s.Close()
 				return
@@ -590,6 +737,25 @@ func (s *session) writeLoop() {
 		case <-s.done:
 			return
 		}
+	}
+}
+
+func newSessionOutboundQueue(config Config) *outbound.Queue[wsFrame] {
+	return outbound.New[wsFrame](outbound.Config{
+		MaxFrames: config.SendQueueSize,
+		MaxBytes:  config.MaxPendingBytes,
+	})
+}
+
+func (s *session) outboundError(err error) error {
+	switch err {
+	case outbound.ErrClosed:
+		return core.ErrClosed
+	case outbound.ErrFull:
+		_ = s.Close()
+		return core.ErrSendQueueFull
+	default:
+		return err
 	}
 }
 
@@ -795,6 +961,9 @@ func normalizeConfig(config Config) Config {
 	}
 	if config.SendQueueSize <= 0 {
 		config.SendQueueSize = DefaultSendQueueSize
+	}
+	if config.MaxPendingBytes <= 0 {
+		config.MaxPendingBytes = outbound.ByteLimit(config.SendQueueSize, int64(config.MaxMessage))
 	}
 	if config.ReadTimeout <= 0 {
 		config.ReadTimeout = DefaultReadTimeout

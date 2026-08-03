@@ -1,39 +1,43 @@
 # KPro benchmark results
 
-## 2026-07-24 hot-path regression baseline
+## 2026-08-03 hot-path regression baseline
 
 Environment:
 
 ```text
 goos: windows
 goarch: amd64
-go: go1.26.5
+go: go1.26.4
 cpu: Intel(R) Core(TM) i5-14400
-source state: v0.1.0 release-candidate tree
+source state: main development tree after Router invocation allocation optimization
 ```
 
-This measurement was captured from the `v0.1.0` release candidate before
-tagging. The module baseline in `go.mod` is Go 1.25.12, while this local run
-used Go 1.26.5; CI verifies both Go 1.25.12 and Go 1.26.5. Compare latency
-numbers only under the same Go toolchain and benchmark conditions; the
-checked-in budgets intentionally span normal CI toolchain and host variation.
+The module baseline in `go.mod` is Go 1.25.12, while this local run used Go
+1.26.4 and the performance workflow uses Go 1.26.5. Compare latency numbers
+only under the same Go toolchain and benchmark conditions; the checked-in
+budgets intentionally span normal CI toolchain and host variation.
 
 Command (the same benchmark selection enforced by CI):
 
 ```powershell
-go test ./core ./transport/httpx -run '^$' -bench 'Benchmark(RouterDispatchSync|EndpointServeHTTP)$' -benchmem -benchtime=250ms -count=1 | Tee-Object -FilePath benchmark-current.txt
+go test -p 1 ./core ./transport/httpx ./transport/internal/outbound ./transport/internal/dispatchgate ./benchmark -run '^$' -bench 'Benchmark(RouterDispatchSync|EndpointServeHTTP|OutboundQueueRoundTrip|GateBeginEnd|KProCodec)$' -benchmem -benchtime=250ms -count=3 | Tee-Object -FilePath benchmark-current.txt
 go run ./cmd/benchguard -budget benchmark/budgets.json -input benchmark-current.txt
 ```
 
-Observed result:
+Observed aggregate result (`ns/op` median; `B/op` and `allocs/op`
+maximum across three samples):
 
 ```text
-BenchmarkRouterDispatchSync/no_middleware-16                 2101 ns/op    200 B/op     3 allocs/op
-BenchmarkRouterDispatchSync/one_middleware-16                2002 ns/op    200 B/op     3 allocs/op
-BenchmarkRouterDispatchSync/four_middlewares-16              2008 ns/op    200 B/op     3 allocs/op
-BenchmarkEndpointServeHTTP/direct-16                        129.7 ns/op    136 B/op     3 allocs/op
-BenchmarkEndpointServeHTTP/middleware-16                    194.2 ns/op    328 B/op     4 allocs/op
-BenchmarkEndpointServeHTTP/middleware_headers_meta-16       507.8 ns/op   1048 B/op    11 allocs/op
+BenchmarkRouterDispatchSync/no_middleware                   1710.0 ns/op     24 B/op     1 allocs/op
+BenchmarkRouterDispatchSync/one_middleware                  1777.0 ns/op     24 B/op     1 allocs/op
+BenchmarkRouterDispatchSync/four_middlewares                1783.0 ns/op     24 B/op     1 allocs/op
+BenchmarkEndpointServeHTTP/direct                           119.2 ns/op    136 B/op     3 allocs/op
+BenchmarkEndpointServeHTTP/middleware                       185.6 ns/op    328 B/op     4 allocs/op
+BenchmarkEndpointServeHTTP/middleware_headers_meta          487.1 ns/op   1048 B/op    11 allocs/op
+BenchmarkOutboundQueueRoundTrip                              83.6 ns/op      0 B/op     0 allocs/op
+BenchmarkGateBeginEnd                                        14.0 ns/op      0 B/op     0 allocs/op
+BenchmarkKProCodec/encode_1KiB                              417.0 ns/op   1152 B/op     1 allocs/op
+BenchmarkKProCodec/decode_packet_1KiB                       360.8 ns/op   1024 B/op     1 allocs/op
 ```
 
 These short microbenchmarks are allocation-regression evidence, not capacity

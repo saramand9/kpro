@@ -318,7 +318,7 @@ func TestSessionRepliesToCloseBeforeClosingConnection(t *testing.T) {
 		server:    server,
 		raw:       serverConn,
 		reader:    bufio.NewReader(serverConn),
-		sendQueue: make(chan wsFrame, 1),
+		sendQueue: newSessionOutboundQueue(server.config),
 		done:      make(chan struct{}),
 	}
 	server.sessions.Store(session.id, session)
@@ -468,7 +468,7 @@ func TestShutdownRejectsUpgradeThatStartedBeforeDrain(t *testing.T) {
 		server:    server,
 		raw:       raw,
 		reader:    bufio.NewReader(raw),
-		sendQueue: make(chan wsFrame, 1),
+		sendQueue: newSessionOutboundQueue(server.config),
 		done:      make(chan struct{}),
 	}
 	if server.registerSession(session, nil) {

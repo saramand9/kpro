@@ -20,6 +20,8 @@ func (c RouterConfig) Validate() error {
 		nonNegativeInt("async queue size", c.AsyncQueueSize),
 		nonNegativeInt("max in-flight per session", c.MaxInflightPerSession),
 		nonNegativeInt("max in-flight", c.MaxInflight),
+		nonNegativeInt("max waiting dispatches", c.MaxWaitingDispatches),
+		nonNegativeInt("max waiting dispatches per session", c.MaxWaitingDispatchesPerSession),
 	)
 	if c.SessionIdleTimeout < 0 {
 		validationErr = errors.Join(validationErr, errors.New("session idle timeout cannot be negative"))

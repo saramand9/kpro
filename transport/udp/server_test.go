@@ -178,6 +178,41 @@ func TestServerClosesIdleUDPSessions(t *testing.T) {
 	}
 }
 
+func TestQuiescePreservesIdleUDPSessionsUntilShutdown(t *testing.T) {
+	serverConn := listenUDPTestConn(t)
+	server := New(Config{
+		Codec:              codec.KProV1(),
+		SendQueueSize:      1,
+		SessionIdleTimeout: time.Millisecond,
+		CleanupInterval:    time.Hour,
+	})
+	server.conn = serverConn
+	remote := resolveUDPTestAddr(t, "127.0.0.1:10013")
+	session, ok := server.getOrCreateSession(remote)
+	if !ok {
+		t.Fatal("create UDP session failed")
+	}
+
+	if err := server.Quiesce(context.Background()); err != nil {
+		t.Fatalf("Quiesce() error = %v", err)
+	}
+	server.closeIdleSessions(time.Now().Add(time.Second))
+	select {
+	case <-session.Done():
+		t.Fatal("idle cleanup closed UDP session after Quiesce")
+	default:
+	}
+
+	if err := server.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	select {
+	case <-session.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not close quiesced UDP session")
+	}
+}
+
 func TestServerRejectsNewSessionWhenMaxSessionsReached(t *testing.T) {
 	serverConn := listenUDPTestConn(t)
 	defer serverConn.Close()
@@ -350,7 +385,7 @@ func newUDPTestPacketSession(server *Server, remote string) *packetSession {
 		key:       addr.String(),
 		server:    server,
 		remote:    addr,
-		sendQueue: make(chan []byte, server.config.SendQueueSize),
+		sendQueue: newSessionOutboundQueue(server.config),
 		done:      make(chan struct{}),
 	}
 	session.lastActive.Store(server.activityTick(time.Now()))

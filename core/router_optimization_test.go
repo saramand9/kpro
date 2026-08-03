@@ -53,6 +53,68 @@ func TestRouterCompilesMiddlewareWhenConfigurationChanges(t *testing.T) {
 	}
 }
 
+func TestRouterCachesMessageOperationAndIsolatesInvocationMetadata(t *testing.T) {
+	router := NewRouter(RouterConfig{
+		SyncQueueSize:         1,
+		AsyncWorkers:          1,
+		AsyncQueueSize:        1,
+		MaxInflightPerSession: 1,
+		SessionIdleTimeout:    time.Minute,
+	})
+	defer func() {
+		if err := router.Shutdown(context.Background()); err != nil {
+			t.Fatalf("shutdown router: %v", err)
+		}
+	}()
+
+	type handlerObservation struct {
+		header  string
+		attempt any
+	}
+	observedInvocation := make(chan string, 1)
+	observedHandler := make(chan handlerObservation, 1)
+
+	router.HandleSync(42, func(ctx Context) error {
+		message := ctx.Message()
+		observedHandler <- handlerObservation{
+			header:  message.Headers["trace"],
+			attempt: message.Meta["attempt"],
+		}
+		return nil
+	})
+
+	// Adding middleware after route registration rebuilds the compiled handler.
+	// The route's precomputed operation must remain attached to the route.
+	router.Use(func(next InvocationHandler) InvocationHandler {
+		return func(invocation Invocation) error {
+			observedInvocation <- invocation.Operation()
+			invocation.Headers()["trace"] = "middleware"
+			invocation.Meta()["attempt"] = 2
+			return next(invocation)
+		}
+	})
+
+	session := newFakeSession(1)
+	if err := router.Dispatch(NewContext(session, Message{
+		ID:      42,
+		Headers: map[string]string{"trace": "original"},
+		Meta:    map[string]any{"attempt": 1},
+	})); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+
+	if got := <-observedInvocation; got != "message/42" {
+		t.Fatalf("operation = %q, want message/42", got)
+	}
+	got := <-observedHandler
+	if got.header != "original" {
+		t.Fatalf("handler header = %q, want original", got.header)
+	}
+	if got.attempt != 1 {
+		t.Fatalf("handler attempt = %v, want 1", got.attempt)
+	}
+}
+
 func TestSessionReservationPreventsIdleExecutorClose(t *testing.T) {
 	router := NewRouter(RouterConfig{
 		SyncQueueSize:         1,
