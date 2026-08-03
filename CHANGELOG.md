@@ -12,6 +12,24 @@ upgrading between minor versions.
 
 ### Added
 
+- `BackpressureWait` now bounds blocked dispatch callers independently from
+  in-flight work. The defaults allow 1024 waiters Router-wide and 16 per
+  session; one dispatch holds one ticket while crossing global, per-session,
+  and queue admission stages. Snapshot/Prometheus counters distinguish global
+  and per-session wait-limit rejection.
+- Message sessions can optionally implement context-cancelable, bounded
+  outbound-writability waiting through `core.SessionWaitOutboundWritable`.
+  Built-in sessions cap waiting writers at `SendQueueSize` and expose the
+  current/max waiter counts in `core.OutboundState`.
+- Message transports can implement the optional `transport.Quiescer` shutdown
+  phase. TCP, KCP, QUIC, UDP, and WebSocket stop new dispatch before accepted
+  Router work drains while retaining established outbound writer paths.
+- TCP, KCP, QUIC message streams, UDP peers, and WebSocket sessions now expose
+  configurable `MaxPendingBytes` accounting alongside `SendQueueSize`, plus the
+  optional `core.SessionOutboundState` high/low-watermark snapshot.
+- Performance CI now requires three samples for Router, HTTP, outbound-queue,
+  transport dispatch-gate, and codec hot paths; explicit zero budgets enforce
+  the allocation-free outbound accounting and dispatch-gate paths.
 - OpenAPI generation now emits a bounded, typed HTTP client implementing the
   generated application contract, with checked URL/parameter binding, exact
   success statuses, response media-type validation, and structured
@@ -51,6 +69,15 @@ upgrading between minor versions.
 
 ### Changed
 
+- Router message invocation state is pooled and route operation names are
+  precomputed, reducing the guarded dispatch path from 200 B/3 allocations to
+  24 B/1 allocation per operation on the recorded baseline.
+- A mounted message Endpoint intercepts serve-context cancellation, optionally
+  quiesces the transport, drains already accepted Router handlers while
+  sessions remain writable, and only then shuts down its transport. Custom
+  transports without `transport.Quiescer` retain the Router-drain-then-shutdown
+  fallback. This remains an at-most-once send boundary, not a peer-delivery
+  guarantee.
 - The unified `service` scaffold replaces the pre-release `http-api` profile.
   Generation now runs in a sibling staging directory, publishes only after all
   bindings succeed, and preflights the required protobuf tools for gRPC.
@@ -77,6 +104,15 @@ upgrading between minor versions.
 
 ### Fixed
 
+- Message transport sends can no longer commit after concurrent session close;
+  outbound count/byte reservations are also released on encode errors, codec
+  panics, failed writes, and close-time queue drain.
+- Graceful Router shutdown now executes accepted per-session sync work instead
+  of dropping queued tasks when the session closes during drain. Immediate
+  `Router.Close` remains best-effort sync-queue cancellation without waiting;
+  accepted async work and already-ready sync work can still start.
+- Default outbound high-watermark calculation no longer overflows when an
+  internal queue is configured near the maximum `int64` byte limit.
 - Protobuf generation and descriptor inspection now parse the complete import
   grammar used by supported compilers, capture the project-local closure before
   tool lookup, and run `protoc` against a private input snapshot. Unsafe paths,

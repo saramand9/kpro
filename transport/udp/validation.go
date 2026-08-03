@@ -21,6 +21,7 @@ func (s *Server) Validate() error {
 		configcheck.NonNegativeInt("MaxPacketSize", s.rawConfig.MaxPacketSize),
 		configcheck.NonNegativeInt("MaxSessions", s.rawConfig.MaxSessions),
 		configcheck.NonNegativeInt("SendQueueSize", s.rawConfig.SendQueueSize),
+		configcheck.NonNegativeInt64("MaxPendingBytes", s.rawConfig.MaxPendingBytes),
 		configcheck.NonNegativeDuration("SessionIdleTimeout", s.rawConfig.SessionIdleTimeout),
 		configcheck.NonNegativeDuration("CleanupInterval", s.rawConfig.CleanupInterval),
 		s.rawConfig.HandlerErrorPolicy.Validate(),

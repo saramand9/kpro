@@ -11,14 +11,19 @@ server. The current implementation includes:
 
 - checked server construction and mounted-component validation;
 - explicit server and transport lifecycle states;
-- bounded message Router queues and in-flight admission;
-- transport capacity limits and shutdown gates;
+- bounded message Router queues/in-flight admission, globally and per-session
+  bounded `BackpressureWait` callers, and graceful draining of accepted
+  sync/async work;
+- transport capacity limits, count/byte bounded outbound writes, observable
+  high/low-watermark state, bounded advisory writable waiting, and optional
+  pre-drain quiesce gates;
 - optional health, Prometheus, OTel, and Zap packages;
 - GORM-backed transactional delivery/outbox and projector controls;
 - unified service scaffolding, versioned local overlays, contract catalogs,
   server/client code generation, and transactional API additions through
   `cmd/kpro`;
-- benchmark budget enforcement through `cmd/benchguard`.
+- multi-sample benchmark budget enforcement through `cmd/benchguard`, including
+  zero-allocation outbound-queue and Router/HTTP/codec regression guards.
 
 The repository provides the initial `v0.1.0` developer release, but not a v1
 compatibility guarantee, production certification, identity/policy management,
@@ -52,10 +57,13 @@ Use this route for code-level runtime analysis:
 2. `server/mount.go`
 3. `core/router.go`
 4. `core/invocation.go`
-5. `transport/transport.go`
-6. `transport/capability.go`
-7. `transport/validation.go`
-8. The specific transport package being changed.
+5. `core/outbound_state.go`
+6. `transport/transport.go`
+7. `transport/capability.go`
+8. `transport/internal/dispatchgate/gate.go`
+9. `transport/internal/outbound/queue.go`
+10. `transport/validation.go`
+11. The specific transport package being changed.
 
 Use this route for eventing/data analysis:
 
@@ -73,10 +81,12 @@ Use this route for eventing/data analysis:
 | Server construction and lifecycle | `server/server.go`, `server/mount.go`, `server/lifecycle.go`, `server/lifecycle_test.go` |
 | Router admission and dispatch | `core/router.go`, `core/router_config.go`, `core/backpressure.go`, `core/router_backpressure_test.go` |
 | Middleware contract | `core/invocation.go`, `middleware/*.go`, `docs/invocation-middleware-design.md` |
-| Context/session lifecycle | `core/context.go`, `core/session.go`, `core/session_lifecycle.go` |
-| Transport contracts | `transport/transport.go`, `transport/capability.go`, `transport/validation.go` |
+| Context/session lifecycle and outbound state | `core/context.go`, `core/session.go`, `core/session_lifecycle.go`, `core/outbound_state.go` |
+| Transport contracts and quiesce lifecycle | `transport/transport.go`, `transport/capability.go`, `transport/validation.go`, `server/server.go`, `server/endpoint_registration_test.go` |
 | Shared transport validation | `transport/internal/configcheck/` |
 | Shared cancellation helpers | `transport/internal/serveutil/` |
+| Shared message dispatch quiesce gate | `transport/internal/dispatchgate/` |
+| Shared outbound count/byte accounting | `transport/internal/outbound/` |
 | HTTP path | `transport/httpx/`, `transport/http3/` |
 | Message transports | `transport/tcp/`, `transport/kcp/`, `transport/quic/`, `transport/udp/`, `transport/websocket/` |
 | Streaming/native RPC | `transport/sse/`, `transport/grpcx/` |
@@ -116,7 +126,7 @@ go vet ./...
 Benchmark budget check:
 
 ```sh
-go test -bench=. -benchmem ./benchmark > benchmark.out
+go test -p 1 ./core ./transport/httpx ./transport/internal/outbound ./benchmark -run '^$' -bench 'Benchmark(RouterDispatchSync|EndpointServeHTTP|OutboundQueueRoundTrip|KProCodec)$' -benchmem -benchtime=250ms -count=3 > benchmark.out
 go run ./cmd/benchguard -budget benchmark/budgets.json -input benchmark.out
 ```
 
@@ -155,6 +165,17 @@ gate rules rather than replacing the score with an unversioned impression.
   application owns exporter/backend/sampler/log-retention policy.
 - Performance budgets are regression thresholds for repository benchmarks, not
   service capacity objectives.
+- `BackpressureWait` defaults to at most 1024 blocked dispatches globally and
+  16 per session (further capped by in-flight defaults). One dispatch consumes
+  one ticket across all wait stages; snapshot/Prometheus rejection counters
+  distinguish the two bounds.
+- TCP, KCP, QUIC, UDP, and WebSocket support optional pre-drain quiesce. A
+  custom message transport without `transport.Quiescer` keeps the compatible
+  Router-drain-then-shutdown path but not the same receive-side cutover.
+- Outbound writability state and `SessionWaitOutboundWritable` are advisory.
+  Waiting is bounded per session and reserves no capacity for the next
+  `Send`; hard-full behavior still differs between connection-oriented
+  built-ins and UDP.
 - Database adapters still require deployment-specific tests against the chosen
   engine, topology, TLS mode, and failure policy.
 

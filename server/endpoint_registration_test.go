@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -136,6 +137,290 @@ func TestEndpointFluentRegistrationStillPanicsOnRouterError(t *testing.T) {
 		}
 	}()
 	endpoint.Handle(51, func(core.Context) error { return nil })
+}
+
+func TestEndpointShutdownKeepsTransportOpenWhileAcceptedHandlerDrains(t *testing.T) {
+	transport := &shutdownOrderingTransport{shutdownCalled: make(chan struct{})}
+	endpoint := &Endpoint{
+		transport: transport,
+		router: core.NewRouter(core.RouterConfig{
+			SyncQueueSize:         1,
+			MaxInflightPerSession: 1,
+			ShutdownTimeout:       time.Second,
+		}),
+	}
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	endpoint.HandleSync(61, func(core.Context) error {
+		close(started)
+		<-release
+		select {
+		case <-transport.shutdownCalled:
+			return errors.New("transport closed before accepted handler completed")
+		default:
+			return nil
+		}
+	})
+
+	session := &fakeSession{id: 61, done: make(chan struct{})}
+	if err := endpoint.dispatch(core.NewContext(session, core.Message{ID: 61})); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start")
+	}
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- endpoint.Shutdown(context.Background()) }()
+	select {
+	case <-transport.shutdownCalled:
+		t.Fatal("transport shut down while an accepted handler was still running")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("Shutdown() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not complete after handler drain")
+	}
+	select {
+	case <-transport.shutdownCalled:
+	default:
+		t.Fatal("transport was not shut down after handler drain")
+	}
+}
+
+func TestEndpointShutdownQuiescesBeforeRouterDrainAndTransportClose(t *testing.T) {
+	transport := &quiesceOrderingTransport{
+		quiesceCalled:  make(chan struct{}),
+		shutdownCalled: make(chan struct{}),
+	}
+	endpoint := &Endpoint{
+		transport: transport,
+		router: core.NewRouter(core.RouterConfig{
+			SyncQueueSize:         1,
+			MaxInflightPerSession: 1,
+			ShutdownTimeout:       time.Second,
+		}),
+	}
+
+	handlerStarted := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	endpoint.HandleSync(63, func(core.Context) error {
+		close(handlerStarted)
+		<-releaseHandler
+		select {
+		case <-transport.quiesceCalled:
+			return nil
+		default:
+			return errors.New("router drained before transport quiesced")
+		}
+	})
+	session := &fakeSession{id: 63, done: make(chan struct{})}
+	if err := endpoint.dispatch(core.NewContext(session, core.Message{ID: 63})); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	select {
+	case <-handlerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start")
+	}
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- endpoint.Shutdown(context.Background()) }()
+	select {
+	case <-transport.quiesceCalled:
+	case <-time.After(time.Second):
+		t.Fatal("transport was not quiesced before Router drain")
+	}
+	select {
+	case <-transport.shutdownCalled:
+		t.Fatal("transport shut down while accepted handler was running")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(releaseHandler)
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("Shutdown() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not complete after handler drain")
+	}
+	select {
+	case <-transport.shutdownCalled:
+	default:
+		t.Fatal("transport was not closed after Router drain")
+	}
+}
+
+func TestEndpointShutdownJoinsQuiesceAndTransportErrors(t *testing.T) {
+	quiesceErr := errors.New("quiesce failed")
+	transportErr := errors.New("transport shutdown failed")
+	transport := &quiesceOrderingTransport{
+		quiesceCalled:  make(chan struct{}),
+		shutdownCalled: make(chan struct{}),
+		quiesceErr:     quiesceErr,
+		shutdownErr:    transportErr,
+	}
+	endpoint := &Endpoint{transport: transport, router: core.NewRouter()}
+	err := endpoint.Shutdown(context.Background())
+	if !errors.Is(err, quiesceErr) || !errors.Is(err, transportErr) {
+		t.Fatalf("Shutdown() error = %v, want joined quiesce and transport errors", err)
+	}
+}
+
+func TestEndpointServeCancellationDrainsAcceptedHandlerBeforeTransport(t *testing.T) {
+	transport := &cancellationOrderingTransport{
+		serveStarted:         make(chan struct{}),
+		serveContextCanceled: make(chan struct{}),
+		quiesceCalled:        make(chan struct{}),
+		shutdownCalled:       make(chan struct{}),
+	}
+	endpoint := &Endpoint{
+		transport: transport,
+		router: core.NewRouter(core.RouterConfig{
+			SyncQueueSize:         1,
+			MaxInflightPerSession: 1,
+			ShutdownTimeout:       time.Second,
+		}),
+	}
+
+	handlerStarted := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	endpoint.HandleSync(62, func(core.Context) error {
+		close(handlerStarted)
+		<-releaseHandler
+		return nil
+	})
+
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- endpoint.ListenAndServe(serveCtx) }()
+	select {
+	case <-transport.serveStarted:
+	case <-time.After(time.Second):
+		t.Fatal("transport serve did not start")
+	}
+
+	session := &fakeSession{id: 62, done: make(chan struct{})}
+	if err := endpoint.dispatch(core.NewContext(session, core.Message{ID: 62})); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	select {
+	case <-handlerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start")
+	}
+
+	cancelServe()
+	select {
+	case <-transport.quiesceCalled:
+	case <-time.After(time.Second):
+		t.Fatal("parent cancellation did not quiesce transport")
+	}
+	select {
+	case <-transport.shutdownCalled:
+		t.Fatal("transport shut down while an accepted handler was running")
+	case <-transport.serveContextCanceled:
+		t.Fatal("parent cancellation reached the transport before Router drain")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(releaseHandler)
+	select {
+	case err := <-serveDone:
+		if err != nil {
+			t.Fatalf("ListenAndServe() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("serve did not stop after accepted handler drained")
+	}
+	select {
+	case <-transport.shutdownCalled:
+	default:
+		t.Fatal("transport shutdown was not called after Router drain")
+	}
+}
+
+type shutdownOrderingTransport struct {
+	shutdownCalled chan struct{}
+}
+
+func (*shutdownOrderingTransport) Name() string { return "shutdown-ordering" }
+
+func (*shutdownOrderingTransport) ListenAndServe(context.Context, core.Handler) error { return nil }
+
+func (t *shutdownOrderingTransport) Shutdown(context.Context) error {
+	close(t.shutdownCalled)
+	return nil
+}
+
+type quiesceOrderingTransport struct {
+	quiesceCalled  chan struct{}
+	shutdownCalled chan struct{}
+	quiesceErr     error
+	shutdownErr    error
+	quiesceOnce    sync.Once
+	shutdownOnce   sync.Once
+}
+
+func (*quiesceOrderingTransport) Name() string { return "quiesce-ordering" }
+
+func (*quiesceOrderingTransport) ListenAndServe(context.Context, core.Handler) error {
+	return nil
+}
+
+func (t *quiesceOrderingTransport) Quiesce(context.Context) error {
+	t.quiesceOnce.Do(func() { close(t.quiesceCalled) })
+	return t.quiesceErr
+}
+
+func (t *quiesceOrderingTransport) Shutdown(context.Context) error {
+	t.shutdownOnce.Do(func() { close(t.shutdownCalled) })
+	return t.shutdownErr
+}
+
+type cancellationOrderingTransport struct {
+	serveStarted         chan struct{}
+	serveContextCanceled chan struct{}
+	quiesceCalled        chan struct{}
+	shutdownCalled       chan struct{}
+	quiesceOnce          sync.Once
+	shutdownOnce         sync.Once
+}
+
+func (*cancellationOrderingTransport) Name() string { return "cancellation-ordering" }
+
+func (t *cancellationOrderingTransport) ListenAndServe(ctx context.Context, _ core.Handler) error {
+	close(t.serveStarted)
+	select {
+	case <-ctx.Done():
+		close(t.serveContextCanceled)
+		return nil
+	case <-t.quiesceCalled:
+		return nil
+	case <-t.shutdownCalled:
+		return nil
+	}
+}
+
+func (t *cancellationOrderingTransport) Quiesce(context.Context) error {
+	t.quiesceOnce.Do(func() { close(t.quiesceCalled) })
+	return nil
+}
+
+func (t *cancellationOrderingTransport) Shutdown(context.Context) error {
+	t.shutdownOnce.Do(func() { close(t.shutdownCalled) })
+	return nil
 }
 
 func shutdownCheckedRegistrationRouter(t *testing.T, router *core.Router) {

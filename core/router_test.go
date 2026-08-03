@@ -167,6 +167,190 @@ func TestRouterShutdownDrainsQueuedAsyncTasks(t *testing.T) {
 	}
 }
 
+func TestRouterShutdownDrainsQueuedSyncTasks(t *testing.T) {
+	router := NewRouter(RouterConfig{
+		SyncQueueSize:         4,
+		AsyncWorkers:          1,
+		AsyncQueueSize:        4,
+		MaxInflightPerSession: 4,
+		SessionIdleTimeout:    time.Minute,
+		ShutdownTimeout:       time.Second,
+	})
+
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondHandled := make(chan struct{})
+	router.HandleSync(10, func(ctx Context) error {
+		switch ctx.Message().Seq {
+		case 1:
+			close(firstStarted)
+			<-releaseFirst
+		case 2:
+			close(secondHandled)
+		}
+		return nil
+	})
+
+	session := newFakeSession(1)
+	if err := router.Dispatch(NewContext(session, Message{ID: 10, Seq: 1})); err != nil {
+		t.Fatalf("dispatch first sync: %v", err)
+	}
+	waitForClosed(t, firstStarted, "first sync handler did not start")
+	if err := router.Dispatch(NewContext(session, Message{ID: 10, Seq: 2})); err != nil {
+		t.Fatalf("dispatch second sync: %v", err)
+	}
+
+	shutdownDone := make(chan error, 1)
+	go func() {
+		shutdownDone <- router.Shutdown(context.Background())
+	}()
+
+	select {
+	case err := <-shutdownDone:
+		t.Fatalf("shutdown completed before blocked sync handler was released: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseFirst)
+	select {
+	case <-secondHandled:
+	case <-time.After(time.Second):
+		t.Fatal("queued sync handler did not run during shutdown")
+	}
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("shutdown router: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not complete after sync queue drained")
+	}
+
+	stats := router.Snapshot()
+	if stats.Accepted != 2 || stats.Completed != 2 || stats.Dropped != 0 || stats.Inflight != 0 {
+		t.Fatalf("final stats after graceful sync drain = %+v", stats)
+	}
+}
+
+func TestRouterShutdownDrainsAcceptedSyncAfterSessionCloses(t *testing.T) {
+	router := NewRouter(RouterConfig{
+		SyncQueueSize:         2,
+		AsyncWorkers:          1,
+		AsyncQueueSize:        2,
+		MaxInflightPerSession: 2,
+		ShutdownTimeout:       time.Second,
+	})
+
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondHandled := make(chan struct{})
+	router.HandleSync(11, func(ctx Context) error {
+		switch ctx.Message().Seq {
+		case 1:
+			close(firstStarted)
+			<-releaseFirst
+		case 2:
+			close(secondHandled)
+		}
+		return nil
+	})
+
+	session := newFakeSession(11)
+	if err := router.Dispatch(NewContext(session, Message{ID: 11, Seq: 1})); err != nil {
+		t.Fatalf("dispatch first sync: %v", err)
+	}
+	waitForClosed(t, firstStarted, "first sync handler did not start")
+	if err := router.Dispatch(NewContext(session, Message{ID: 11, Seq: 2})); err != nil {
+		t.Fatalf("dispatch second sync: %v", err)
+	}
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- router.Shutdown(context.Background()) }()
+	deadline := time.Now().Add(time.Second)
+	for router.State() != StateDraining && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if router.State() != StateDraining {
+		t.Fatal("router did not enter draining state")
+	}
+	if err := session.Close(); err != nil {
+		t.Fatalf("close session: %v", err)
+	}
+	close(releaseFirst)
+
+	select {
+	case <-secondHandled:
+	case <-time.After(time.Second):
+		t.Fatal("accepted sync task was dropped after session close during shutdown")
+	}
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("shutdown router: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not finish after draining canceled-session work")
+	}
+	stats := router.Snapshot()
+	if stats.Completed != 2 || stats.Dropped != 0 || stats.Inflight != 0 {
+		t.Fatalf("final stats after session-close drain = %+v", stats)
+	}
+}
+
+func TestSessionCloseUsesPublishedGracefulModeBeforeRouterDoneCloses(t *testing.T) {
+	router := NewRouter(RouterConfig{
+		SyncQueueSize:         1,
+		AsyncWorkers:          1,
+		AsyncQueueSize:        1,
+		MaxInflightPerSession: 1,
+		MaxInflight:           1,
+	})
+	defer router.Close()
+
+	session := newFakeSession(12)
+	key := sessionExecutorKey{id: session.ID(), done: session.Done()}
+	executor := newSessionExecutor(router, key)
+	handled := make(chan struct{})
+	task := dispatchTask{
+		ctx: NewContext(session, Message{ID: 12}),
+		handler: func(Invocation) error {
+			close(handled)
+			return nil
+		},
+		session: executor,
+	}
+
+	router.globalSlots <- struct{}{}
+	router.globalInflight.Store(1)
+	executor.inflightSlots <- struct{}{}
+	executor.inflight = 1
+	executor.queueSlots <- struct{}{}
+	executor.queue <- task
+	router.syncQueued.Store(1)
+	router.accepted.Store(1)
+
+	// Shutdown publishes graceful mode before Draining and before router.done
+	// closes. Session.Done in this exact window must still drain accepted work.
+	router.graceful.Store(true)
+	if channelClosed(router.done) {
+		t.Fatal("router.done closed before white-box graceful window")
+	}
+	executor.stopOnSessionClose()
+
+	select {
+	case <-handled:
+	default:
+		t.Fatal("accepted task was not drained from published graceful mode")
+	}
+	stats := router.Snapshot()
+	if stats.Completed != 1 ||
+		stats.Dropped != 0 ||
+		stats.Inflight != 0 ||
+		stats.SyncQueueDepth != 0 {
+		t.Fatalf("stats after published-mode drain = %+v", stats)
+	}
+}
+
 func TestRouterRejectsWhenSessionInflightLimitIsReached(t *testing.T) {
 	router := NewRouter(RouterConfig{
 		SyncQueueSize:         4,

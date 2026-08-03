@@ -92,6 +92,15 @@ type RouterConfig struct {
 	// MaxInflight caps accepted work across every session. Values <= 0 use
 	// DefaultMaxInflight.
 	MaxInflight int
+	// MaxWaitingDispatches caps callers blocked by BackpressureWait across all
+	// admission stages. Values <= 0 use DefaultMaxWaitingDispatches, capped by
+	// MaxInflight.
+	MaxWaitingDispatches int
+	// MaxWaitingDispatchesPerSession prevents one session from monopolizing the
+	// Router-wide wait allowance. Values <= 0 use
+	// DefaultMaxWaitingDispatchesPerSession, capped by
+	// MaxInflightPerSession.
+	MaxWaitingDispatchesPerSession int
 	// Backpressure selects reject or context-cancelable wait behavior when an
 	// inflight or queue limit is reached. The zero value preserves rejection.
 	// Handler-initiated reentrant dispatch under Wait must use DispatchContext
@@ -110,13 +119,15 @@ type RouterConfig struct {
 type route struct {
 	handler           Handler
 	invocationHandler InvocationHandler
+	operation         string
 	mode              DispatchMode
 }
 
 type dispatchTask struct {
-	ctx     Context
-	handler InvocationHandler
-	session *sessionExecutor
+	ctx       Context
+	handler   InvocationHandler
+	operation string
+	session   *sessionExecutor
 }
 
 // Router maps message ids to handlers and owns dispatch scheduling.
@@ -130,6 +141,7 @@ type Router struct {
 
 	done      chan struct{}
 	closeOnce sync.Once
+	graceful  atomic.Bool
 	wg        sync.WaitGroup
 	drainOnce sync.Once
 	drained   chan struct{}
@@ -141,6 +153,7 @@ type Router struct {
 	asyncMu        sync.Mutex
 
 	globalSlots    chan struct{}
+	waiters        *waiterRegistry
 	globalInflight atomic.Int64
 	syncQueued     atomic.Int64
 	asyncQueued    atomic.Int64
@@ -170,6 +183,7 @@ func NewRouter(config ...RouterConfig) *Router {
 		asyncQueue:    make(chan dispatchTask, cfg.AsyncQueueSize),
 		asyncSlots:    newCapacity(cfg.AsyncQueueSize),
 		globalSlots:   newCapacity(cfg.MaxInflight),
+		waiters:       newWaiterRegistry(cfg.MaxWaitingDispatches, cfg.MaxWaitingDispatchesPerSession),
 	}
 	return r
 }
@@ -253,12 +267,20 @@ func (r *Router) DispatchContext(waitCtx context.Context, ctx Context) error {
 		return r.rejectDispatch(ctx, ErrNoHandler, false)
 	}
 
-	waited, err := r.acquireGlobal(waitCtx, SessionDone(ctx.Session()))
+	sourceSession := ctx.Session()
+	sessionDone := SessionDone(sourceSession)
+	waiter := newDispatchWaiter(
+		r.waiters,
+		sessionExecutorKey{id: sourceSession.ID(), done: sessionDone},
+	)
+	defer waiter.release()
+
+	waited, err := r.acquireGlobal(waitCtx, sessionDone, &waiter)
 	if err != nil {
 		return r.rejectDispatch(ctx, err, waited)
 	}
 
-	session, sessionWaited, err := r.sessionForContext(waitCtx, ctx.Session())
+	session, sessionWaited, err := r.sessionForContext(waitCtx, sourceSession, &waiter)
 	waited = waited || sessionWaited
 	if err != nil {
 		r.releaseGlobal()
@@ -266,22 +288,25 @@ func (r *Router) DispatchContext(waitCtx context.Context, ctx Context) error {
 	}
 
 	task := dispatchTask{
-		ctx:     ctx,
-		handler: rt.invocationHandler,
-		session: session,
+		ctx:       ctx,
+		handler:   rt.invocationHandler,
+		operation: rt.operation,
+		session:   session,
 	}
 	var queueWaited bool
 	switch rt.mode {
 	case DispatchAsync:
-		queueWaited, err = r.submitAsync(waitCtx, task)
+		queueWaited, err = r.submitAsync(waitCtx, task, &waiter)
 	default:
-		queueWaited, err = task.session.enqueueReserved(waitCtx, task, r.config.Backpressure)
+		queueWaited, err = task.session.enqueueReserved(waitCtx, task, r.config.Backpressure, &waiter)
 	}
 	waited = waited || queueWaited
 	if err != nil {
 		task.session.release()
 		r.releaseGlobal()
-		if err == errSessionExecutorClosed {
+		if r.closed() && (err == errSessionExecutorClosed || errors.Is(err, ErrClosed)) {
+			err = ErrRouterClosed
+		} else if err == errSessionExecutorClosed {
 			err = ErrClosed
 		}
 		return r.rejectDispatch(ctx, err, waited)
@@ -310,10 +335,20 @@ func (r *Router) rejectDispatch(ctx Context, err error, waited bool) error {
 	return err
 }
 
-// Close stops accepting dispatch work and releases queued contexts.
+// Close stops admission and takes the immediate shutdown path. Sync work still
+// queued when an executor observes closure is released instead of deliberately
+// drained; a task already selected by an executor may still begin.
 func (r *Router) Close() {
-	r.beginDraining()
+	r.close(false)
+}
+
+func (r *Router) close(graceful bool) {
 	r.closeOnce.Do(func() {
+		r.graceful.Store(graceful)
+		// Publish the selected close mode before Draining becomes observable.
+		// Session.Done may race shutdown and must never mistake graceful drain
+		// for the immediate Close path.
+		r.beginDraining()
 		close(r.done)
 		r.asyncMu.Lock()
 		close(r.asyncQueue)
@@ -328,15 +363,21 @@ func (r *Router) Close() {
 		r.sessionsCreateMu.Unlock()
 
 		for _, session := range sessions {
-			session.close()
+			if graceful {
+				session.beginDrain()
+			} else {
+				session.close()
+			}
 		}
 	})
 	r.drainDone()
 }
 
-// Shutdown closes the router and waits for in-flight handlers to finish or ctx to expire.
+// Shutdown stops admission, drains accepted sync and async handlers, and waits
+// for their completion or for ctx to expire. Close remains the best-effort
+// immediate path and does not deliberately drain queued sync work.
 func (r *Router) Shutdown(ctx context.Context) error {
-	r.Close()
+	r.close(true)
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -389,6 +430,7 @@ func (r *Router) handle(msgID uint32, h Handler, mode DispatchMode) error {
 		r.routes[msgID] = route{
 			handler:           h,
 			invocationHandler: invocationHandler,
+			operation:         MessageOperation(msgID),
 			mode:              mode,
 		}
 		r.revision++
@@ -445,7 +487,7 @@ func buildMessageInvocationHandler(handler Handler, middlewares []Middleware) In
 	return invocationHandler
 }
 
-func (r *Router) submitAsync(ctx context.Context, task dispatchTask) (bool, error) {
+func (r *Router) submitAsync(ctx context.Context, task dispatchTask, waiter *dispatchWaiter) (bool, error) {
 	if !r.startAsyncWorkers() {
 		return false, ErrRouterClosed
 	}
@@ -458,6 +500,7 @@ func (r *Router) submitAsync(ctx context.Context, task dispatchTask) (bool, erro
 		SessionDone(task.ctx.Session()),
 		nil,
 		nil,
+		waiter,
 	)
 	if err != nil {
 		return waited, err
@@ -506,22 +549,28 @@ func (r *Router) Snapshot() RouterStats {
 		sessions++
 		return true
 	})
+	waiting, globalWaitRejected, sessionWaitRejected := r.waiters.snapshot()
 	return RouterStats{
-		State:                       r.State(),
-		Backpressure:                r.config.Backpressure,
-		Inflight:                    r.globalInflight.Load(),
-		MaxInflight:                 r.config.MaxInflight,
-		MaxInflightPerSession:       r.config.MaxInflightPerSession,
-		Sessions:                    sessions,
-		SyncQueueDepth:              r.syncQueued.Load(),
-		SyncQueueCapacityPerSession: r.config.SyncQueueSize,
-		AsyncQueueDepth:             r.asyncQueued.Load(),
-		AsyncQueueCapacity:          r.config.AsyncQueueSize,
-		Accepted:                    r.accepted.Load(),
-		Completed:                   r.completed.Load(),
-		Dropped:                     r.dropped.Load(),
-		Rejected:                    r.rejected.Load(),
-		Waited:                      r.waited.Load(),
+		State:                          r.State(),
+		Backpressure:                   r.config.Backpressure,
+		Inflight:                       r.globalInflight.Load(),
+		MaxInflight:                    r.config.MaxInflight,
+		MaxInflightPerSession:          r.config.MaxInflightPerSession,
+		WaitingDispatches:              waiting,
+		MaxWaitingDispatches:           r.config.MaxWaitingDispatches,
+		MaxWaitingDispatchesPerSession: r.config.MaxWaitingDispatchesPerSession,
+		Sessions:                       sessions,
+		SyncQueueDepth:                 r.syncQueued.Load(),
+		SyncQueueCapacityPerSession:    r.config.SyncQueueSize,
+		AsyncQueueDepth:                r.asyncQueued.Load(),
+		AsyncQueueCapacity:             r.config.AsyncQueueSize,
+		Accepted:                       r.accepted.Load(),
+		Completed:                      r.completed.Load(),
+		Dropped:                        r.dropped.Load(),
+		Rejected:                       r.rejected.Load(),
+		Waited:                         r.waited.Load(),
+		GlobalWaitRejected:             globalWaitRejected,
+		SessionWaitRejected:            sessionWaitRejected,
 	}
 }
 
@@ -609,8 +658,8 @@ func (r *Router) execute(task dispatchTask) {
 			r.notifyError(event)
 		}
 	}()
-	inv := NewMessageInvocation(context.Background(), task.ctx)
-	defer inv.Release()
+	inv := acquireMessageInvocation(context.Background(), task.ctx, task.operation)
+	defer releaseMessageInvocation(inv)
 	if err := task.handler(inv); err != nil {
 		event := newRouterErrorEvent(RouterErrorStageHandler, task.ctx, err)
 		event.ResponseErr = sendRouterErrorResponse(task.ctx, err)
@@ -686,11 +735,18 @@ func logRouterError(event RouterErrorEvent) {
 }
 
 func (r *Router) sessionFor(session Session) (*sessionExecutor, error) {
-	executor, _, err := r.sessionForContext(context.Background(), session)
+	key := sessionExecutorKey{id: session.ID(), done: SessionDone(session)}
+	waiter := newDispatchWaiter(r.waiters, key)
+	defer waiter.release()
+	executor, _, err := r.sessionForContext(context.Background(), session, &waiter)
 	return executor, err
 }
 
-func (r *Router) sessionForContext(ctx context.Context, session Session) (*sessionExecutor, bool, error) {
+func (r *Router) sessionForContext(
+	ctx context.Context,
+	session Session,
+	waiter *dispatchWaiter,
+) (*sessionExecutor, bool, error) {
 	done := SessionDone(session)
 	key := sessionExecutorKey{id: session.ID(), done: done}
 	waited := false
@@ -701,12 +757,15 @@ func (r *Router) sessionForContext(ctx context.Context, session Session) (*sessi
 		}
 		if value, ok := r.sessions.Load(key); ok {
 			existing := value.(*sessionExecutor)
-			acquireWaited, err := existing.acquireContext(ctx, r.config.Backpressure)
+			acquireWaited, err := existing.acquireContext(ctx, r.config.Backpressure, waiter)
 			waited = waited || acquireWaited
 			if err == nil {
 				return existing, waited, nil
 			} else if err != errSessionExecutorClosed {
 				return nil, waited, err
+			}
+			if r.closed() {
+				return nil, waited, ErrRouterClosed
 			}
 			r.sessions.CompareAndDelete(key, existing)
 			existing.close()
@@ -720,12 +779,15 @@ func (r *Router) sessionForContext(ctx context.Context, session Session) (*sessi
 			// block. Never hold the global creation lock while waiting on one hot
 			// session, otherwise unrelated sessions cannot be created.
 			r.sessionsCreateMu.Unlock()
-			acquireWaited, err := existing.acquireContext(ctx, r.config.Backpressure)
+			acquireWaited, err := existing.acquireContext(ctx, r.config.Backpressure, waiter)
 			waited = waited || acquireWaited
 			if err == nil {
 				return existing, waited, nil
 			} else if err != errSessionExecutorClosed {
 				return nil, waited, err
+			}
+			if r.closed() {
+				return nil, waited, ErrRouterClosed
 			}
 			r.sessions.CompareAndDelete(key, existing)
 			existing.close()
@@ -741,7 +803,7 @@ func (r *Router) sessionForContext(ctx context.Context, session Session) (*sessi
 		}
 
 		executor := newSessionExecutor(r, key)
-		acquireWaited, err := executor.acquireContext(ctx, r.config.Backpressure)
+		acquireWaited, err := executor.acquireContext(ctx, r.config.Backpressure, waiter)
 		waited = waited || acquireWaited
 		if err != nil {
 			r.sessionsCreateMu.Unlock()
@@ -792,7 +854,12 @@ func newSessionExecutor(router *Router, key sessionExecutorKey) *sessionExecutor
 	}
 }
 
-func (s *sessionExecutor) enqueueReserved(ctx context.Context, task dispatchTask, policy BackpressurePolicy) (bool, error) {
+func (s *sessionExecutor) enqueueReserved(
+	ctx context.Context,
+	task dispatchTask,
+	policy BackpressurePolicy,
+	waiter *dispatchWaiter,
+) (bool, error) {
 	waited, err := acquireCapacity(
 		ctx,
 		s.queueSlots,
@@ -802,6 +869,7 @@ func (s *sessionExecutor) enqueueReserved(ctx context.Context, task dispatchTask
 		s.done,
 		s.closedCh,
 		errSessionExecutorClosed,
+		waiter,
 	)
 	if err != nil {
 		return waited, err
@@ -832,11 +900,17 @@ func (s *sessionExecutor) enqueueReserved(ctx context.Context, task dispatchTask
 }
 
 func (s *sessionExecutor) acquire() error {
-	_, err := s.acquireContext(context.Background(), s.router.config.Backpressure)
+	waiter := newDispatchWaiter(s.router.waiters, s.key)
+	defer waiter.release()
+	_, err := s.acquireContext(context.Background(), s.router.config.Backpressure, &waiter)
 	return err
 }
 
-func (s *sessionExecutor) acquireContext(ctx context.Context, policy BackpressurePolicy) (bool, error) {
+func (s *sessionExecutor) acquireContext(
+	ctx context.Context,
+	policy BackpressurePolicy,
+	waiter *dispatchWaiter,
+) (bool, error) {
 	waited, err := acquireCapacity(
 		ctx,
 		s.inflightSlots,
@@ -846,6 +920,7 @@ func (s *sessionExecutor) acquireContext(ctx context.Context, policy Backpressur
 		s.done,
 		s.closedCh,
 		errSessionExecutorClosed,
+		waiter,
 	)
 	if err != nil {
 		return waited, err
@@ -898,16 +973,52 @@ func (s *sessionExecutor) run() {
 			resetTimer(timer, s.router.config.SessionIdleTimeout)
 			s.router.execute(task)
 		case <-s.done:
-			s.close()
+			s.stopOnSessionClose()
 			return
 		case <-s.router.done:
-			s.close()
+			if s.router.graceful.Load() {
+				s.drainAccepted()
+			} else {
+				s.close()
+			}
 			return
 		case <-timer.C:
 			if s.closeIfIdle() {
 				return
 			}
 			timer.Reset(s.router.config.SessionIdleTimeout)
+		}
+	}
+}
+
+func (s *sessionExecutor) stopOnSessionClose() {
+	if s.router.graceful.Load() {
+		s.drainAccepted()
+		return
+	}
+	s.close()
+}
+
+func (s *sessionExecutor) beginDrain() {
+	s.mu.Lock()
+	s.markClosedLocked()
+	s.mu.Unlock()
+}
+
+func (s *sessionExecutor) drainAccepted() {
+	// Taking the session lock closes admission after every enqueue already in
+	// its commit section. Once beginDrain returns there can be no late producer,
+	// so observing an empty queue is a stable drain boundary.
+	s.beginDrain()
+	for {
+		select {
+		case task := <-s.queue:
+			s.router.syncQueued.Add(-1)
+			releaseCapacity(s.queueSlots)
+			s.router.execute(task)
+		default:
+			s.router.removeSession(s)
+			return
 		}
 	}
 }
@@ -926,10 +1037,6 @@ func (s *sessionExecutor) closeIfIdle() bool {
 
 func (s *sessionExecutor) close() {
 	s.mu.Lock()
-	if s.closed.Load() {
-		s.mu.Unlock()
-		return
-	}
 	s.markClosedLocked()
 	drained := make([]dispatchTask, 0, len(s.queue))
 	for {
@@ -975,7 +1082,11 @@ func (r *Router) closed() bool {
 	}
 }
 
-func (r *Router) acquireGlobal(ctx context.Context, sessionDone <-chan struct{}) (bool, error) {
+func (r *Router) acquireGlobal(
+	ctx context.Context,
+	sessionDone <-chan struct{},
+	waiter *dispatchWaiter,
+) (bool, error) {
 	waited, err := acquireCapacity(
 		ctx,
 		r.globalSlots,
@@ -985,6 +1096,7 @@ func (r *Router) acquireGlobal(ctx context.Context, sessionDone <-chan struct{})
 		sessionDone,
 		nil,
 		nil,
+		waiter,
 	)
 	if err != nil {
 		return waited, err
@@ -1010,6 +1122,95 @@ func newCapacity(size int) chan struct{} {
 	return make(chan struct{}, size)
 }
 
+type waiterRegistry struct {
+	mu sync.Mutex
+
+	maxGlobal     int
+	maxPerSession int
+	current       int
+	perSession    map[sessionExecutorKey]int
+
+	globalRejected  uint64
+	sessionRejected uint64
+}
+
+func newWaiterRegistry(maxGlobal, maxPerSession int) *waiterRegistry {
+	return &waiterRegistry{
+		maxGlobal:     maxGlobal,
+		maxPerSession: maxPerSession,
+		perSession:    make(map[sessionExecutorKey]int),
+	}
+}
+
+func (w *waiterRegistry) acquire(key sessionExecutorKey) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.perSession[key] >= w.maxPerSession {
+		w.sessionRejected++
+		return ErrSessionWaitingDispatchLimit
+	}
+	if w.current >= w.maxGlobal {
+		w.globalRejected++
+		return ErrGlobalWaitingDispatchLimit
+	}
+	w.current++
+	w.perSession[key]++
+	return nil
+}
+
+func (w *waiterRegistry) release(key sessionExecutorKey) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	sessionWaiters := w.perSession[key]
+	if w.current <= 0 || sessionWaiters <= 0 {
+		panic("core: waiting-dispatch capacity released without acquisition")
+	}
+	w.current--
+	if sessionWaiters == 1 {
+		delete(w.perSession, key)
+	} else {
+		w.perSession[key] = sessionWaiters - 1
+	}
+}
+
+func (w *waiterRegistry) snapshot() (current int, globalRejected, sessionRejected uint64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.current, w.globalRejected, w.sessionRejected
+}
+
+type dispatchWaiter struct {
+	registry *waiterRegistry
+	key      sessionExecutorKey
+	acquired bool
+}
+
+func newDispatchWaiter(registry *waiterRegistry, key sessionExecutorKey) dispatchWaiter {
+	return dispatchWaiter{registry: registry, key: key}
+}
+
+func (w *dispatchWaiter) acquire() error {
+	if w.acquired {
+		return nil
+	}
+	if w.registry == nil {
+		return ErrGlobalWaitingDispatchLimit
+	}
+	if err := w.registry.acquire(w.key); err != nil {
+		return err
+	}
+	w.acquired = true
+	return nil
+}
+
+func (w *dispatchWaiter) release() {
+	if w == nil || !w.acquired {
+		return
+	}
+	w.registry.release(w.key)
+	w.acquired = false
+}
+
 func acquireCapacity(
 	ctx context.Context,
 	slots chan struct{},
@@ -1019,6 +1220,7 @@ func acquireCapacity(
 	sessionDone <-chan struct{},
 	ownerDone <-chan struct{},
 	ownerErr error,
+	waiter *dispatchWaiter,
 ) (bool, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1047,6 +1249,12 @@ func acquireCapacity(
 	}
 	if policy != BackpressureWait {
 		return false, fullErr
+	}
+	if waiter == nil {
+		return false, fullErr
+	}
+	if err := waiter.acquire(); err != nil {
+		return false, err
 	}
 
 	select {
@@ -1125,6 +1333,16 @@ func normalizeRouterConfig(config RouterConfig) RouterConfig {
 	}
 	if config.MaxInflight <= 0 {
 		config.MaxInflight = DefaultMaxInflight
+	}
+	if config.MaxWaitingDispatches <= 0 {
+		config.MaxWaitingDispatches = min(DefaultMaxWaitingDispatches, config.MaxInflight)
+	}
+	if config.MaxWaitingDispatchesPerSession <= 0 {
+		config.MaxWaitingDispatchesPerSession = min(
+			DefaultMaxWaitingDispatchesPerSession,
+			config.MaxInflightPerSession,
+			config.MaxWaitingDispatches,
+		)
 	}
 	if config.Backpressure != BackpressureWait {
 		config.Backpressure = BackpressureReject

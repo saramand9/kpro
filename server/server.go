@@ -1137,14 +1137,55 @@ func (e *Endpoint) Name() string {
 
 // ListenAndServe starts the underlying message transport.
 func (e *Endpoint) ListenAndServe(ctx context.Context) error {
-	return e.transport.ListenAndServe(ctx, e.dispatch)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	// Message transports normally close their sessions as soon as their serve
+	// context is canceled. A mounted Endpoint owns a stronger ordering: parent
+	// cancellation first closes Router admission and drains accepted handlers,
+	// then transport shutdown closes writers and sessions. WithoutCancel keeps
+	// parent values while the watcher below owns that cancellation sequence.
+	serveCtx, cancelServe := context.WithCancel(context.WithoutCancel(ctx))
+	serveReturned := make(chan struct{})
+	shutdownResult := make(chan error, 1)
+	go func() {
+		select {
+		case <-ctx.Done():
+			shutdownResult <- e.shutdown(context.Background(), cancelServe)
+		case <-serveReturned:
+			shutdownResult <- nil
+		}
+	}()
+
+	serveErr := e.transport.ListenAndServe(serveCtx, e.dispatch)
+	close(serveReturned)
+	cancelServe()
+	return errors.Join(serveErr, <-shutdownResult)
 }
 
-// Shutdown stops the underlying transport and router.
+// Shutdown first quiesces transports that expose the optional capability, then
+// stops Router admission and drains accepted message work, and only then
+// closes the underlying transport. Keeping sessions and writers alive while
+// accepted handlers drain lets their final replies reach the send queue.
 func (e *Endpoint) Shutdown(ctx context.Context) error {
-	transportErr := e.transport.Shutdown(ctx)
+	return e.shutdown(ctx, nil)
+}
+
+func (e *Endpoint) shutdown(ctx context.Context, beforeTransport func()) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var quiesceErr error
+	if quiescer, ok := e.transport.(transport.Quiescer); ok {
+		quiesceErr = quiescer.Quiesce(ctx)
+	}
 	routerErr := e.router.Shutdown(ctx)
-	return errors.Join(transportErr, routerErr)
+	if beforeTransport != nil {
+		beforeTransport()
+	}
+	transportErr := e.transport.Shutdown(ctx)
+	return errors.Join(quiesceErr, routerErr, transportErr)
 }
 
 func (e *Endpoint) dispatch(ctx core.Context) error {

@@ -6,6 +6,12 @@ package core
 const (
 	// DefaultMaxInflight caps accepted work across all sessions.
 	DefaultMaxInflight = 64 * 1024
+	// DefaultMaxWaitingDispatches bounds callers blocked by BackpressureWait
+	// across the Router.
+	DefaultMaxWaitingDispatches = 1024
+	// DefaultMaxWaitingDispatchesPerSession prevents one hot session from
+	// monopolizing all Router wait capacity.
+	DefaultMaxWaitingDispatchesPerSession = 16
 )
 
 // BackpressurePolicy controls what DispatchContext does when an admission or
@@ -30,7 +36,12 @@ type RouterStats struct {
 	Inflight              int64
 	MaxInflight           int
 	MaxInflightPerSession int
-	Sessions              int
+	// WaitingDispatches is the number of callers currently blocked waiting for
+	// global, per-session, sync-queue, or async-queue capacity.
+	WaitingDispatches              int
+	MaxWaitingDispatches           int
+	MaxWaitingDispatchesPerSession int
+	Sessions                       int
 
 	// SyncQueueDepth is the sum of queued sync work across all live sessions.
 	SyncQueueDepth int64
@@ -45,4 +56,10 @@ type RouterStats struct {
 	Dropped   uint64
 	Rejected  uint64
 	Waited    uint64
+	// GlobalWaitRejected counts dispatches rejected because all Router-wide
+	// waiting-dispatch capacity was already in use.
+	GlobalWaitRejected uint64
+	// SessionWaitRejected counts dispatches rejected because the originating
+	// session already held its waiting-dispatch allowance.
+	SessionWaitRejected uint64
 }
