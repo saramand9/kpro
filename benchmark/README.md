@@ -31,6 +31,80 @@ qps
 
 Latest saved benchmark evidence: [RESULTS.md](RESULTS.md).
 
+## TCP comparison load generator
+
+`benchmark/cmd/tcp-loadgen` is an independent, raw TCP client for repeatable
+KProV1 echo comparisons. Every request payload varies with its sequence. A
+response is counted only after its magic, version, flags, message ID, sequence,
+payload length, and every payload byte match. It is a local measurement tool,
+not a production capacity test or load-testing service.
+
+Build it or run it directly from the repository root:
+
+```sh
+go build -o tcp-loadgen ./benchmark/cmd/tcp-loadgen
+go run ./benchmark/cmd/tcp-loadgen \
+  -addr 127.0.0.1:18088 \
+  -connections 64 \
+  -payload 1024 \
+  -inflight 16 \
+  -coalesce 4 \
+  -duration 30s \
+  -max-samples 200000
+```
+
+`-inflight` is the number of requests each connection sends before it starts
+reading that group of responses. `-coalesce` is the maximum number of
+consecutive frames combined into one client write and is capped at
+`-inflight`. For example, `-inflight 16 -coalesce 4` performs four writes of
+four frames and then reads sixteen responses in order. `-slow-percent` marks a
+deterministic percentage of connections as write-only slow consumers, rounded
+up to a whole connection.
+
+Connections are established and worker buffers are prepared before one shared
+absolute measurement window starts. Every socket uses that same deadline.
+Throughput is divided by the configured window rather than by per-worker
+startup time or a slow connection's final timeout.
+
+The output fields are:
+
+| Field | Meaning |
+| --- | --- |
+| `connections`, `healthy_connections`, `slow_connections` | Established client connections by role. |
+| `payload` | Payload bytes per KProV1 frame. |
+| `duration_s`, `wall_s` | Fixed measurement window and observed process-side wall time. |
+| `healthy_sent`, `slow_sent` | Complete request frames written by each connection role. |
+| `completed` | Healthy responses that passed full-frame and full-payload validation. |
+| `incomplete` | Fully written healthy requests without a validated response inside the window. |
+| `validation_errors` | Header, sequence, length, flags, or payload mismatches. |
+| `io_errors`, `healthy_io_errors`, `slow_io_errors` | Non-deadline read/write failures. |
+| `timeouts`, `healthy_timeouts`, `slow_timeouts` | Workers that reached the common window boundary in an operation or loop. |
+| `bytes` | All request bytes accepted by client writes, including a partial final write. |
+| `throughput_msg_s` | Fully validated completions divided by the fixed measurement duration. |
+| `p50_us`, `p99_us`, `p999_us` | Percentiles from the bounded successful-request latency reservoir. |
+| `samples` | Actual reservoir size. `-max-samples` is divided across healthy connections. |
+
+The command exits non-zero when a healthy workload completes no responses or
+observes validation or non-deadline healthy I/O errors. Window-boundary
+timeouts and an incomplete final in-flight group remain explicit counters
+rather than being silently suppressed.
+
+Same-machine loopback results include the client process, OS scheduler, local
+TCP stack, runtime, and server on the same CPUs. They do not establish remote
+network throughput, maximum connection capacity, or production tail latency.
+The generator is closed-loop: a connection waits for its current in-flight
+group before sending the next group. Latencies use an Algorithm R reservoir
+over successful responses across the whole window, with a bounded share for
+each healthy connection. Failed and incomplete requests are necessarily
+censored from those percentiles, and closed-loop traffic still has coordinated
+omission. Interpret the percentile fields together with `incomplete` and the
+error counters as comparison diagnostics, not SLA evidence.
+
+For implementation comparisons, warm up both servers and run multiple rounds
+in `A-B-B-A` order with the same load-generator binary, flags, ports, machine,
+and background-load conditions. Compare medians and spread together with error
+counts and tail latency; do not use a single best run as the result.
+
 ## CI hot-path budgets
 
 CI runs deterministic in-process Router, HTTP handler, outbound-queue,

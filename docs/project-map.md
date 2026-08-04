@@ -38,7 +38,7 @@ for application code.
 | `internal/codegen/` | Safe generation planning, manifests, content-addressed locks, compare-and-swap file transactions, descriptor-only protobuf inspection, and OpenAPI, protobuf, Message, and plugin backends. | `transaction.go`, `manifest/`, `openapi/`, `protogen/`, `messagegen/`, `pluginhost/` |
 | `cmd/benchguard/` | Multi-sample benchmark budget checker used by CI; latency uses a median while memory limits apply to every sample. | `main.go` |
 | `examples/` | Protocol and modular application examples. | `quickstart/`, protocol-specific directories |
-| `benchmark/` | Deterministic hot-path and protocol benchmarks, budget config, and comparison fixtures. | `budgets.json`, `codec_benchmark_test.go`, `protocol_benchmark_test.go`, `compare/` |
+| `benchmark/` | Deterministic hot-path and protocol benchmarks, budget config, comparison fixtures, and a full-payload-validating raw TCP load generator. | `budgets.json`, `codec_benchmark_test.go`, `protocol_benchmark_test.go`, `cmd/tcp-loadgen/`, `compare/` |
 | `docs/` | Guides for adoption, operation, extension, internal flows, and performance evidence. | `README.md`, `quickstart.md`, `golden-path.md`, `operations.md`, `performance-fast-path.md` |
 
 The compile-time dependency rules for these packages are documented in

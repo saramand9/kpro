@@ -29,8 +29,10 @@ type StreamCodec interface {
 
 // ReusableStreamCodec is an optional receive contract for stream codecs that
 // can decode a frame into caller-owned scratch storage. The returned message
-// must be consumed before the next ReadInto call; transports use this contract
-// only while the current handler invocation is synchronous.
+// may alias scratch and must be fully consumed before the next ReadInto call.
+// A transport must not hand that message to a Router, queue, or asynchronous
+// consumer unless it first transfers ownership of the backing storage or
+// copies the message payload.
 type ReusableStreamCodec interface {
 	StreamCodec
 	ReadInto(r io.Reader, maxBodySize uint32, scratch []byte) (ReadResult, []byte, error)
