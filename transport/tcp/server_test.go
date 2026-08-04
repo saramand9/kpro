@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -30,6 +31,95 @@ func TestTCPRejectsNilHandlerWithoutBinding(t *testing.T) {
 	server.lifecycleMu.Unlock()
 	if listener != nil {
 		t.Fatal("nil handler startup published a TCP listener")
+	}
+}
+
+func TestTCPRouterQueuedPayloadIsNotOverwrittenByLaterFrames(t *testing.T) {
+	const messageID uint32 = 93
+	router := core.NewRouter(core.RouterConfig{
+		SyncQueueSize:         1,
+		AsyncWorkers:          1,
+		AsyncQueueSize:        1,
+		MaxInflightPerSession: 4,
+		SessionIdleTimeout:    time.Minute,
+		ShutdownTimeout:       time.Second,
+	})
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := router.Shutdown(ctx); err != nil {
+			t.Errorf("Router.Shutdown() error = %v", err)
+		}
+	})
+
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() { close(releaseFirst) })
+	}
+	type handledMessage struct {
+		seq     uint64
+		payload string
+	}
+	handled := make(chan handledMessage, 2)
+	router.HandleSync(messageID, func(ctx core.Context) error {
+		msg := ctx.Message()
+		if msg.Seq == 1 {
+			close(firstStarted)
+			<-releaseFirst
+		}
+		handled <- handledMessage{seq: msg.Seq, payload: string(msg.Data)}
+		return nil
+	})
+
+	_, addr, stop := startTCPTestServer(t, Config{
+		Addr:          freeTCPTestAddr(t),
+		Codec:         codec.KProV1(),
+		SendQueueSize: 4,
+		ReadTimeout:   time.Second,
+		WriteTimeout:  time.Second,
+	}, router.Dispatch)
+	t.Cleanup(stop)
+	t.Cleanup(release)
+
+	conn, err := net.DialTimeout("tcp", addr, time.Second)
+	if err != nil {
+		t.Fatalf("dial tcp server: %v", err)
+	}
+	defer conn.Close()
+
+	writeTCPTestMessage(t, conn, core.Message{ID: messageID, Seq: 1, Data: []byte("A")})
+	select {
+	case <-firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first Router handler did not start")
+	}
+	writeTCPTestMessage(t, conn, core.Message{ID: messageID, Seq: 2, Data: []byte("B")})
+	writeTCPTestMessage(t, conn, core.Message{ID: messageID, Seq: 3, Data: []byte("C")})
+
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	rejection, err := codec.KProV1().Read(conn, DefaultMaxFrameSize)
+	if err != nil {
+		t.Fatalf("read queue-full response: %v", err)
+	}
+	if rejection.Message.ID != core.MsgError || rejection.Message.Seq != 3 {
+		t.Fatalf("queue-full response = %+v, want MsgError sequence 3", rejection.Message)
+	}
+
+	release()
+	for _, want := range []handledMessage{
+		{seq: 1, payload: "A"},
+		{seq: 2, payload: "B"},
+	} {
+		select {
+		case got := <-handled:
+			if got != want {
+				t.Fatalf("handled message = %+v, want %+v", got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for handled message %+v", want)
+		}
 	}
 }
 

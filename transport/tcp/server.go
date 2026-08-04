@@ -311,7 +311,6 @@ type session struct {
 	raw                  net.Conn
 	sendQueue            *outbound.Queue[outboundFrame]
 	done                 chan struct{}
-	readScratch          []byte
 	readBuffer           *bufio.Reader
 	writeDeadlineRefresh time.Time
 	closeOnce            sync.Once
@@ -504,17 +503,7 @@ func (s *session) readFrame() (codec.ReadResult, error) {
 	if s.readBuffer == nil {
 		s.readBuffer = bufio.NewReaderSize(s.raw, 4*1024)
 	}
-	reader := io.Reader(s.readBuffer)
-	if reusable, ok := s.server.config.Codec.(codec.ReusableStreamCodec); ok {
-		result, scratch, err := reusable.ReadInto(
-			reader,
-			s.server.config.MaxFrameSize,
-			s.readScratch,
-		)
-		s.readScratch = scratch
-		return result, err
-	}
-	return s.server.config.Codec.Read(reader, s.server.config.MaxFrameSize)
+	return s.server.config.Codec.Read(s.readBuffer, s.server.config.MaxFrameSize)
 }
 
 func (s *session) writeLoop() {
