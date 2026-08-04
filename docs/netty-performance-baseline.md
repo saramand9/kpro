@@ -79,48 +79,29 @@ counterparts include
 [`NioSocketChannel`](https://github.com/netty/netty/blob/b022b4786f2b8258ea75d5b613957a01f2246c5b/transport/src/main/java/io/netty/channel/socket/nio/NioSocketChannel.java), and
 [`ChannelOutboundBuffer`](https://github.com/netty/netty/blob/b022b4786f2b8258ea75d5b613957a01f2246c5b/transport/src/main/java/io/netty/channel/ChannelOutboundBuffer.java).
 
-## 2026-08-04 receive-path change and loopback matrix
+## 2026-08-04 receive-path validation correction
 
-This iteration made two targeted changes without adding a user-visible Fast
-Path mode or changing the normal Router/Context/Middleware architecture:
+The read-deadline optimization remains: TCP establishes an initial read
+deadline and refreshes it by a bounded time window instead of calling
+`SetReadDeadline` for every frame. Idle connections still expire normally,
+while handler execution is not counted as read-idle time.
 
-- TCP read deadlines are set when a session starts and refreshed only after a
-  time window, instead of issuing `SetReadDeadline` for every frame. Idle
-  connections still expire normally, while handler execution is not counted
-  as read-idle time.
-- `codec.KProV1Codec` implements `ReusableStreamCodec`. TCP sessions retain a
-  bounded scratch payload backing and reuse it for synchronous handler reads,
-  removing the per-frame payload allocation. This is user-space buffer reuse,
-  not kernel `MSG_ZEROCOPY`.
+The same iteration also tried to reuse one receive scratch buffer per TCP
+session. That optimization was unsafe and has been reverted. `Router.Dispatch`
+confirms admission, not handler completion, so a queued or asynchronous handler
+could still reference the scratch payload when the next socket read overwrote
+it. A deterministic A/B/C queue test and a sequence-dependent full-payload load
+test reproduce the corruption on `c1f5051` and pass after restoring independent
+payload ownership.
 
-The same raw Go client, KProV1 frame format, Windows loopback host, and test
-durations were used for both servers. Netty used the temporary NIO echo server
-at commit `b022b4786f2b8258ea75d5b613957a01f2246c5b`. Values are messages per
-second; each cell is one run and should be repeated for confidence intervals.
-
-| Case | Previous KPro | Current KPro | KPro change | Previous Netty | Current Netty |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| T01: 1 conn, 64 B | 11,480 | 15,735 | +37% | 16,577 | 20,317 |
-| T02: 64 conn, 64 B | 75,526 | 108,009 | +43% | 100,332 | 132,946 |
-| T03: 64 conn, 1 KiB | 56,039 | 103,474 | +85% | 107,193 | 131,016 |
-| T04: 64 conn, 16 KiB | 36,380 | 53,337 | +47% | 47,078 | 79,893 |
-| T05: 1,000 conn, 64 B | 80,555 | 87,151 | +8% | 96,805 | 102,310 |
-| T06: 1,000 conn, 1 KiB | 78,206 | 84,398 | +8% | 93,162 | 100,181 |
-| T07: 64 conn, 64 B, batch 16 | 300,160 | 796,795 | +165% | 508,581 | 1,582,528 |
-| T08: 256 conn, 1 KiB, batch 16 | 483,029 | 700,677 | +45% | 1,328,293 | 1,160,523 |
-| T08b: 1,000 conn, 1 KiB, batch 16 | 588,930 | 708,752 | +20% | 1,055,744 | 1,121,125 |
-| T09: 1,000 conn, 1% slow | 68,704 | 85,283 | +24% | 16,155 | 98,834 |
-
-All current cells completed with zero client-reported errors. The previous
-T09 Netty cell had errors and is retained only as historical context. The
-current KPro/Netty ratio ranges from about 1.16x to 1.99x, with the largest
-remaining gap in batched writes. The p50 values from the temporary client can
-quantize to zero for sub-microsecond samples; p99 and throughput are the more
-useful signals in this matrix.
-
-The result supports a receive-path improvement, not a claim of Netty parity.
-It is Windows NIO loopback data, not Linux epoll/io_uring or a multi-host
-network result.
+The earlier T01-T09 KPro/Netty table is withdrawn. Its client did not validate
+every sequence-dependent payload byte, so successful headers could hide body
+corruption and the reported throughput ratios were not trustworthy. As a
+negative control, the corrected client completed zero responses and reported
+eight validation errors against the unsafe binary with 8 connections, 64-byte
+payloads, inflight 16, and a 2-second window. The historical numbers remain in
+Git history but must not be used as current performance evidence. A corrected
+Netty comparison has not yet been recorded.
 
 ## Largest current gap: inbound processing
 
@@ -129,14 +110,17 @@ The normal KProV1 TCP receive path currently performs:
 ```text
 ReadFull(20-byte header)
 -> validate payload length
--> reuse session scratch payload
+-> allocate an independently owned payload
 -> ReadFull(payload)
 -> Router dispatch
 ```
 
-The per-frame payload allocation is now removed for the built-in KProV1 TCP
-path. The codec still has no persistent cumulative receive buffer from which
-one socket read can decode several complete frames, so that remains the main
+The allocation is currently required because normal Router dispatch may retain
+the message after the transport's handler call returns. The optional
+`ReusableStreamCodec` contract explicitly documents its aliasing lifetime, and
+TCP does not use it without a transport-to-consumer ownership transfer or copy.
+The codec also has no persistent cumulative receive buffer from which one
+socket read can decode several complete frames, so that remains the main
 receive-side gap versus Netty.
 
 Netty reads available bytes into an adaptively sized buffer and its cumulative

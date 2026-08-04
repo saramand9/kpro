@@ -98,7 +98,7 @@ Use this route for eventing/data analysis:
 | Observability | `observability/healthx/`, `observability/prometheusx/`, `observability/otelx/`, `observability/zapx/` |
 | Event delivery | `eventing/delivery/`, `eventing/projector/` |
 | Scaffolding, template overlays, API catalogs, incremental additions, and code generation | `cmd/kpro/`, `cmd/kpro/scaffold_template.go`, `cmd/kpro/command_catalog.go`, `cmd/kpro/service_project.go`, `cmd/kpro/templates/profiles/service/`, `cmd/kpro/templates/service-project/`, `internal/codegen/`, `docs/code-generation.md` |
-| Performance paths and budgets | `docs/performance-fast-path.md`, `docs/netty-performance-baseline.md`, `benchmark/`, `cmd/benchguard/`, `transport/internal/bufferpool/` |
+| Performance paths and budgets | `docs/performance-fast-path.md`, `docs/netty-performance-baseline.md`, `benchmark/`, `benchmark/cmd/tcp-loadgen/`, `cmd/benchguard/`, `transport/internal/bufferpool/` |
 
 ## Checks To Reuse
 
