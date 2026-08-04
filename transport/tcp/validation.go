@@ -23,6 +23,7 @@ func (s *Server) Validate() error {
 		configcheck.NonNegativeInt64("MaxPendingBytes", s.rawConfig.MaxPendingBytes),
 		configcheck.NonNegativeInt("MaxWriteBatchFrames", s.rawConfig.MaxWriteBatchFrames),
 		configcheck.NonNegativeInt64("MaxWriteBatchBytes", s.rawConfig.MaxWriteBatchBytes),
+		configcheck.NonNegativeDuration("MaxWriteBatchDelay", s.rawConfig.MaxWriteBatchDelay),
 		configcheck.NonNegativeInt64("MaxRetainedBufferBytes", s.rawConfig.MaxRetainedBufferBytes),
 		configcheck.NonNegativeDuration("ReadTimeout", s.rawConfig.ReadTimeout),
 		configcheck.NonNegativeDuration("WriteTimeout", s.rawConfig.WriteTimeout),

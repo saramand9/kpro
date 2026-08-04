@@ -4,6 +4,7 @@
 package tcp
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -27,8 +28,9 @@ const (
 	DefaultMaxFrameSize           = 64 * 1024
 	DefaultMaxConnections         = 10000
 	DefaultSendQueueSize          = 64
-	DefaultMaxWriteBatchFrames    = 16
+	DefaultMaxWriteBatchFrames    = 32
 	DefaultMaxWriteBatchBytes     = 256 * 1024
+	DefaultMaxWriteBatchDelay     = 2 * time.Microsecond
 	DefaultMaxRetainedBufferBytes = 4 * 1024 * 1024
 	DefaultReadTimeout            = 90 * time.Second
 	DefaultWriteTimeout           = 5 * time.Second
@@ -56,13 +58,17 @@ type Config struct {
 	// MaxWriteBatchBytes caps bytes submitted by one gather-write call. A
 	// single oversized admitted frame is still written to ensure progress.
 	MaxWriteBatchBytes int64
+	// MaxWriteBatchDelay is the bounded coalescing window used when a writer
+	// observes only one queued frame. Non-positive values use the default.
+	MaxWriteBatchDelay time.Duration
 	// MaxRetainedBufferBytes caps idle payload memory kept by the shared
 	// size-class pool. Queue limits bound admitted wire bytes and frame count;
 	// active size-class capacity can be larger than logical payload bytes.
 	MaxRetainedBufferBytes int64
 	// ReadTimeout is applied before each frame read.
 	ReadTimeout time.Duration
-	// WriteTimeout is applied before each gather-write batch.
+	// WriteTimeout bounds an inactive or blocked write. The transport refreshes
+	// it per write activity window rather than before every batch.
 	WriteTimeout time.Duration
 	// HandlerErrorPolicy defaults to closing the affected session.
 	HandlerErrorPolicy transportapi.HandlerErrorPolicy
@@ -300,13 +306,15 @@ func (s *Server) signalReady() {
 }
 
 type session struct {
-	id          uint64
-	server      *Server
-	raw         net.Conn
-	sendQueue   *outbound.Queue[outboundFrame]
-	done        chan struct{}
-	readScratch []byte
-	closeOnce   sync.Once
+	id                   uint64
+	server               *Server
+	raw                  net.Conn
+	sendQueue            *outbound.Queue[outboundFrame]
+	done                 chan struct{}
+	readScratch          []byte
+	readBuffer           *bufio.Reader
+	writeDeadlineRefresh time.Time
+	closeOnce            sync.Once
 }
 
 var _ core.OutboundStateProvider = (*session)(nil)
@@ -493,16 +501,20 @@ func (s *session) readLoop(handler core.Handler) {
 }
 
 func (s *session) readFrame() (codec.ReadResult, error) {
+	if s.readBuffer == nil {
+		s.readBuffer = bufio.NewReaderSize(s.raw, 4*1024)
+	}
+	reader := io.Reader(s.readBuffer)
 	if reusable, ok := s.server.config.Codec.(codec.ReusableStreamCodec); ok {
 		result, scratch, err := reusable.ReadInto(
-			s.raw,
+			reader,
 			s.server.config.MaxFrameSize,
 			s.readScratch,
 		)
 		s.readScratch = scratch
 		return result, err
 	}
-	return s.server.config.Codec.Read(s.raw, s.server.config.MaxFrameSize)
+	return s.server.config.Codec.Read(reader, s.server.config.MaxFrameSize)
 }
 
 func (s *session) writeLoop() {
@@ -568,6 +580,9 @@ func normalizeConfig(config Config) Config {
 	}
 	if config.MaxWriteBatchBytes <= 0 {
 		config.MaxWriteBatchBytes = min(int64(DefaultMaxWriteBatchBytes), config.MaxPendingBytes)
+	}
+	if config.MaxWriteBatchDelay <= 0 {
+		config.MaxWriteBatchDelay = DefaultMaxWriteBatchDelay
 	}
 	if config.MaxRetainedBufferBytes <= 0 {
 		config.MaxRetainedBufferBytes = DefaultMaxRetainedBufferBytes
