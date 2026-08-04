@@ -61,6 +61,36 @@ func TestKProV1DecodePacketCopiesPayload(t *testing.T) {
 	}
 }
 
+func TestKProV1ReadIntoReusesScratch(t *testing.T) {
+	codec := KProV1()
+	first, err := codec.Encode(core.Message{ID: 7, Data: []byte("first")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := codec.Encode(core.Message{ID: 8, Data: []byte("second")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := bytes.NewReader(append(first, second...))
+	result, scratch, err := codec.ReadInto(reader, 64, make([]byte, 0, 16))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(result.Message.Data) != "first" {
+		t.Fatalf("first payload = %q", result.Message.Data)
+	}
+	result, nextScratch, err := codec.ReadInto(reader, 64, scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if &result.Message.Data[0] != &scratch[0] || &nextScratch[0] != &scratch[0] {
+		t.Fatal("ReadInto did not reuse scratch backing storage")
+	}
+	if string(result.Message.Data) != "second" {
+		t.Fatalf("second payload = %q", result.Message.Data)
+	}
+}
+
 func TestKProV1DecodePacketRejectsTrailingData(t *testing.T) {
 	packet, err := KProV1().EncodePacket(core.Message{
 		ID:   testMsgEcho,

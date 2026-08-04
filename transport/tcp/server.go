@@ -300,12 +300,13 @@ func (s *Server) signalReady() {
 }
 
 type session struct {
-	id        uint64
-	server    *Server
-	raw       net.Conn
-	sendQueue *outbound.Queue[outboundFrame]
-	done      chan struct{}
-	closeOnce sync.Once
+	id          uint64
+	server      *Server
+	raw         net.Conn
+	sendQueue   *outbound.Queue[outboundFrame]
+	done        chan struct{}
+	readScratch []byte
+	closeOnce   sync.Once
 }
 
 var _ core.OutboundStateProvider = (*session)(nil)
@@ -413,6 +414,14 @@ func (s *session) start(handler core.Handler) {
 
 func (s *session) readLoop(handler core.Handler) {
 	preserveSession := false
+	var readDeadlineRefresh time.Time
+	if timeout := s.server.config.ReadTimeout; timeout > 0 {
+		now := time.Now()
+		if err := s.raw.SetReadDeadline(now.Add(timeout)); err != nil {
+			return
+		}
+		readDeadlineRefresh = now.Add(timeout / 2)
+	}
 	defer func() {
 		if preserveSession {
 			return
@@ -431,17 +440,21 @@ func (s *session) readLoop(handler core.Handler) {
 			preserveSession = true
 			return
 		}
-		if s.server.config.ReadTimeout > 0 {
-			if err := s.raw.SetReadDeadline(time.Now().Add(s.server.config.ReadTimeout)); err != nil {
-				preserveSession = s.server.dispatch.Stopped()
-				return
-			}
-		}
 		if s.server.dispatch.Stopped() {
 			preserveSession = true
 			return
 		}
-		result, err := s.server.config.Codec.Read(s.raw, s.server.config.MaxFrameSize)
+		if !readDeadlineRefresh.IsZero() {
+			now := time.Now()
+			if !now.Before(readDeadlineRefresh) {
+				if err := s.raw.SetReadDeadline(now.Add(s.server.config.ReadTimeout)); err != nil {
+					preserveSession = s.server.dispatch.Stopped()
+					return
+				}
+				readDeadlineRefresh = now.Add(s.server.config.ReadTimeout / 2)
+			}
+		}
+		result, err := s.readFrame()
 		if err != nil {
 			preserveSession = s.server.dispatch.Stopped()
 			if err == io.EOF {
@@ -477,6 +490,19 @@ func (s *session) readLoop(handler core.Handler) {
 			return
 		}
 	}
+}
+
+func (s *session) readFrame() (codec.ReadResult, error) {
+	if reusable, ok := s.server.config.Codec.(codec.ReusableStreamCodec); ok {
+		result, scratch, err := reusable.ReadInto(
+			s.raw,
+			s.server.config.MaxFrameSize,
+			s.readScratch,
+		)
+		s.readScratch = scratch
+		return result, err
+	}
+	return s.server.config.Codec.Read(s.raw, s.server.config.MaxFrameSize)
 }
 
 func (s *session) writeLoop() {
