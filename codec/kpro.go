@@ -31,27 +31,38 @@ func (KProV1Codec) Name() string {
 
 // Read decodes one framed message from a stream reader.
 func (KProV1Codec) Read(r io.Reader, maxBodySize uint32) (ReadResult, error) {
+	result, _, err := KProV1Codec{}.ReadInto(r, maxBodySize, nil)
+	return result, err
+}
+
+// ReadInto decodes one frame using scratch for the payload when it has enough
+// capacity. The returned scratch retains its capacity for the next frame.
+func (KProV1Codec) ReadInto(r io.Reader, maxBodySize uint32, scratch []byte) (ReadResult, []byte, error) {
 	var header [FrameHeaderSize]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
-		return ReadResult{}, err
+		return ReadResult{}, scratch, err
 	}
 	msg, length, err := decodeHeader(header[:])
 	if err != nil {
-		return ReadResult{}, err
+		return ReadResult{}, scratch, err
 	}
 	if length > maxBodySize {
-		return ReadResult{}, ErrFrameTooLarge
+		return ReadResult{}, scratch, ErrFrameTooLarge
 	}
 	if length > 0 {
-		msg.Data = make([]byte, int(length))
+		if cap(scratch) < int(length) {
+			scratch = make([]byte, int(length))
+		}
+		scratch = scratch[:int(length)]
+		msg.Data = scratch
 		if _, err := io.ReadFull(r, msg.Data); err != nil {
-			return ReadResult{}, err
+			return ReadResult{}, scratch, err
 		}
 	}
 	return ReadResult{
 		Message: msg,
 		Bytes:   FrameHeaderSize + int(length),
-	}, nil
+	}, scratch, nil
 }
 
 // Encode serializes one message into a framed byte slice.

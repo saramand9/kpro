@@ -8,16 +8,16 @@ result, capacity guarantee, or claim of Netty parity.
 
 | Field | Baseline |
 | --- | --- |
-| Assessment date | 2026-08-03 |
+| Assessment date | 2026-08-04 |
 | KPro source | The repository revision containing this document and the segmented TCP/WebSocket FastPath work |
 | Netty source | Local Netty 4.2 checkout at `b022b4786f2b8258ea75d5b613957a01f2246c5b` |
-| KPro measured evidence | [FastPath regression baseline](../benchmark/RESULTS.md#2026-08-03-fastpath-regression-baseline) |
+| KPro measured evidence | [FastPath regression baseline](../benchmark/RESULTS.md#2026-08-03-fastpath-regression-baseline), plus the 2026-08-04 loopback matrix below |
 | Comparison acceptance contract | [Performance Fast Paths](performance-fast-path.md#kpro-versus-netty-baseline-contract) |
 
 The implementation comparison comes from the two source trees. The public
-concurrency references below come from Netty's documentation site. No
-cross-framework socket benchmark has been run, so this document deliberately
-does not assign an end-to-end performance percentage.
+concurrency references below come from Netty's documentation site. The
+loopback matrix below is a controlled engineering measurement, not a capacity
+guarantee or a production certification.
 
 ## What Netty's concurrency reputation means
 
@@ -79,6 +79,49 @@ counterparts include
 [`NioSocketChannel`](https://github.com/netty/netty/blob/b022b4786f2b8258ea75d5b613957a01f2246c5b/transport/src/main/java/io/netty/channel/socket/nio/NioSocketChannel.java), and
 [`ChannelOutboundBuffer`](https://github.com/netty/netty/blob/b022b4786f2b8258ea75d5b613957a01f2246c5b/transport/src/main/java/io/netty/channel/ChannelOutboundBuffer.java).
 
+## 2026-08-04 receive-path change and loopback matrix
+
+This iteration made two targeted changes without adding a user-visible Fast
+Path mode or changing the normal Router/Context/Middleware architecture:
+
+- TCP read deadlines are set when a session starts and refreshed only after a
+  time window, instead of issuing `SetReadDeadline` for every frame. Idle
+  connections still expire normally, while handler execution is not counted
+  as read-idle time.
+- `codec.KProV1Codec` implements `ReusableStreamCodec`. TCP sessions retain a
+  bounded scratch payload backing and reuse it for synchronous handler reads,
+  removing the per-frame payload allocation. This is user-space buffer reuse,
+  not kernel `MSG_ZEROCOPY`.
+
+The same raw Go client, KProV1 frame format, Windows loopback host, and test
+durations were used for both servers. Netty used the temporary NIO echo server
+at commit `b022b4786f2b8258ea75d5b613957a01f2246c5b`. Values are messages per
+second; each cell is one run and should be repeated for confidence intervals.
+
+| Case | Previous KPro | Current KPro | KPro change | Previous Netty | Current Netty |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| T01: 1 conn, 64 B | 11,480 | 15,735 | +37% | 16,577 | 20,317 |
+| T02: 64 conn, 64 B | 75,526 | 108,009 | +43% | 100,332 | 132,946 |
+| T03: 64 conn, 1 KiB | 56,039 | 103,474 | +85% | 107,193 | 131,016 |
+| T04: 64 conn, 16 KiB | 36,380 | 53,337 | +47% | 47,078 | 79,893 |
+| T05: 1,000 conn, 64 B | 80,555 | 87,151 | +8% | 96,805 | 102,310 |
+| T06: 1,000 conn, 1 KiB | 78,206 | 84,398 | +8% | 93,162 | 100,181 |
+| T07: 64 conn, 64 B, batch 16 | 300,160 | 796,795 | +165% | 508,581 | 1,582,528 |
+| T08: 256 conn, 1 KiB, batch 16 | 483,029 | 700,677 | +45% | 1,328,293 | 1,160,523 |
+| T08b: 1,000 conn, 1 KiB, batch 16 | 588,930 | 708,752 | +20% | 1,055,744 | 1,121,125 |
+| T09: 1,000 conn, 1% slow | 68,704 | 85,283 | +24% | 16,155 | 98,834 |
+
+All current cells completed with zero client-reported errors. The previous
+T09 Netty cell had errors and is retained only as historical context. The
+current KPro/Netty ratio ranges from about 1.16x to 1.99x, with the largest
+remaining gap in batched writes. The p50 values from the temporary client can
+quantize to zero for sub-microsecond samples; p99 and throughput are the more
+useful signals in this matrix.
+
+The result supports a receive-path improvement, not a claim of Netty parity.
+It is Windows NIO loopback data, not Linux epoll/io_uring or a multi-host
+network result.
+
 ## Largest current gap: inbound processing
 
 The normal KProV1 TCP receive path currently performs:
@@ -86,16 +129,15 @@ The normal KProV1 TCP receive path currently performs:
 ```text
 ReadFull(20-byte header)
 -> validate payload length
--> allocate payload
+-> reuse session scratch payload
 -> ReadFull(payload)
 -> Router dispatch
 ```
 
-For every non-empty message this retains one payload allocation and, when the
-data is already available, normally separates header and payload consumption
-into two reader calls. More importantly, the codec has no persistent
-cumulation buffer from which one socket read can decode several complete
-frames.
+The per-frame payload allocation is now removed for the built-in KProV1 TCP
+path. The codec still has no persistent cumulative receive buffer from which
+one socket read can decode several complete frames, so that remains the main
+receive-side gap versus Netty.
 
 Netty reads available bytes into an adaptively sized buffer and its cumulative
 decoder can preserve partial frames and emit several messages from the same
@@ -172,17 +214,13 @@ The next work should target measured architectural gaps in this order:
 
 1. Add a bounded cumulative TCP receive buffer that preserves partial frames
    and decodes multiple frames per socket read.
-2. Pool receive storage and define payload ownership/lifetime so frame decoding
-   does not require one new payload backing allocation per message.
-3. Add an optional non-blocking inline dispatch path, while retaining the
-   current blocking-safe Router path and its ordering/backpressure contracts.
-4. Measure and then add bounded flush consolidation, adaptive write quanta, and
+2. Measure and then add bounded flush consolidation, adaptive write quanta, and
    explicit partial-write progress where the measurements justify them.
-5. Refine read-side backpressure so sustained outbound pressure can pause and
+3. Refine read-side backpressure so sustained outbound pressure can pause and
    resume reads before the hard close boundary.
-6. Shard buffer reuse only after contention profiles show the server-wide pool
+4. Shard buffer reuse only after contention profiles show the server-wide pool
    is material.
-7. Add a separate file-region/sendfile capability for eligible large immutable
+5. Add a separate file-region/sendfile capability for eligible large immutable
    payloads; consider Linux-specific copy avoidance only after that path has a
    reproducible CPU-per-GiB requirement.
 

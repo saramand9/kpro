@@ -27,6 +27,15 @@ type StreamCodec interface {
 	Encode(msg core.Message) ([]byte, error)
 }
 
+// ReusableStreamCodec is an optional receive contract for stream codecs that
+// can decode a frame into caller-owned scratch storage. The returned message
+// must be consumed before the next ReadInto call; transports use this contract
+// only while the current handler invocation is synchronous.
+type ReusableStreamCodec interface {
+	StreamCodec
+	ReadInto(r io.Reader, maxBodySize uint32, scratch []byte) (ReadResult, []byte, error)
+}
+
 // PacketCodec describes a protocol carried by packet transports such as UDP.
 type PacketCodec interface {
 	// Name returns a stable protocol identifier for diagnostics.
