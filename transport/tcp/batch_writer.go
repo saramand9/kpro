@@ -22,7 +22,17 @@ func newSessionBatchWriter(config Config) *sessionBatchWriter {
 }
 
 func (w *sessionBatchWriter) writeAvailable(s *session, first *outbound.Item[outboundFrame]) error {
-	items := s.sendQueue.DrainAvailable(first, w.items[:0], s.server.config.MaxWriteBatchFrames)
+	maxFrames := s.server.config.MaxWriteBatchFrames
+	snapshot := s.sendQueue.Snapshot()
+	if snapshot.PendingFrames >= maxFrames && maxFrames < s.server.config.SendQueueSize {
+		maxFrames = min(maxFrames*2, s.server.config.SendQueueSize)
+	}
+	items := s.sendQueue.DrainAvailableWait(
+		first,
+		w.items[:0],
+		maxFrames,
+		s.server.config.MaxWriteBatchDelay,
+	)
 	defer func() {
 		// Item and net.Buffers backing arrays are kept for reuse. Clear their
 		// complete used/capacity regions so an idle session does not retain the
@@ -47,10 +57,14 @@ func (w *sessionBatchWriter) writeAvailable(s *session, first *outbound.Item[out
 			end++
 		}
 
-		if s.server.config.WriteTimeout > 0 {
-			if err := s.raw.SetWriteDeadline(time.Now().Add(s.server.config.WriteTimeout)); err != nil {
-				doneOutboundItems(items[start:])
-				return err
+		if timeout := s.server.config.WriteTimeout; timeout > 0 {
+			now := time.Now()
+			if s.writeDeadlineRefresh.IsZero() || !now.Before(s.writeDeadlineRefresh) {
+				if err := s.raw.SetWriteDeadline(now.Add(timeout)); err != nil {
+					doneOutboundItems(items[start:])
+					return err
+				}
+				s.writeDeadlineRefresh = now.Add(timeout / 2)
 			}
 		}
 		// net.Buffers.WriteTo mutates its slice receiver. Keep that receiver on
