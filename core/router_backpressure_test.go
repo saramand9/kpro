@@ -650,6 +650,241 @@ func TestRouterConcurrentDispatchAndClose(t *testing.T) {
 	}
 }
 
+func TestRouterCloseSignalsLocalExecutorDuringConcurrentDispatch(t *testing.T) {
+	testRouterLocalExecutorSignalDuringConcurrentDispatch(t, false)
+}
+
+func TestRouterShutdownSignalsLocalExecutorDuringConcurrentDispatch(t *testing.T) {
+	testRouterLocalExecutorSignalDuringConcurrentDispatch(t, true)
+}
+
+func TestRouterCloseSignalsAllExecutorsBeforeBlockedDropResponse(t *testing.T) {
+	config := testRouterConfig(BackpressureReject)
+	config.SyncQueueSize = 2
+	config.MaxInflight = 4
+	config.MaxInflightPerSession = 2
+	config.ShutdownTimeout = 5 * time.Second
+	router := NewRouter(config)
+
+	handlerRelease := make(chan struct{})
+	sendRelease := make(chan struct{})
+	sendStarted := make(chan uint64, 2)
+	var releaseHandlersOnce sync.Once
+	releaseHandlers := func() { releaseHandlersOnce.Do(func() { close(handlerRelease) }) }
+	var releaseSendsOnce sync.Once
+	releaseSends := func() { releaseSendsOnce.Do(func() { close(sendRelease) }) }
+	defer releaseHandlers()
+	defer releaseSends()
+
+	var queuedExecutions atomic.Int32
+	router.HandleSync(1, func(ctx Context) error {
+		session := ctx.Session().(*blockingDropResponseSession)
+		if ctx.Message().Seq == 1 {
+			close(session.handlerStarted)
+			<-handlerRelease
+			return nil
+		}
+		queuedExecutions.Add(1)
+		return nil
+	})
+
+	sessions := []*blockingDropResponseSession{
+		newBlockingDropResponseSession(1, sendStarted, sendRelease),
+		newBlockingDropResponseSession(2, sendStarted, sendRelease),
+	}
+	executors := make([]*sessionExecutor, 0, len(sessions))
+	for _, session := range sessions {
+		if err := router.Dispatch(NewContext(session, Message{ID: 1, Seq: 1})); err != nil {
+			t.Fatalf("running Dispatch(session=%d) error = %v", session.ID(), err)
+		}
+		waitClosedForAdmissionTest(t, session.handlerStarted, "running handler did not start")
+		if err := router.Dispatch(NewContext(session, Message{ID: 1, Seq: 2})); err != nil {
+			t.Fatalf("queued Dispatch(session=%d) error = %v", session.ID(), err)
+		}
+		key := sessionExecutorKey{id: session.ID(), done: session.Done()}
+		value, ok := router.sessions.Load(key)
+		if !ok {
+			t.Fatalf("session executor %d not found", session.ID())
+		}
+		executors = append(executors, value.(*sessionExecutor))
+	}
+
+	closeResult := make(chan struct{})
+	go func() {
+		router.Close()
+		close(closeResult)
+	}()
+
+	select {
+	case <-sendStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not reach a blocked dropped-task response")
+	}
+	for _, executor := range executors {
+		waitClosedForAdmissionTest(t, executor.closedCh, "blocked response delayed another executor close signal")
+	}
+
+	releaseSends()
+	select {
+	case <-closeResult:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not finish after releasing blocked responses")
+	}
+	releaseHandlers()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := router.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown() after Close error = %v", err)
+	}
+
+	if got := queuedExecutions.Load(); got != 0 {
+		t.Fatalf("queued handler executions = %d, want 0", got)
+	}
+	stats := router.Snapshot()
+	if stats.Accepted != 4 ||
+		stats.Completed != 2 ||
+		stats.Dropped != 2 ||
+		stats.Inflight != 0 ||
+		stats.SyncQueueDepth != 0 ||
+		stats.Sessions != 0 ||
+		stats.State != StateStopped {
+		t.Fatalf("final blocked-response close stats = %+v", stats)
+	}
+}
+
+func testRouterLocalExecutorSignalDuringConcurrentDispatch(t *testing.T, graceful bool) {
+	t.Helper()
+	const (
+		prequeued = 8
+		total     = 40
+	)
+	config := testRouterConfig(BackpressureReject)
+	config.SyncQueueSize = total
+	config.MaxInflight = total
+	config.MaxInflightPerSession = total
+	config.ShutdownTimeout = 5 * time.Second
+	router := NewRouter(config)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	executions := make([]atomic.Int32, total)
+	router.HandleSync(1, func(ctx Context) error {
+		seq := int(ctx.Message().Seq)
+		executions[seq].Add(1)
+		if seq == 0 {
+			close(started)
+			<-release
+		}
+		return nil
+	})
+
+	session := newAdmissionSession(1)
+	results := make([]error, total)
+	results[0] = router.Dispatch(NewContext(session, Message{ID: 1}))
+	if results[0] != nil {
+		t.Fatalf("first Dispatch() error = %v", results[0])
+	}
+	waitClosedForAdmissionTest(t, started, "first handler did not start")
+
+	key := sessionExecutorKey{id: session.ID(), done: session.Done()}
+	value, ok := router.sessions.Load(key)
+	if !ok {
+		t.Fatal("session executor not found")
+	}
+	executor := value.(*sessionExecutor)
+
+	for seq := 1; seq <= prequeued; seq++ {
+		results[seq] = router.Dispatch(NewContext(session, Message{ID: 1, Seq: uint64(seq)}))
+		if results[seq] != nil {
+			t.Fatalf("prequeue Dispatch(%d) error = %v", seq, results[seq])
+		}
+	}
+
+	startRace := make(chan struct{})
+	var dispatchers sync.WaitGroup
+	for seq := prequeued + 1; seq < total; seq++ {
+		dispatchers.Add(1)
+		go func(seq int) {
+			defer dispatchers.Done()
+			<-startRace
+			results[seq] = router.Dispatch(NewContext(session, Message{ID: 1, Seq: uint64(seq)}))
+		}(seq)
+	}
+	closeResult := make(chan error, 1)
+	go func() {
+		<-startRace
+		if graceful {
+			closeResult <- router.Shutdown(context.Background())
+			return
+		}
+		router.Close()
+		closeResult <- nil
+	}()
+	close(startRace)
+	dispatchers.Wait()
+	waitClosedForAdmissionTest(t, executor.closedCh, "Router did not signal the session executor")
+	if !graceful {
+		select {
+		case err := <-closeResult:
+			if err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("Close did not finish")
+		}
+	}
+	close(release)
+
+	if graceful {
+		select {
+		case err := <-closeResult:
+			if err != nil {
+				t.Fatalf("Shutdown() error = %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("Shutdown did not finish after releasing the running handler")
+		}
+	} else {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := router.Shutdown(shutdownCtx); err != nil {
+			t.Fatalf("Shutdown() after Close error = %v", err)
+		}
+	}
+
+	accepted := 0
+	for seq, err := range results {
+		wantExecutions := int32(0)
+		if err == nil {
+			accepted++
+			if graceful || seq == 0 {
+				wantExecutions = 1
+			}
+		} else if !errors.Is(err, ErrRouterClosed) {
+			t.Errorf("Dispatch(%d) error = %v, want nil or %v", seq, err, ErrRouterClosed)
+		}
+		if got := executions[seq].Load(); got != wantExecutions {
+			t.Errorf("handler executions for sequence %d = %d, want %d", seq, got, wantExecutions)
+		}
+	}
+	wantCompleted := uint64(1)
+	wantDropped := uint64(accepted - 1)
+	if graceful {
+		wantCompleted = uint64(accepted)
+		wantDropped = 0
+	}
+	stats := router.Snapshot()
+	if stats.Accepted != uint64(accepted) ||
+		stats.Completed != wantCompleted ||
+		stats.Dropped != wantDropped ||
+		stats.Inflight != 0 ||
+		stats.SyncQueueDepth != 0 ||
+		stats.Sessions != 0 ||
+		stats.State != StateStopped {
+		t.Fatalf("final close stats = %+v, accepted=%d, graceful=%t", stats, accepted, graceful)
+	}
+}
+
 func TestRouterStartupCannotReviveDrainingState(t *testing.T) {
 	router := NewRouter(testRouterConfig(BackpressureReject))
 	defer shutdownAdmissionRouter(t, router)
@@ -732,6 +967,32 @@ type admissionSession struct {
 	id   uint64
 	done chan struct{}
 	once sync.Once
+}
+
+type blockingDropResponseSession struct {
+	*admissionSession
+	handlerStarted chan struct{}
+	sendStarted    chan<- uint64
+	sendRelease    <-chan struct{}
+}
+
+func newBlockingDropResponseSession(
+	id uint64,
+	sendStarted chan<- uint64,
+	sendRelease <-chan struct{},
+) *blockingDropResponseSession {
+	return &blockingDropResponseSession{
+		admissionSession: newAdmissionSession(id),
+		handlerStarted:   make(chan struct{}),
+		sendStarted:      sendStarted,
+		sendRelease:      sendRelease,
+	}
+}
+
+func (s *blockingDropResponseSession) Send(Message) error {
+	s.sendStarted <- s.ID()
+	<-s.sendRelease
+	return nil
 }
 
 func newAdmissionSession(id uint64) *admissionSession {
