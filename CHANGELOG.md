@@ -12,6 +12,10 @@ upgrading between minor versions.
 
 ### Added
 
+- `transport/fasthttpx` provides an opt-in fasthttp-native HTTP/1.1 runner with
+  method/path routing, unified invocation middleware, checked limits,
+  readiness, TLS restricted to HTTP/1.1, and bounded graceful shutdown. The
+  existing `httpx` endpoint remains the standard-library and HTTP/2 path.
 - `BackpressureWait` now bounds blocked dispatch callers independently from
   in-flight work. The defaults allow 1024 waiters Router-wide and 16 per
   session; one dispatch holds one ticket while crossing global, per-session,

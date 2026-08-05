@@ -79,6 +79,11 @@ its context, including a gRPC handler that ignores its RPC context. A
 connection explicitly hijacked through `net/http` is no longer owned by the
 server and must be tracked and closed by the hijacking component.
 
+The optional `fasthttpx` runner stops admission, cancels its endpoint-level
+request contexts, and asks fasthttp to drain. If the caller's deadline expires,
+it force-closes tracked native connections and returns the joined error. It has
+no hijacked-connection exception because it does not expose `net/http` hijack.
+
 For a message transport mounted as `server.Endpoint`, endpoint shutdown has
 three ordered phases:
 
@@ -166,6 +171,10 @@ SSE `WriteTimeout` covers the initial stream flush and is renewed around each
 `Context.Send` write and flush rather than limiting the lifetime of the HTTP
 response. Its zero value disables those per-write deadlines; direct writes to
 the embedded response writer are outside the `Send` deadline contract.
+
+`fasthttpx` invocation contexts cancel on endpoint shutdown, but not on peer
+disconnect. Add an application deadline for work that must not survive a lost
+HTTP/1.1 client, and do not retain its pooled context or borrowed request bytes.
 
 Message invocations can also follow a session's optional
 `core.SessionLifecycle.Done` signal. Message handlers read the
@@ -445,6 +454,7 @@ production-like scenarios before setting limits. See the
 | UDP | `MaxSessions`, `MaxPacketSize`, `SendQueueSize`, `MaxPendingBytes`, `SessionIdleTimeout`, `CleanupInterval` | virtual-peer state, datagrams, pending write count/bytes, idle retention |
 | WebSocket | `MaxConnections`, `MaxMessage`, `SendQueueSize`, `MaxPendingBytes`, `HandshakeTimeout`, `ReadTimeout`, `WriteTimeout`, `CheckOrigin` | upgraded sessions, HTTP upgrade/origin policy, reassembled messages, pending write count/bytes, and slow peers |
 | HTTP/HTTPS | `ReadTimeout`, `WriteTimeout`, `IdleTimeout`, `ShutdownTimeout`, `MaxBodyBytes` | requests, bodies, keep-alive residence, drain |
+| Fast HTTP/1.1 | `Concurrency`, `MaxConnsPerIP`, `MaxRequestsPerConn`, read/write buffers, `MaxBodyBytes`, read/write/idle/shutdown timeouts | concurrent connections, per-IP concentration, connection reuse, headers, bodies, and drain |
 | HTTP/3 | `MaxConnections`, `MaxBodyBytes`, `MaxHeaderBytes`, handshake/read/write/idle/shutdown timeouts, TLS and QUIC settings | physical connections, request bodies, streams, headers, drain; `Allow0RTT` is a replay-sensitive opt-in, not a capacity control |
 | SSE | `MaxStreams`, `HandshakeTimeout`, `IdleTimeout`, `WriteTimeout`, `ShutdownTimeout` | active streams, request headers, keep-alive residence, initial stream flush, per-event `Send` writes and flushes, and drain |
 | gRPC | `WithShutdownTimeout` and selected `grpc.ServerOption` limits | RPC/message/connection behavior and drain |

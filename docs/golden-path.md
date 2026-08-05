@@ -105,12 +105,17 @@ boundaries.
 | Need | Recommended starting point |
 | --- | --- |
 | Browser, REST-style, webhook, or ordinary request/response API | `httpx.New` mounted with `server.MountNative` |
+| Measured HTTP/1.1 throughput or allocation pressure requiring a native fasthttp API | `fasthttpx.New` mounted with `server.MountNative` |
 | Protobuf service contract and gRPC ecosystem interoperability | `grpcx.NewServer` mounted with `server.MountNative` |
 | One-way server event stream to an HTTP client | `sse.New` mounted with `server.MountNative` |
 | Persistent binary sessions, application message IDs, or custom framing | TCP, KCP, QUIC, UDP, or WebSocket message endpoints |
 | HTTP semantics over QUIC | `http3.New` mounted with `server.MountNative` |
 
 Do not add a second protocol only to make the deployment look more general. Add it when a client contract or measured workload requires it.
+
+`fasthttpx` is intentionally not compatible with `net/http` and does not
+support HTTP/2. Keep `httpx` when standard-library handlers, request-disconnect
+cancellation, or HTTP/2 matter; see [Fast HTTP/1.1 Endpoint](fasthttp.md).
 
 HTTP/3 early data is deliberately disabled by default. Set
 `http3.Config.Allow0RTT` only when every accepted route is idempotent or the

@@ -97,6 +97,17 @@ go run ./examples/http/server -addr :8080
 go run ./examples/http/client -base http://127.0.0.1:8080 -text "hello http"
 ```
 
+## Fast HTTP/1.1
+
+The optional fasthttp-native endpoint uses the same KPro lifecycle and
+middleware contracts, but it is not a `net/http` handler and does not support
+HTTP/2. The standard HTTP client can call it directly.
+
+```sh
+go run ./examples/fasthttp/server -addr :8082
+go run ./examples/http/client -base http://127.0.0.1:8082 -text "hello fasthttp"
+```
+
 ## HTTPS
 
 The HTTPS server generates a local self-signed certificate at startup. The client skips certificate verification because this is a local example.

@@ -18,9 +18,9 @@ server.Server
   -> application handler
 ```
 
-Message-based transports use `core.Message` and `core.Context`. HTTP, SSE, and
-gRPC keep protocol-native handler surfaces where that is the clearer contract
-for application code.
+Message-based transports use `core.Message` and `core.Context`. HTTP variants,
+SSE, and gRPC keep protocol-native handler surfaces where that is the clearer
+contract for application code.
 
 ## Top-Level Packages
 
@@ -120,10 +120,10 @@ HTTP-style dispatch follows this path:
 
 ```text
 HTTP client
-  -> httpx or http3 endpoint
+  -> httpx, fasthttpx, or http3 endpoint
   -> method/path route lookup
   -> core.Invocation middleware bridge
-  -> httpx.Context handler
+  -> protocol-native HTTP context handler
   -> core.ErrorKind to safe HTTP status/message
   -> response writer
 ```

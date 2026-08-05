@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/transport/fasthttpx"
 	"github.com/saramand9/kpro/transport/grpcx"
 	http3x "github.com/saramand9/kpro/transport/http3"
 	"github.com/saramand9/kpro/transport/httpx"
@@ -40,6 +41,10 @@ func TestServerMountsNativeRunners(t *testing.T) {
 	if endpoint := app.MountRunner(httpEndpoint); endpoint == nil {
 		t.Fatal("HTTP endpoint is nil")
 	}
+	fastHTTPEndpoint := fasthttpx.New(fasthttpx.Config{Addr: "127.0.0.1:0"})
+	if endpoint := app.MountRunner(fastHTTPEndpoint); endpoint == nil {
+		t.Fatal("fasthttp endpoint is nil")
+	}
 	httpsEndpoint := httpx.New(httpx.Config{Addr: "127.0.0.1:0", TLS: true, CertFile: "server.crt", KeyFile: "server.key"})
 	if endpoint := app.MountRunner(httpsEndpoint); endpoint == nil {
 		t.Fatal("HTTPS endpoint is nil")
@@ -57,7 +62,7 @@ func TestServerMountsNativeRunners(t *testing.T) {
 		t.Fatal("HTTP/3 endpoint is nil")
 	}
 
-	if got, want := len(app.runners), 5; got != want {
+	if got, want := len(app.runners), 6; got != want {
 		t.Fatalf("runner count = %d, want %d", got, want)
 	}
 }
@@ -84,6 +89,21 @@ func TestMountNativeCheckedPreservesConcreteRunnerType(t *testing.T) {
 		t.Fatal("MountNativeChecked() did not return the mounted concrete endpoint")
 	}
 	endpoint.Get("/health", func(ctx *httpx.Context) error {
+		return ctx.Text(200, "ok")
+	})
+}
+
+func TestMountNativeCheckedPreservesFastHTTPRunnerType(t *testing.T) {
+	app := New()
+	want := fasthttpx.New(fasthttpx.Config{Addr: "127.0.0.1:0"})
+	endpoint, err := MountNativeChecked(app, want)
+	if err != nil {
+		t.Fatalf("MountNativeChecked() error = %v", err)
+	}
+	if endpoint != want {
+		t.Fatal("MountNativeChecked() did not return the mounted fasthttp endpoint")
+	}
+	endpoint.Get("/health", func(ctx *fasthttpx.Context) error {
 		return ctx.Text(200, "ok")
 	})
 }
