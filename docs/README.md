@@ -14,6 +14,7 @@ Start with the quickstart and golden path. The remaining guides separate impleme
 | [Recommended Golden Path](golden-path.md) | Choose a protocol, structure an application, validate startup, own observability/lifecycle, and grow safely. |
 | [Observability Example](../examples/observability/main.go) | Run bounded health and Prometheus endpoints with Zap, OTel wiring, and a custom runner descriptor. |
 | [Examples](../examples/README.md) | Run standalone and modular examples for each implemented protocol. |
+| [Fast HTTP/1.1 Endpoint](fasthttp.md) | Decide when to use the optional fasthttp runner and understand its native context, limits, and lifecycle. |
 
 ## Ship and operate
 

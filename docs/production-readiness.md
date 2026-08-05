@@ -110,6 +110,7 @@ Status terms used below:
   message or frame limits, both outbound queue limits, and read/write/idle
   timeouts.
 - [ ] **Configure and verify:** Set HTTP `ReadTimeout`, `WriteTimeout`, `IdleTimeout`, `ShutdownTimeout`, and `MaxBodyBytes` explicitly. HTTP read/write/idle defaults are not an operational policy.
+- [ ] **Configure and verify:** For `fasthttpx`, also set and load-test `Concurrency`, `MaxConnsPerIP`, `MaxRequestsPerConn`, read/write buffer sizes, and application work deadlines. Its request context cancels on endpoint shutdown, not peer disconnect.
 - [ ] **Configure and verify:** Set HTTP/3 `MaxConnections`, `MaxBodyBytes`, `MaxHeaderBytes`, handshake/read/write/idle/shutdown timeouts, and QUIC/TLS policy explicitly.
 - [ ] **Configure and verify:** Keep HTTP/3 `Allow0RTT` disabled unless every accepted route is idempotent or protected against replay. A nested `QUICConfig.Allow0RTT` does not override the safe top-level default.
 - [ ] **Configure and verify:** Define what clients observe when a queue, body, frame, connection, or deadline limit is reached; test retry storms and slow consumers.

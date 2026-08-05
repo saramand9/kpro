@@ -25,6 +25,7 @@ WebSocket   implemented, supports RFC 6455 data-message fragmentation
 HTTP        implemented
 HTTPS       implemented through HTTP + TLS config
 HTTP/2      implemented through HTTPS native Go negotiation
+Fast HTTP/1.1 implemented as opt-in transport/fasthttpx
 HTTP/3      implemented through QUIC + TLS config
 SSE         implemented
 gRPC        implemented through transport/grpcx and generic server mounting
@@ -143,6 +144,7 @@ flowchart TD
     App --> UDP[transport/udp]
     App --> WS[transport/websocket]
     App --> HTTP[transport/httpx]
+    App --> FastHTTP[transport/fasthttpx]
     App --> HTTP3[transport/http3]
     App --> SSE[transport/sse]
     App --> GRPC[transport/grpcx]
@@ -160,6 +162,7 @@ flowchart TD
     Middleware --> Handler[Business Handler]
 
     HTTP --> HTTPRouter[method + path router]
+    FastHTTP --> FastHTTPRouter[fasthttp method + path router]
     HTTP3 --> HTTPRouter
     SSE --> SSEHandler[SSE stream handler]
     GRPC --> GRPCService[gRPC service handlers]
@@ -190,6 +193,7 @@ transport/
   udp/                     UDP packet transport
   websocket/               WebSocket transport
   httpx/                   HTTP/HTTPS path-routed transport
+  fasthttpx/               optional fasthttp-native HTTP/1.1 transport
   http3/                   HTTP/3 path-routed transport over QUIC
   grpcx/                   gRPC server wrapper and generated-style bindings
   sse/                     Server-Sent Events transport
@@ -241,12 +245,12 @@ sequenceDiagram
   -> transport writes response
 ```
 
-HTTP and HTTPS keep protocol-native method + path routing:
+HTTP endpoints keep protocol-native method + path routing:
 
 ```mermaid
 flowchart LR
     HTTPClient[HTTP Client] --> HTTPRouter[method + path router]
-    HTTPRouter --> HTTPHandler[httpx.Context handler]
+    HTTPRouter --> HTTPHandler[httpx.Context or fasthttpx.Context handler]
     HTTPHandler --> HTTPResponse[Text / JSON response]
 
     SSEClient[SSE Client] --> SSEEndpoint[SSE endpoint]
@@ -259,7 +263,7 @@ HTTP / HTTPS
   -> path + method router
   -> core.Invocation
   -> core.Middleware
-  -> httpx.Context
+  -> httpx.Context or fasthttpx.Context
 
 SSE
   -> HTTP streaming endpoint
@@ -480,6 +484,7 @@ examples/quic/server         examples/quic/client
 examples/udp/server          examples/udp/client
 examples/websocket/server    examples/websocket/client
 examples/http/server         examples/http/client
+examples/fasthttp/server     examples/http/client
 examples/https/server        examples/https/client
 examples/http2/server        examples/http2/client
 examples/http3/server        examples/http3/client
@@ -494,6 +499,9 @@ See [examples/README.md](examples/README.md) for startup commands.
 - TCP, KCP and QUIC are stream-oriented, so they use `codec.StreamCodec`.
 - UDP and WebSocket have message boundaries, so they use `codec.PacketCodec`.
 - HTTP/HTTPS keep native Go `ServeMux` method + path-pattern routing, including path parameters, groups, and route-local middleware; they do not convert requests into `core.Message`.
+- `fasthttpx` is an optional HTTP/1.1-only native runner with its own borrowed
+  context API. It reuses KPro lifecycle and middleware but does not emulate
+  `net/http` or negotiate HTTP/2; see [Fast HTTP/1.1 Endpoint](docs/fasthttp.md).
 - HTTP/3 uses the same path-routing handler model over QUIC/UDP and requires TLS certificates.
 - WebSocket upgrades default to a same-host `Origin` check when the header is
   present; use `Config.CheckOrigin` for an explicit cross-origin allowlist.

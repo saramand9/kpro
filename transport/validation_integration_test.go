@@ -11,6 +11,7 @@ import (
 	quicgo "github.com/quic-go/quic-go"
 	"github.com/saramand9/kpro/codec"
 	"github.com/saramand9/kpro/core"
+	"github.com/saramand9/kpro/transport/fasthttpx"
 	"github.com/saramand9/kpro/transport/grpcx"
 	"github.com/saramand9/kpro/transport/http3"
 	"github.com/saramand9/kpro/transport/httpx"
@@ -25,6 +26,9 @@ import (
 func TestBuiltInValidationReportsActionableTLSAndAddressErrors(t *testing.T) {
 	if err := tcp.New(tcp.Config{}).Validate(); err != nil {
 		t.Fatalf("default TCP validation: %v", err)
+	}
+	if err := fasthttpx.New(fasthttpx.Config{}).Validate(); err != nil {
+		t.Fatalf("default fasthttp validation: %v", err)
 	}
 	if err := httpx.New(httpx.Config{TLS: true}).Validate(); err == nil {
 		t.Fatal("HTTPS without certificate was accepted")
@@ -63,6 +67,8 @@ func TestBuiltInValidationRejectsInvalidAddressesAndNegativeLimits(t *testing.T)
 		{name: "websocket path", validate: func() error { return websocket.New(websocket.Config{Path: "/{"}).Validate() }, want: "unsupported path characters"},
 		{name: "http timeout", validate: func() error { return httpx.New(httpx.Config{ShutdownTimeout: -time.Second}).Validate() }, want: "ShutdownTimeout"},
 		{name: "http typed nil logger", validate: func() error { return httpx.New(httpx.Config{Logger: logger}).Validate() }, want: "Logger cannot be typed nil"},
+		{name: "fasthttp timeout", validate: func() error { return fasthttpx.New(fasthttpx.Config{ShutdownTimeout: -time.Second}).Validate() }, want: "ShutdownTimeout"},
+		{name: "fasthttp typed nil logger", validate: func() error { return fasthttpx.New(fasthttpx.Config{Logger: logger}).Validate() }, want: "Logger cannot be typed nil"},
 		{name: "sse timeout", validate: func() error { return sse.New(sse.Config{ShutdownTimeout: -time.Second}).Validate() }, want: "ShutdownTimeout"},
 		{name: "sse stream limit", validate: func() error { return sse.New(sse.Config{MaxStreams: -1}).Validate() }, want: "MaxStreams"},
 		{name: "sse handshake timeout", validate: func() error { return sse.New(sse.Config{HandshakeTimeout: -time.Second}).Validate() }, want: "HandshakeTimeout"},
@@ -120,6 +126,13 @@ func TestTLSValidationLoadsFilesAndChecksInMemoryCertificateSelection(t *testing
 				return httpx.New(httpx.Config{TLS: true, CertFile: "missing-cert.pem", KeyFile: "missing-key.pem"}).Validate()
 			},
 			want: "load HTTPS certificate and key",
+		},
+		{
+			name: "fasthttps missing files",
+			validate: func() error {
+				return fasthttpx.New(fasthttpx.Config{TLS: true, CertFile: "missing-cert.pem", KeyFile: "missing-key.pem"}).Validate()
+			},
+			want: "load fasthttp HTTPS certificate and key",
 		},
 		{
 			name: "quic empty TLS config",

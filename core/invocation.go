@@ -31,7 +31,8 @@ type Middleware func(InvocationHandler) InvocationHandler
 //   - TCP message 100: Transport=TransportTCP, Operation="message/100",
 //     Payload=[]byte, Native=core.Context.
 //   - HTTP POST /users: Transport=TransportHTTP, Operation="POST /users",
-//     Payload=*httpx.BodyPayload, Native=*httpx.Context.
+//     Payload=*httpx.BodyPayload or *fasthttpx.BodyPayload, with the matching
+//     protocol-native Context.
 //   - gRPC /pkg.Service/Call: Transport=TransportGRPC, Operation is the full
 //     method name, Payload is the protobuf request for unary calls, and Native
 //     is grpcx.UnaryInvocationNative or StreamInvocationNative.
