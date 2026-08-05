@@ -91,6 +91,33 @@ func TestKProV1ReadIntoReusesScratch(t *testing.T) {
 	}
 }
 
+func TestKProV1ReadIntoDoesNotAllocateWithSizedScratch(t *testing.T) {
+	wireCodec := KProV1()
+	frame, err := wireCodec.Encode(core.Message{ID: 7, Seq: 9, Data: bytes.Repeat([]byte{1}, 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := bytes.NewReader(frame)
+	scratch := make([]byte, 0, 64)
+	var messageID uint32
+
+	allocations := testing.AllocsPerRun(1000, func() {
+		reader.Reset(frame)
+		result, nextScratch, readErr := wireCodec.ReadInto(reader, 64, scratch)
+		if readErr != nil {
+			panic(readErr)
+		}
+		scratch = nextScratch
+		messageID = result.Message.ID
+	})
+	if allocations != 0 {
+		t.Fatalf("ReadInto allocations = %f, want 0", allocations)
+	}
+	if messageID != 7 {
+		t.Fatalf("message ID = %d, want 7", messageID)
+	}
+}
+
 func TestKProV1DecodePacketRejectsTrailingData(t *testing.T) {
 	packet, err := KProV1().EncodePacket(core.Message{
 		ID:   testMsgEcho,

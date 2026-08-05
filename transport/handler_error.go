@@ -39,6 +39,29 @@ type HandlerErrorObserver func(HandlerErrorEvent)
 // an error panic's original errors.Is/As chain so ContinueAfterHandlerError can
 // apply the configured policy and notify the observer.
 func InvokeHandler(handler core.Handler, session core.Session, message core.Message) (err error) {
+	return invokeHandler(handler, session, message, nil, nil)
+}
+
+// InvokeOwnedHandler transfers reusable transport storage to the Context. The
+// owner is called only after direct handling and any accepted Router task have
+// both released the Context.
+func InvokeOwnedHandler(
+	handler core.Handler,
+	session core.Session,
+	message core.Message,
+	buffer []byte,
+	owner core.TransportBufferOwner,
+) (err error) {
+	return invokeHandler(handler, session, message, buffer, owner)
+}
+
+func invokeHandler(
+	handler core.Handler,
+	session core.Session,
+	message core.Message,
+	buffer []byte,
+	owner core.TransportBufferOwner,
+) (err error) {
 	if handler == nil {
 		return core.ErrNilHandler
 	}
@@ -51,7 +74,7 @@ func InvokeHandler(handler core.Handler, session core.Session, message core.Mess
 			err = fmt.Errorf("%w: %v", core.ErrRecovered, recovered)
 		}
 	}()
-	ctx := core.AcquireTransportContext(session, message)
+	ctx := core.AcquireOwnedTransportContext(session, message, buffer, owner)
 	defer core.ReleaseTransportContext(ctx)
 	return handler(ctx)
 }

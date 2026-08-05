@@ -44,7 +44,8 @@ func (s *session) ReserveOutboundBuffer(size int) (core.OutboundBuffer, error) {
 			reservation.Cancel()
 		}
 	}()
-	payload := s.server.payloadPool.Get(size)
+	pool := s.outboundPayloadPool()
+	payload := pool.Get(size)
 	reservationTransferred = true
 	return &sessionOutboundBuffer{
 		session:     s,
@@ -66,12 +67,13 @@ func (b *sessionOutboundBuffer) Commit(msg core.Message) error {
 	}
 	session := b.session
 	payload := b.payload
+	pool := session.outboundPayloadPool()
 	b.payload = nil
 	payloadOwned := true
 	defer func() {
 		if payloadOwned {
 			b.reservation.Cancel()
-			session.server.payloadPool.Put(payload)
+			pool.Put(payload)
 		}
 		b.reservation = outbound.Reservation[outboundFrame]{}
 		b.session = nil
@@ -94,9 +96,8 @@ func (b *sessionOutboundBuffer) Release() {
 	if b == nil || !b.state.CompareAndSwap(outboundBufferActive, 1) {
 		return
 	}
-	session := b.session
 	b.reservation.Cancel()
-	session.server.payloadPool.Put(b.payload)
+	b.session.outboundPayloadPool().Put(b.payload)
 	b.payload = nil
 	b.reservation = outbound.Reservation[outboundFrame]{}
 	b.session = nil

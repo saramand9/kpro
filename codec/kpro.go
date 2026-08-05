@@ -35,14 +35,21 @@ func (KProV1Codec) Read(r io.Reader, maxBodySize uint32) (ReadResult, error) {
 	return result, err
 }
 
-// ReadInto decodes one frame using scratch for the payload when it has enough
-// capacity. The returned scratch retains its capacity for the next frame.
+// ReadInto decodes one frame using scratch for the header and then the payload
+// when it has enough capacity. The returned scratch retains its capacity for
+// the next frame.
 func (KProV1Codec) ReadInto(r io.Reader, maxBodySize uint32, scratch []byte) (ReadResult, []byte, error) {
-	var header [FrameHeaderSize]byte
-	if _, err := io.ReadFull(r, header[:]); err != nil {
+	if cap(scratch) < FrameHeaderSize {
+		// Keep a pooled size-class capacity for small and empty frames. The
+		// decoded header is no longer needed when the payload read starts, so
+		// the same storage can be overwritten by the payload below.
+		scratch = make([]byte, FrameHeaderSize, 32)
+	}
+	header := scratch[:FrameHeaderSize]
+	if _, err := io.ReadFull(r, header); err != nil {
 		return ReadResult{}, scratch, err
 	}
-	msg, length, err := decodeHeader(header[:])
+	msg, length, err := decodeHeader(header)
 	if err != nil {
 		return ReadResult{}, scratch, err
 	}

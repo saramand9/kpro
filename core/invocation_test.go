@@ -127,3 +127,55 @@ func TestMessageInvocationExposesSessionAsConnectionLifetime(t *testing.T) {
 		t.Fatalf("close session: %v", err)
 	}
 }
+
+func TestMessageInvocationLazilyMaterializesOptionalMetadata(t *testing.T) {
+	session := newFakeSession(9)
+	messageCtx := &countingRemoteContext{
+		Context: NewContext(session, Message{ID: 42}),
+		remote:  "127.0.0.1:9000",
+	}
+	invocation := NewMessageInvocation(context.Background(), messageCtx)
+	defer invocation.Release()
+
+	if invocation.contextMerged {
+		t.Fatal("message invocation eagerly merged its context")
+	}
+	if invocation.remoteLoaded || messageCtx.calls != 0 {
+		t.Fatal("message invocation eagerly loaded its remote address")
+	}
+	if got := invocation.ConnID(); got != 9 {
+		t.Fatalf("conn id = %d, want 9", got)
+	}
+	if invocation.contextMerged || messageCtx.calls != 0 {
+		t.Fatal("unrelated access materialized optional metadata")
+	}
+
+	if got := invocation.RemoteAddr(); got != messageCtx.remote {
+		t.Fatalf("remote address = %q, want %q", got, messageCtx.remote)
+	}
+	if messageCtx.calls != 1 || !invocation.remoteLoaded {
+		t.Fatalf("remote loads = %d, loaded = %t", messageCtx.calls, invocation.remoteLoaded)
+	}
+	if got := invocation.RemoteAddr(); got != messageCtx.remote || messageCtx.calls != 1 {
+		t.Fatalf("cached remote = %q, loads = %d", got, messageCtx.calls)
+	}
+
+	invocationCtx := invocation.Context()
+	if !invocation.contextMerged {
+		t.Fatal("Context did not materialize the session-aware context")
+	}
+	if invocationCtx.Done() != session.Done() {
+		t.Fatal("materialized context did not expose the session lifetime")
+	}
+}
+
+type countingRemoteContext struct {
+	Context
+	remote string
+	calls  int
+}
+
+func (c *countingRemoteContext) RemoteAddr() string {
+	c.calls++
+	return c.remote
+}

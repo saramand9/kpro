@@ -44,6 +44,13 @@ type ContextProvider interface {
 	Context() context.Context
 }
 
+// TransportBufferOwner receives transport scratch storage after every Context
+// reference has been released. Implementations must be safe to call from a
+// Router worker, because Router ownership can outlive the transport read loop.
+type TransportBufferOwner interface {
+	ReleaseTransportBuffer([]byte)
+}
+
 // ContextOf returns the middleware-updated request context when available and
 // falls back to context.Background for legacy Context implementations.
 func ContextOf(messageCtx Context) context.Context {
@@ -61,6 +68,8 @@ type BaseContext struct {
 	values           map[string]interface{}
 	refs             atomic.Int32
 	transportManaged bool
+	transportBuffer  []byte
+	bufferOwner      TransportBufferOwner
 }
 
 var baseContextPool = sync.Pool{
@@ -93,6 +102,24 @@ func AcquireTransportContext(session Session, message Message) *BaseContext {
 	return acquireContext(session, message, true)
 }
 
+// AcquireOwnedTransportContext creates a transport-managed Context and keeps
+// buffer alive until both the transport caller and any accepted Router task
+// release their references. This lets reusable stream codecs transfer scratch
+// ownership without copying payloads or exposing a buffer to the next read.
+func AcquireOwnedTransportContext(
+	session Session,
+	message Message,
+	buffer []byte,
+	owner TransportBufferOwner,
+) *BaseContext {
+	ctx := acquireContext(session, message, true)
+	if owner != nil && cap(buffer) > 0 {
+		ctx.transportBuffer = buffer
+		ctx.bufferOwner = owner
+	}
+	return ctx
+}
+
 func acquireContext(session Session, message Message, transportManaged bool) *BaseContext {
 	ctx := baseContextPool.Get().(*BaseContext)
 	ctx.ctx = context.Background()
@@ -100,6 +127,8 @@ func acquireContext(session Session, message Message, transportManaged bool) *Ba
 	ctx.message = message
 	ctx.values = nil
 	ctx.transportManaged = transportManaged
+	ctx.transportBuffer = nil
+	ctx.bufferOwner = nil
 	ctx.refs.Store(1)
 	return ctx
 }
@@ -147,12 +176,19 @@ func releaseContext(ctx Context) {
 	if base.refs.Add(-1) != 0 {
 		return
 	}
+	buffer := base.transportBuffer
+	bufferOwner := base.bufferOwner
 	base.ctx = nil
 	base.session = nil
 	base.message = Message{}
 	base.values = nil
 	base.transportManaged = false
+	base.transportBuffer = nil
+	base.bufferOwner = nil
 	baseContextPool.Put(base)
+	if bufferOwner != nil {
+		bufferOwner.ReleaseTransportBuffer(buffer)
+	}
 }
 
 func retainRouterContext(ctx Context) {
