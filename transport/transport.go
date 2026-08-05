@@ -40,6 +40,18 @@ type MessageServer interface {
 	ListenAndServe(context.Context, core.Handler) error
 }
 
+// BatchHandler attempts to accept a group of decoded contexts as one
+// admission operation. False guarantees zero ownership transfer so the
+// transport can invoke its ordinary Handler for every context.
+type BatchHandler func([]core.Context) bool
+
+// BatchMessageServer is an optional message-transport capability. It leaves
+// MessageServer unchanged for existing and protocol-specific transports.
+type BatchMessageServer interface {
+	MessageServer
+	ListenAndServeBatch(context.Context, core.Handler, BatchHandler) error
+}
+
 // Server is kept as a source-compatible alias for MessageServer.
 type Server = MessageServer
 

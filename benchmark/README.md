@@ -29,7 +29,11 @@ allocs/op
 qps
 ```
 
-Latest saved benchmark evidence: [RESULTS.md](RESULTS.md).
+Latest saved benchmark evidence: [RESULTS.md](RESULTS.md). The current
+KPro/Netty diagnostic keeps its
+[24 raw process samples](results/2026-08-05-kpro-netty-loopback.csv) and the
+exact [Netty NIO echo fixture](fixtures/netty/NettyKProEchoServer.java) beside
+that interpretation.
 
 ## TCP comparison load generator
 
@@ -175,4 +179,3 @@ BenchmarkSSE_Events
 Concurrent HTTP benchmarks run the same `POST /echo` workload with 16 and 64 workers.
 Fiber and gnet comparison benchmarks live in `benchmark/compare` so their dependencies do not enter the main kpro module.
 That module includes KPro-vs-Fiber HTTP echo and KPro-vs-gnet TCP echo comparisons.
-

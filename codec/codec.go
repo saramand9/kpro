@@ -39,6 +39,16 @@ type ReusableStreamCodec interface {
 	ReadInto(r io.Reader, maxBodySize uint32, scratch []byte) (ReadResult, []byte, error)
 }
 
+// BufferedStreamCodec is an optional receive contract for stream codecs that
+// can decode one complete frame already present in a contiguous input buffer.
+// When complete is false, callers must retain the input and provide more bytes.
+// A successful message payload may alias input and is valid only until that
+// buffer is consumed or reused.
+type BufferedStreamCodec interface {
+	StreamCodec
+	DecodeBuffered(input []byte, maxBodySize uint32) (result ReadResult, complete bool, err error)
+}
+
 // PacketCodec describes a protocol carried by packet transports such as UDP.
 type PacketCodec interface {
 	// Name returns a stable protocol identifier for diagnostics.

@@ -62,6 +62,14 @@ func invokeHandler(
 	buffer []byte,
 	owner core.TransportBufferOwner,
 ) (err error) {
+	ctx := core.AcquireOwnedTransportContext(session, message, buffer, owner)
+	defer core.ReleaseTransportContext(ctx)
+	return InvokeContextHandler(handler, ctx)
+}
+
+// InvokeContextHandler invokes a direct handler for a context whose ownership
+// is managed by the caller, while retaining the ordinary panic boundary.
+func InvokeContextHandler(handler core.Handler, ctx core.Context) (err error) {
 	if handler == nil {
 		return core.ErrNilHandler
 	}
@@ -74,9 +82,26 @@ func invokeHandler(
 			err = fmt.Errorf("%w: %v", core.ErrRecovered, recovered)
 		}
 	}()
-	ctx := core.AcquireOwnedTransportContext(session, message, buffer, owner)
-	defer core.ReleaseTransportContext(ctx)
 	return handler(ctx)
+}
+
+// InvokeBatchHandler invokes an optional batch-admission handler while
+// containing panics at the same boundary as ordinary direct handlers.
+func InvokeBatchHandler(handler BatchHandler, contexts []core.Context) (accepted bool, err error) {
+	if handler == nil {
+		return false, core.ErrNilHandler
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			accepted = false
+			if recoveredErr, ok := recovered.(error); ok {
+				err = fmt.Errorf("%w: %w", core.ErrRecovered, recoveredErr)
+				return
+			}
+			err = fmt.Errorf("%w: %v", core.ErrRecovered, recovered)
+		}
+	}()
+	return handler(contexts), nil
 }
 
 // Validate rejects unknown policy values before a listener is opened.

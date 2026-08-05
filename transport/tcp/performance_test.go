@@ -67,6 +67,48 @@ func BenchmarkReserveOutboundBufferCommit(b *testing.B) {
 	}
 }
 
+func BenchmarkReplyCurrentPayload64B(b *testing.B) {
+	for _, owned := range []bool{false, true} {
+		name := "reply_copy"
+		if owned {
+			name = "reply_owned"
+		}
+		b.Run(name, func(b *testing.B) {
+			server := New(Config{
+				MaxFrameSize:           1024,
+				SendQueueSize:          1,
+				MaxRetainedBufferBytes: 1 << 20,
+			})
+			session := &session{
+				id:          1,
+				server:      server,
+				payloadPool: server.payloadPool.Shard(1),
+				sendQueue:   newSessionOutboundQueue(server.config),
+				done:        make(chan struct{}),
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				payload := session.payloadPool.GetUninitialized(64)
+				message := core.Message{ID: 7, Seq: 9, Data: payload}
+				ctx := core.AcquireOwnedTransportContext(session, message, payload, session)
+				var err error
+				if owned {
+					err = core.ReplyCurrentPayload(ctx, 7)
+				} else {
+					err = ctx.Reply(7, ctx.Message().Data)
+				}
+				if err != nil {
+					b.Fatal(err)
+				}
+				core.ReleaseTransportContext(ctx)
+				item := <-session.sendQueue.Items()
+				item.Done()
+			}
+		})
+	}
+}
+
 func BenchmarkTCPSessionBatchWrite16x1KiB(b *testing.B) {
 	const (
 		frameCount  = 16

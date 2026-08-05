@@ -27,6 +27,75 @@ func TestSendSegmentedFastPathPreservesCallerCopySemantics(t *testing.T) {
 	item.Done()
 }
 
+func TestReplyCurrentPayloadTransfersInboundOwnershipToWriter(t *testing.T) {
+	server := New(Config{
+		MaxFrameSize:           1024,
+		SendQueueSize:          2,
+		MaxRetainedBufferBytes: 1024,
+	})
+	session := &session{
+		id:          1,
+		server:      server,
+		payloadPool: server.payloadPool.Shard(1),
+		sendQueue:   newSessionOutboundQueue(server.config),
+		done:        make(chan struct{}),
+	}
+	payload := session.payloadPool.GetUninitialized(5)
+	copy(payload, "hello")
+	ctx := core.AcquireOwnedTransportContext(
+		session,
+		core.Message{ID: 3, Seq: 9, Data: payload},
+		payload,
+		session,
+	)
+	if err := core.ReplyCurrentPayload(ctx, 7); err != nil {
+		t.Fatal(err)
+	}
+	core.ReleaseTransportContext(ctx)
+	if got := server.payloadPool.RetainedBytes(); got != 0 {
+		t.Fatalf("buffer retained before outbound completion: %d", got)
+	}
+
+	item := <-session.sendQueue.Items()
+	if len(item.Value.payload) != len(payload) || &item.Value.payload[0] != &payload[0] {
+		t.Fatal("outbound frame copied the current inbound payload")
+	}
+	message := decodeOutboundFrame(t, item.Value)
+	if message.ID != 7 || message.Seq != 9 || string(message.Data) != "hello" {
+		t.Fatalf("decoded owned reply = %+v", message)
+	}
+	item.Done()
+	if got := server.payloadPool.RetainedBytes(); got != 16 {
+		t.Fatalf("retained bytes after writer completion = %d, want 16", got)
+	}
+}
+
+func TestReplyCurrentPayloadReleasesLeaseWhenSessionIsClosed(t *testing.T) {
+	server := New(Config{SendQueueSize: 1, MaxRetainedBufferBytes: 1024})
+	session := &session{
+		id:          1,
+		server:      server,
+		payloadPool: server.payloadPool.Shard(1),
+		sendQueue:   newSessionOutboundQueue(server.config),
+		done:        make(chan struct{}),
+	}
+	close(session.done)
+	payload := session.payloadPool.GetUninitialized(5)
+	ctx := core.AcquireOwnedTransportContext(
+		session,
+		core.Message{ID: 3, Data: payload},
+		payload,
+		session,
+	)
+	if err := core.ReplyCurrentPayload(ctx, 7); !errors.Is(err, core.ErrClosed) {
+		t.Fatalf("ReplyCurrentPayload() error = %v, want %v", err, core.ErrClosed)
+	}
+	core.ReleaseTransportContext(ctx)
+	if got := server.payloadPool.RetainedBytes(); got != 16 {
+		t.Fatalf("retained bytes after failed owned reply = %d, want 16", got)
+	}
+}
+
 func TestReserveOutboundBufferCommitsWithoutPayloadCopy(t *testing.T) {
 	server := New(Config{
 		MaxFrameSize:           1024,
