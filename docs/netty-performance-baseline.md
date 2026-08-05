@@ -194,6 +194,44 @@ progress, and adjust the write quantum. Those mechanisms should improve
 syscall amortization and tail behavior when traffic is bursty or sockets accept
 only part of a submission.
 
+## 2026-08-04 corrected Router profile follow-up
+
+The corrected KPro-only comparison used a safe baseline consisting of
+`c1f5051` plus the receive-ownership fix. The treatment added only the
+session-local Router close signal. Both sides used the same full-payload
+validating client, five fresh-process samples, a 2-second warm-up, a 10-second
+fixed window, and an interleaved B-L-L-B order on Windows with Go 1.26.4.
+Every sample had zero validation and non-timeout I/O errors.
+
+| Case | Baseline -> local mean | Baseline -> local median | Median paired change |
+| --- | ---: | ---: | ---: |
+| T07: 64 conn, 64 B, inflight/coalesce 16 | 939,684 -> 1,036,720 (+10.3%) | 1,001,876 -> 1,037,396 (+3.5%) | +3.5% |
+| T08: 256 conn, 1 KiB, inflight/coalesce 16 | 667,373 -> 655,725 (-1.7%) | 656,931 -> 670,180 (+2.0%) | -0.5% |
+
+The T07 baseline slowed in later rounds, so its mean overstates the typical
+gain; the paired median of about 3.5% is the more robust summary. T08 shows no
+stable throughput benefit. The raw T07 baseline/local rates were
+`[1182332, 1001876, 1015292, 781029, 717892]` and
+`[1107160, 1037396, 986107, 1003999, 1048939]`. T08 was
+`[741857, 642442, 673291, 656931, 622344]` and
+`[671516, 649110, 670180, 681043, 606776]`.
+
+A matched 20-second T07 CPU profile produced 1,084,160 and 1,085,981 validated
+messages/s. Normalized total CPU moved from 13.18 to 13.12 CPU seconds per
+million messages (-0.4%). Within that total, `runtime.selectgo` moved from
+4.03 to 0.33 (-91.7%) and `runtime.sellock` from 3.67 to 0.07 (-98.1%).
+The buffer-pool-focused cumulative share moved from 17.6% to 35.7%, showing
+hotspot migration rather than a large end-to-end CPU reduction.
+
+The session-local close signal is retained because it removes measured shared
+select-channel contention with a small implementation change and no observed
+cross-workload regression. A channel-pool sharding candidate changed T07 mean
+and median by only +0.60% and +0.64%; its paired-difference confidence interval
+included zero, so it was rejected. Earlier batch-scheduler and atomic global
+admission candidates likewise showed no stable benefit. This evidence is
+same-machine closed-loop diagnostic data; it supports neither a tail-latency
+claim nor a current Netty comparison.
+
 ## What the current FastPath evidence proves
 
 The recorded Windows in-memory regression run observed:
@@ -246,6 +284,14 @@ The next work should target measured architectural gaps in this order:
 5. Add a separate file-region/sendfile capability for eligible large immutable
    payloads; consider Linux-specific copy avoidance only after that path has a
    reproducible CPU-per-GiB requirement.
+
+The earlier standalone scheduler, channel-pool sharding, and atomic-admission
+candidates were not retained in their original forms. The current mailbox,
+atomic capacity, and payload-pool sharding implementations were accepted only
+after the integrated ownership changes produced stable cumulative A/B gains.
+Reopen a rejected variant only if a representative profile reproduces its
+specific bottleneck and it passes correctness, tail-latency, and cross-workload
+regression checks.
 
 Every step must retain current correctness properties: bounded memory,
 per-session ordering, caller payload ownership, deterministic close behavior,
