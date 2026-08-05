@@ -408,10 +408,15 @@ func (r *Router) close(graceful bool) {
 		})
 		r.sessionsCreateMu.Unlock()
 
+		// Signal every executor before draining any one of them. Immediate close
+		// may deliver error responses for dropped tasks through application-owned
+		// Session implementations, and one blocking Send must not delay closure
+		// publication to unrelated sessions.
 		for _, session := range sessions {
-			if graceful {
-				session.beginDrain()
-			} else {
+			session.beginDrain()
+		}
+		if !graceful {
+			for _, session := range sessions {
 				session.close()
 			}
 		}
@@ -1070,7 +1075,7 @@ func (s *sessionExecutor) run() {
 		case <-s.done:
 			s.stopOnSessionClose()
 			return
-		case <-s.router.done:
+		case <-s.closedCh:
 			if s.router.graceful.Load() {
 				s.drainAccepted()
 			} else {
