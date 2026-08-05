@@ -29,6 +29,7 @@ const (
 	// DefaultRouterShutdownTimeout bounds graceful router shutdown.
 	DefaultRouterShutdownTimeout = 5 * time.Second
 	defaultSessionRunBatch       = 32
+	maxSyncDispatchBatch         = 32
 )
 
 // DispatchMode controls whether a route is serialized per session or run by async workers.
@@ -152,6 +153,21 @@ func (q *dispatchTaskRing) Push(task dispatchTask) bool {
 		q.tail = 0
 	}
 	q.count++
+	return true
+}
+
+func (q *dispatchTaskRing) PushBatch(tasks []dispatchTask) bool {
+	if q == nil || len(tasks) > len(q.items)-q.count {
+		return false
+	}
+	for _, task := range tasks {
+		q.items[q.tail] = task
+		q.tail++
+		if q.tail == len(q.items) {
+			q.tail = 0
+		}
+	}
+	q.count += len(tasks)
 	return true
 }
 
@@ -288,6 +304,75 @@ func (r *Router) HandleAsyncChecked(msgID uint32, h Handler) error {
 // Router or Session closes.
 func (r *Router) Dispatch(ctx Context) error {
 	return r.DispatchContext(context.Background(), ctx)
+}
+
+// TryDispatchSyncBatch is an experimental capability for amortizing admission and
+// queue synchronization across adjacent messages from one session. Returning
+// false guarantees that no context was retained and no task was accepted, so
+// callers can preserve existing semantics by dispatching every context through
+// Dispatch. Its exported shape is provisional until transport-level evidence
+// justifies retaining the optimization.
+func (r *Router) TryDispatchSyncBatch(contexts []Context) bool {
+	count := len(contexts)
+	if count < 2 || count > maxSyncDispatchBatch || r.config.Backpressure != BackpressureReject {
+		return false
+	}
+	if err := r.ensureRunning(); err != nil {
+		return false
+	}
+
+	sourceSession := contexts[0].Session()
+	sessionID := sourceSession.ID()
+	sessionDone := SessionDone(sourceSession)
+	var taskStorage [maxSyncDispatchBatch]dispatchTask
+	tasks := taskStorage[:count]
+
+	r.mu.RLock()
+	for i, dispatchContext := range contexts {
+		session := dispatchContext.Session()
+		if session.ID() != sessionID || SessionDone(session) != sessionDone {
+			r.mu.RUnlock()
+			return false
+		}
+		route := r.routes[dispatchContext.Message().ID]
+		if route.handler == nil || route.mode != DispatchSync {
+			r.mu.RUnlock()
+			return false
+		}
+		tasks[i] = dispatchTask{
+			ctx:       dispatchContext,
+			handler:   route.invocationHandler,
+			operation: route.operation,
+		}
+	}
+	r.mu.RUnlock()
+
+	if !r.globalCapacity.tryAcquireN(count) {
+		return false
+	}
+	if r.closed() || channelClosed(sessionDone) {
+		r.globalCapacity.releaseN(count)
+		return false
+	}
+	r.globalInflight.Add(int64(count))
+
+	session, err := r.sessionForBatchReject(sourceSession, count)
+	if err != nil {
+		r.globalInflight.Add(-int64(count))
+		r.globalCapacity.releaseN(count)
+		return false
+	}
+	for i := range tasks {
+		tasks[i].session = session
+	}
+	if err := session.enqueueBatchReserved(tasks); err != nil {
+		session.releaseN(count)
+		r.globalInflight.Add(-int64(count))
+		r.globalCapacity.releaseN(count)
+		return false
+	}
+	r.accepted.Add(uint64(count))
+	return true
 }
 
 // DispatchContext submits a decoded message context. Reject mode returns
@@ -868,6 +953,68 @@ func (r *Router) sessionForContext(
 	}
 }
 
+func (r *Router) sessionForBatchReject(session Session, count int) (*sessionExecutor, error) {
+	done := SessionDone(session)
+	key := sessionExecutorKey{id: session.ID(), done: done}
+
+	for {
+		if r.closed() {
+			return nil, ErrRouterClosed
+		}
+		if channelClosed(done) {
+			return nil, ErrClosed
+		}
+		if value, ok := r.sessions.Load(key); ok {
+			existing := value.(*sessionExecutor)
+			err := existing.acquireBatchReject(count)
+			if err == nil {
+				return existing, nil
+			}
+			if err != errSessionExecutorClosed {
+				return nil, err
+			}
+			r.sessions.CompareAndDelete(key, existing)
+			existing.close()
+			continue
+		}
+
+		r.sessionsCreateMu.Lock()
+		if value, ok := r.sessions.Load(key); ok {
+			r.sessionsCreateMu.Unlock()
+			existing := value.(*sessionExecutor)
+			err := existing.acquireBatchReject(count)
+			if err == nil {
+				return existing, nil
+			}
+			if err != errSessionExecutorClosed {
+				return nil, err
+			}
+			r.sessions.CompareAndDelete(key, existing)
+			existing.close()
+			continue
+		}
+		if r.closed() {
+			r.sessionsCreateMu.Unlock()
+			return nil, ErrRouterClosed
+		}
+		if channelClosed(done) {
+			r.sessionsCreateMu.Unlock()
+			return nil, ErrClosed
+		}
+
+		executor := newSessionExecutor(r, key)
+		if err := executor.acquireBatchReject(count); err != nil {
+			r.sessionsCreateMu.Unlock()
+			return nil, err
+		}
+		r.sessions.Store(key, executor)
+		r.wg.Add(1)
+		go executor.run()
+		r.sessionsCreateMu.Unlock()
+		return executor, nil
+	}
+}
+
 func (r *Router) removeSession(session *sessionExecutor) {
 	r.sessions.CompareAndDelete(session.key, session)
 }
@@ -959,6 +1106,46 @@ func (s *sessionExecutor) enqueueReserved(
 	return waited, nil
 }
 
+func (s *sessionExecutor) enqueueBatchReserved(tasks []dispatchTask) error {
+	count := len(tasks)
+	if !tryAcquireCapacityN(s.queueSlots, count) {
+		return ErrDispatchQueueFull
+	}
+	s.mu.Lock()
+	if s.router.closed() {
+		s.mu.Unlock()
+		releaseCapacityN(s.queueSlots, count)
+		return ErrRouterClosed
+	}
+	if s.closed.Load() {
+		s.mu.Unlock()
+		releaseCapacityN(s.queueSlots, count)
+		return errSessionExecutorClosed
+	}
+	if channelClosed(s.done) {
+		s.mu.Unlock()
+		releaseCapacityN(s.queueSlots, count)
+		return ErrClosed
+	}
+	wasEmpty := s.queue.Len() == 0
+	if !s.queue.PushBatch(tasks) {
+		s.mu.Unlock()
+		releaseCapacityN(s.queueSlots, count)
+		return ErrDispatchQueueFull
+	}
+	// The queue lock keeps tasks invisible to the executor until every
+	// transport-managed context has transferred one ownership reference.
+	for _, task := range tasks {
+		retainRouterContext(task.ctx)
+	}
+	s.router.syncQueued.Add(int64(count))
+	s.mu.Unlock()
+	if wasEmpty {
+		s.signalReady()
+	}
+	return nil
+}
+
 func (s *sessionExecutor) acquire() error {
 	waiter := newDispatchWaiter(s.router.waiters, s.key)
 	defer waiter.release()
@@ -1003,6 +1190,28 @@ func (s *sessionExecutor) acquireContext(
 	return waited, nil
 }
 
+func (s *sessionExecutor) acquireBatchReject(count int) error {
+	if !tryAcquireCapacityN(s.inflightSlots, count) {
+		return ErrTooManyInflight
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.router.closed() {
+		releaseCapacityN(s.inflightSlots, count)
+		return ErrRouterClosed
+	}
+	if s.closed.Load() {
+		releaseCapacityN(s.inflightSlots, count)
+		return errSessionExecutorClosed
+	}
+	if channelClosed(s.done) {
+		releaseCapacityN(s.inflightSlots, count)
+		return ErrClosed
+	}
+	s.inflight += count
+	return nil
+}
+
 func (s *sessionExecutor) release() {
 	released := false
 	s.mu.Lock()
@@ -1014,6 +1223,20 @@ func (s *sessionExecutor) release() {
 	if released {
 		releaseCapacity(s.inflightSlots)
 	}
+}
+
+func (s *sessionExecutor) releaseN(count int) {
+	if count <= 0 {
+		return
+	}
+	s.mu.Lock()
+	if s.inflight < count {
+		s.mu.Unlock()
+		panic("core: session inflight released without matching acquisition")
+	}
+	s.inflight -= count
+	s.mu.Unlock()
+	releaseCapacityN(s.inflightSlots, count)
 }
 
 func (s *sessionExecutor) isClosed() bool {
@@ -1233,24 +1456,40 @@ func newAtomicCapacity(limit int) *atomicCapacity {
 }
 
 func (c *atomicCapacity) tryAcquire() bool {
+	return c.tryAcquireN(1)
+}
+
+func (c *atomicCapacity) tryAcquireN(count int) bool {
+	if count <= 0 {
+		return true
+	}
+	delta := int64(count)
 	for {
 		used := c.used.Load()
-		if used >= c.limit {
+		if used > c.limit-delta {
 			return false
 		}
-		if c.used.CompareAndSwap(used, used+1) {
+		if c.used.CompareAndSwap(used, used+delta) {
 			return true
 		}
 	}
 }
 
 func (c *atomicCapacity) release() {
+	c.releaseN(1)
+}
+
+func (c *atomicCapacity) releaseN(count int) {
+	if count <= 0 {
+		return
+	}
+	delta := int64(count)
 	for {
 		used := c.used.Load()
-		if used <= 0 {
+		if used < delta {
 			panic("core: atomic capacity released without matching acquisition")
 		}
-		if c.used.CompareAndSwap(used, used-1) {
+		if c.used.CompareAndSwap(used, used-delta) {
 			c.signalAvailable()
 			return
 		}
@@ -1269,6 +1508,29 @@ func (c *atomicCapacity) signalAvailable() {
 
 func newCapacity(size int) chan struct{} {
 	return make(chan struct{}, size)
+}
+
+func tryAcquireCapacityN(slots chan struct{}, count int) bool {
+	if count <= 0 {
+		return true
+	}
+	acquired := 0
+	for acquired < count {
+		select {
+		case slots <- struct{}{}:
+			acquired++
+		default:
+			releaseCapacityN(slots, acquired)
+			return false
+		}
+	}
+	return true
+}
+
+func releaseCapacityN(slots <-chan struct{}, count int) {
+	for i := 0; i < count; i++ {
+		releaseCapacity(slots)
+	}
 }
 
 type waiterRegistry struct {

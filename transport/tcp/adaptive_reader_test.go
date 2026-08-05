@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"io"
 	"testing"
+
+	"github.com/saramand9/kpro/codec"
+	"github.com/saramand9/kpro/core"
 )
 
 func TestAdaptiveReaderGrowsForCoalescedSmallReads(t *testing.T) {
@@ -72,6 +75,124 @@ func TestAdaptiveReaderReturnsDataBeforeUnderlyingError(t *testing.T) {
 	if n, err := reader.Read(buffer); n != 0 || err != io.ErrUnexpectedEOF {
 		t.Fatalf("terminal Read = (%d, %v), want UnexpectedEOF", n, err)
 	}
+}
+
+func TestSessionReadsCompleteBufferedKProFramesWithoutAnotherStreamRead(t *testing.T) {
+	wireCodec := codec.KProV1()
+	first, err := wireCodec.Encode(core.Message{ID: 1, Seq: 1, Data: []byte("first")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := wireCodec.Encode(core.Message{ID: 2, Seq: 2, Data: []byte("second")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := New(Config{Codec: wireCodec, MaxFrameSize: 64})
+	session := &session{server: server, done: make(chan struct{})}
+	session.payloadPool = server.payloadPool.Shard(1)
+	session.readBuffer = newAdaptiveReader(bytes.NewReader(append(first, second...)), 4096, 4096)
+
+	result, owned, err := session.readFrame()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Message.ID != 1 || string(result.Message.Data) != "first" {
+		t.Fatalf("first result = %+v", result)
+	}
+	session.ReleaseTransportBuffer(owned)
+
+	result, owned, complete, err := session.readBufferedFrame()
+	if err != nil || !complete {
+		t.Fatalf("buffered frame = (complete %v, error %v)", complete, err)
+	}
+	if result.Message.ID != 2 || result.Message.Seq != 2 || string(result.Message.Data) != "second" {
+		t.Fatalf("second result = %+v", result)
+	}
+	session.ReleaseTransportBuffer(owned)
+	if buffered := session.readBuffer.bufferedBytes(); len(buffered) != 0 {
+		t.Fatalf("buffered bytes after two frames = %d, want 0", len(buffered))
+	}
+}
+
+func BenchmarkKProV1DecodeCoalesced16x64(b *testing.B) {
+	const (
+		frameCount  = 16
+		payloadSize = 64
+	)
+	wireCodec := codec.KProV1()
+	wire := make([]byte, 0, frameCount*(codec.FrameHeaderSize+payloadSize))
+	for sequence := range frameCount {
+		frame, err := wireCodec.Encode(core.Message{
+			ID:   100,
+			Seq:  uint64(sequence),
+			Data: make([]byte, payloadSize),
+		})
+		if err != nil {
+			b.Fatal(err)
+		}
+		wire = append(wire, frame...)
+	}
+
+	b.Run("stream_read_into", func(b *testing.B) {
+		source := bytes.NewReader(nil)
+		reader := newAdaptiveReader(source, 4096, 4096)
+		scratch := make([]byte, 0, payloadSize)
+		var sequence uint64
+		b.ReportAllocs()
+		b.SetBytes(frameCount * payloadSize)
+		for range b.N {
+			source.Reset(wire)
+			resetAdaptiveReaderForBenchmark(reader)
+			for range frameCount {
+				result, nextScratch, err := wireCodec.ReadInto(reader, payloadSize, scratch)
+				if err != nil {
+					b.Fatal(err)
+				}
+				scratch = nextScratch
+				sequence = result.Message.Seq
+			}
+		}
+		if sequence != frameCount-1 {
+			b.Fatalf("last sequence = %d", sequence)
+		}
+	})
+
+	b.Run("buffered_after_first", func(b *testing.B) {
+		source := bytes.NewReader(nil)
+		reader := newAdaptiveReader(source, 4096, 4096)
+		scratch := make([]byte, payloadSize)
+		var sequence uint64
+		b.ReportAllocs()
+		b.SetBytes(frameCount * payloadSize)
+		for range b.N {
+			source.Reset(wire)
+			resetAdaptiveReaderForBenchmark(reader)
+			result, nextScratch, err := wireCodec.ReadInto(reader, payloadSize, scratch[:0])
+			if err != nil {
+				b.Fatal(err)
+			}
+			scratch = nextScratch[:payloadSize]
+			sequence = result.Message.Seq
+			for range frameCount - 1 {
+				bufferedResult, complete, decodeErr := wireCodec.DecodeBuffered(reader.bufferedBytes(), payloadSize)
+				if decodeErr != nil || !complete {
+					b.Fatalf("DecodeBuffered = (complete %v, error %v)", complete, decodeErr)
+				}
+				copy(scratch, bufferedResult.Message.Data)
+				reader.discardBuffered(bufferedResult.Bytes)
+				sequence = bufferedResult.Message.Seq
+			}
+		}
+		if sequence != frameCount-1 {
+			b.Fatalf("last sequence = %d", sequence)
+		}
+	})
+}
+
+func resetAdaptiveReaderForBenchmark(reader *adaptiveReader) {
+	reader.start = 0
+	reader.end = 0
+	reader.readErr = nil
 }
 
 type dataAndErrorReader struct{}

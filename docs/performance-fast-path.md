@@ -90,15 +90,51 @@ Router.
 The adaptive per-connection reader starts at 4 KiB and grows, only after a
 completely full lower-level read, to `MaxReadBufferSize` (32 KiB by default).
 This amortizes receive syscalls under coalesced traffic without allocating the
-maximum buffer for idle connections. The codec still emits one frame per
-`ReadInto` call; KPro does not yet have Netty-style cumulative decoding that
-emits several frames from one decoder invocation.
+maximum buffer for idle connections.
 
 Non-reusable custom codecs keep the original `StreamCodec.Read` behavior.
 Reusable custom codecs keep compatibility but must honor the documented
 scratch ownership contract. Live receive buffers are bounded by transport and
 Router admission, while `MaxRetainedBufferBytes` bounds only idle buffers after
 their final Context reference is released.
+
+### Bounded buffered decode and Router batch admission
+
+`codec.BufferedStreamCodec` is an optional receive contract for decoding one
+complete frame already present in a contiguous reader buffer. KProV1 implements
+it without allocating or copying inside the codec; the decoded payload aliases
+the supplied bytes. TCP must therefore copy each additional buffered payload
+into transport-owned pool storage before the adaptive reader can discard or
+reuse those bytes.
+
+When a TCP server is mounted through `server.Endpoint`, the endpoint detects
+the optional `transport.BatchMessageServer` capability. TCP then:
+
+1. reads the first frame through the ordinary owned receive path;
+2. probes for up to 15 more complete frames already buffered by the same
+   adaptive reader, for a hard maximum group of 16;
+3. splits business-message groups at heartbeat frames; and
+4. offers each group to the Router as one optional admission operation.
+
+`Router.TryDispatchSyncBatch` accepts only 2 through 32 contexts from the same
+session, only when every route is synchronous, the Router uses
+`BackpressureReject`, and global, per-session, and queue capacity are all
+available. It reserves the whole count and enqueues the group while holding the
+session queue lock. Returning `false` guarantees that the Router retained no
+Context and accepted no task; TCP then invokes the ordinary handler once per
+Context. Wait-mode backpressure, async routes, mixed sessions, missing routes,
+closed sessions, and insufficient capacity therefore preserve the existing
+per-message path.
+
+Direct `tcp.Server.ListenAndServe` does not install a batch handler and keeps
+the original `readFrame` behavior. Custom transports and codecs remain source
+compatible because both capabilities are optional. Batch-handler panics are
+contained by the transport invocation helper and follow the configured handler
+error policy.
+
+This is bounded cumulative probing and admission amortization. It does not make
+the receive path zero-copy, remove per-message Router execution, or promise
+that one socket read always produces a full group.
 
 ### Bounded gather-write batching
 
@@ -162,6 +198,35 @@ when the application produces the payload directly in `Bytes`. It does not
 avoid a transport backing allocation on a pool miss or the later socket copy
 into the kernel.
 
+## Optional current-payload ownership transfer
+
+An echo or forwarding handler that sends the exact current inbound payload can
+explicitly transfer its transport-managed ownership to the TCP writer:
+
+```go
+func echo(ctx core.Context) error {
+	message := ctx.Message()
+	return core.ReplyCurrentPayload(ctx, message.ID)
+}
+```
+
+After calling `ReplyCurrentPayload`, the handler must return without reading,
+retaining, or mutating `Message.Data`. When the Context owns the exact current
+transport buffer and the Session implements `core.OwnedPayloadSender`, a
+compatible segmented TCP writer retains one Context reference until the frame
+is completed, rejected, or discarded. Every path releases that reference
+exactly once.
+
+Wrapped or synthetic contexts, a transformed or sliced payload, unsupported
+Sessions, and non-segmented codecs fall back to ordinary `Context.Reply` copy
+semantics. Normal `Context.Reply` and `Session.Send` are unchanged, so this
+optimization is explicit rather than a hidden ownership-contract change.
+
+This transfer can avoid the inbound-to-outbound application ownership copy for
+that narrow workload. It does not avoid socket receive/send copies, and it is
+not appropriate when the response payload must be transformed or used after
+the reply call.
+
 ## Implemented WebSocket path
 
 The WebSocket writer now performs the same bounded FIFO queue drain, with
@@ -192,9 +257,11 @@ Use the narrowest accurate term when describing a result:
 | Mechanism | What it can avoid | What it does not avoid |
 | --- | --- | --- |
 | Bounded buffer pool | Repeated backing allocations for eligible sizes when an idle class buffer is available | Pool misses, oversized allocations, payload copying, or socket copying |
-| Owned reusable receive buffer | Repeated receive-payload backing allocation after warm-up for reusable codecs | Socket copying, decode work, Router scheduling, or a cumulative multi-frame decoder |
+| Owned reusable receive buffer | Repeated receive-payload backing allocation after warm-up for reusable codecs | Socket copying, decode work, or Router scheduling |
+| Buffered decode plus batch admission | Additional socket reads for complete frames already buffered, plus repeated Router capacity and queue synchronization for an eligible group | The ownership copy out of the shared reader buffer, per-message handler execution, or guaranteed grouping |
 | Segmented header and payload | A contiguous header-plus-payload frame allocation and representation | Normal `Session.Send` ownership copy; user-to-kernel copy |
 | `core.OutboundBuffer` | A separate application-owned payload allocation and ownership copy when filled directly | A transport allocation on pool miss; user-to-kernel copy |
+| `core.ReplyCurrentPayload` | The inbound-to-outbound ownership copy for an explicit exact-payload reply | Socket copies, payload transformation, unsupported contexts/codecs, or use of the payload after replying |
 | `net.Buffers.WriteTo` | Intermediate concatenation; it can group regions into one logical submission | A guaranteed syscall reduction; kernel copy of dynamic user memory |
 | `sendfile`, `splice`, `MSG_ZEROCOPY`, or `SEND_ZC` | Potential kernel data-copy work on eligible paths | Protocol processing, completion handling, pinning, and fallback costs |
 
@@ -221,6 +288,18 @@ Unit tests currently establish:
 - a reusable receive buffer remains owned while a Router handler is active and
   is returned only after the final Context reference;
 - KProV1 `ReadInto` performs zero allocations with correctly sized scratch;
+- KProV1 buffered decoding waits for a complete frame and returns an alias only
+  for that complete frame;
+- TCP consumes complete coalesced frames already present in the adaptive reader
+  without another socket read;
+- batch admission retains receive buffers through Router completion and falls
+  back without transferring Context ownership or accepting a task for
+  unsupported routes, policies, mixed sessions, or insufficient capacity;
+- endpoint capability selection and batch-handler panic containment preserve
+  ordinary transport behavior;
+- `ReplyCurrentPayload` transfers one Context reference to the TCP writer and
+  releases it on success, close, and failure, while unsupported contexts retain
+  ordinary reply semantics;
 - sharded pools preserve their aggregate retained-byte hard limit;
 - the idle pool does not exceed its retained-byte setting;
 - TCP and WebSocket batching preserves FIFO wire order and queue accounting;
@@ -235,6 +314,11 @@ allocate a new payload backing slice per operation. These are correctness and
 regression results.
 They do not establish service capacity, tail latency, syscall reduction,
 kernel copy avoidance, or superiority to Netty.
+
+The isolated 2026-08-05 candidate measurements, including retained and rejected
+experiments, are recorded in [Benchmark Results](../benchmark/RESULTS.md#2026-08-05-bounded-receive-batch-candidate).
+The corresponding current KPro/Netty loopback diagnostic is recorded in
+[KPro and Netty Performance Baseline](netty-performance-baseline.md#2026-08-05-bounded-receive-batch-candidate-and-loopback-retest).
 
 ## KPro versus Netty baseline contract
 

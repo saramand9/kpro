@@ -118,6 +118,31 @@ func TestKProV1ReadIntoDoesNotAllocateWithSizedScratch(t *testing.T) {
 	}
 }
 
+func TestKProV1DecodeBufferedWaitsForCompleteFrameAndAliasesPayload(t *testing.T) {
+	wireCodec := KProV1()
+	frame, err := wireCodec.Encode(core.Message{ID: 7, Seq: 9, Data: []byte("payload")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, complete, err := wireCodec.DecodeBuffered(frame[:FrameHeaderSize-1], 64); err != nil || complete {
+		t.Fatalf("partial header = (complete %v, error %v), want (false, nil)", complete, err)
+	}
+	if _, complete, err := wireCodec.DecodeBuffered(frame[:len(frame)-1], 64); err != nil || complete {
+		t.Fatalf("partial payload = (complete %v, error %v), want (false, nil)", complete, err)
+	}
+	result, complete, err := wireCodec.DecodeBuffered(frame, 64)
+	if err != nil || !complete {
+		t.Fatalf("complete frame = (complete %v, error %v), want (true, nil)", complete, err)
+	}
+	if result.Bytes != len(frame) || result.Message.ID != 7 || result.Message.Seq != 9 {
+		t.Fatalf("result = %+v, want complete message", result)
+	}
+	frame[FrameHeaderSize] = 'P'
+	if string(result.Message.Data) != "Payload" {
+		t.Fatalf("buffered payload = %q, want input alias", result.Message.Data)
+	}
+}
+
 func TestKProV1DecodePacketRejectsTrailingData(t *testing.T) {
 	packet, err := KProV1().EncodePacket(core.Message{
 		ID:   testMsgEcho,

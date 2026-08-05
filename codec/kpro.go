@@ -72,6 +72,30 @@ func (KProV1Codec) ReadInto(r io.Reader, maxBodySize uint32, scratch []byte) (Re
 	}, scratch, nil
 }
 
+// DecodeBuffered decodes one complete frame already present in input without
+// allocating or copying its payload. The returned payload aliases input.
+func (KProV1Codec) DecodeBuffered(input []byte, maxBodySize uint32) (ReadResult, bool, error) {
+	if len(input) < FrameHeaderSize {
+		return ReadResult{}, false, nil
+	}
+	msg, length, err := decodeHeader(input[:FrameHeaderSize])
+	if err != nil {
+		return ReadResult{}, false, err
+	}
+	if length > maxBodySize {
+		return ReadResult{}, false, ErrFrameTooLarge
+	}
+	totalBytes := uint64(FrameHeaderSize) + uint64(length)
+	if totalBytes > uint64(len(input)) {
+		return ReadResult{}, false, nil
+	}
+	consumed := int(totalBytes)
+	if length > 0 {
+		msg.Data = input[FrameHeaderSize:consumed:consumed]
+	}
+	return ReadResult{Message: msg, Bytes: consumed}, true, nil
+}
+
 // Encode serializes one message into a framed byte slice.
 func (KProV1Codec) Encode(msg core.Message) ([]byte, error) {
 	if uint64(len(msg.Data)) > uint64(^uint32(0)) {

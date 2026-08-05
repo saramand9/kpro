@@ -279,6 +279,209 @@ func BenchmarkRouterDispatchSync(b *testing.B) {
 	}
 }
 
+func TestRouterTryDispatchSyncBatch(t *testing.T) {
+	router := NewRouter(RouterConfig{
+		SyncQueueSize:         32,
+		AsyncWorkers:          1,
+		AsyncQueueSize:        1,
+		MaxInflightPerSession: 32,
+		MaxInflight:           32,
+		SessionIdleTimeout:    time.Minute,
+	})
+	defer func() {
+		if err := router.Shutdown(context.Background()); err != nil {
+			t.Fatalf("shutdown router: %v", err)
+		}
+	}()
+
+	const batchSize = 16
+	handled := make(chan uint64, batchSize)
+	router.HandleSync(10, func(ctx Context) error {
+		handled <- ctx.Message().Seq
+		return nil
+	})
+	session := newFakeSession(1)
+	var contexts [batchSize]Context
+	for i := range contexts {
+		contexts[i] = AcquireContext(session, Message{ID: 10, Seq: uint64(i)})
+	}
+	if !router.TryDispatchSyncBatch(contexts[:]) {
+		t.Fatal("batch dispatch unexpectedly fell back")
+	}
+	for i := range contexts {
+		if got := <-handled; got != uint64(i) {
+			t.Fatalf("handled sequence %d = %d", i, got)
+		}
+	}
+}
+
+func TestRouterTryDispatchSyncBatchFailureHasNoSideEffects(t *testing.T) {
+	router := NewRouter(RouterConfig{
+		SyncQueueSize:         1,
+		AsyncWorkers:          1,
+		AsyncQueueSize:        1,
+		MaxInflightPerSession: 1,
+		MaxInflight:           1,
+		SessionIdleTimeout:    time.Minute,
+	})
+	defer func() {
+		if err := router.Shutdown(context.Background()); err != nil {
+			t.Fatalf("shutdown router: %v", err)
+		}
+	}()
+
+	handled := make(chan uint64, 2)
+	router.HandleSync(10, func(ctx Context) error {
+		handled <- ctx.Message().Seq
+		return nil
+	})
+	session := newFakeSession(1)
+	contexts := [2]Context{
+		AcquireContext(session, Message{ID: 10, Seq: 1}),
+		AcquireContext(session, Message{ID: 10, Seq: 2}),
+	}
+	if router.TryDispatchSyncBatch(contexts[:]) {
+		t.Fatal("oversized batch was unexpectedly accepted")
+	}
+	for i, dispatchContext := range contexts {
+		if err := router.Dispatch(dispatchContext); err != nil {
+			t.Fatalf("fallback dispatch %d: %v", i, err)
+		}
+		if got := <-handled; got != uint64(i+1) {
+			t.Fatalf("fallback sequence %d = %d", i, got)
+		}
+	}
+}
+
+func TestRouterTryDispatchSyncBatchRejectsUnsupportedShapesWithoutSideEffects(t *testing.T) {
+	tests := []struct {
+		name         string
+		configure    func(*Router)
+		contexts     func(*fakeSession, *fakeSession) []Context
+		backpressure BackpressurePolicy
+	}{
+		{
+			name: "mixed sessions",
+			configure: func(router *Router) {
+				router.HandleSync(10, func(Context) error { return nil })
+			},
+			contexts: func(first *fakeSession, second *fakeSession) []Context {
+				return []Context{
+					AcquireContext(first, Message{ID: 10}),
+					AcquireContext(second, Message{ID: 10}),
+				}
+			},
+		},
+		{
+			name: "async route",
+			configure: func(router *Router) {
+				router.HandleAsync(10, func(Context) error { return nil })
+			},
+			contexts: func(first *fakeSession, _ *fakeSession) []Context {
+				return []Context{
+					AcquireContext(first, Message{ID: 10}),
+					AcquireContext(first, Message{ID: 10}),
+				}
+			},
+		},
+		{
+			name: "wait policy",
+			configure: func(router *Router) {
+				router.HandleSync(10, func(Context) error { return nil })
+			},
+			contexts: func(first *fakeSession, _ *fakeSession) []Context {
+				return []Context{
+					AcquireContext(first, Message{ID: 10}),
+					AcquireContext(first, Message{ID: 10}),
+				}
+			},
+			backpressure: BackpressureWait,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			router := NewRouter(RouterConfig{
+				SyncQueueSize:         4,
+				AsyncWorkers:          1,
+				AsyncQueueSize:        4,
+				MaxInflightPerSession: 4,
+				MaxInflight:           4,
+				Backpressure:          test.backpressure,
+				SessionIdleTimeout:    time.Minute,
+			})
+			test.configure(router)
+			contexts := test.contexts(newFakeSession(1), newFakeSession(2))
+			if router.TryDispatchSyncBatch(contexts) {
+				t.Fatal("unsupported batch was accepted")
+			}
+			for _, ctx := range contexts {
+				if ctx.Message().ID != 10 {
+					t.Fatal("failed batch mutated its Context")
+				}
+				releaseContext(ctx)
+			}
+			if err := router.Shutdown(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func BenchmarkRouterDispatchSyncBatch16(b *testing.B) {
+	const batchSize = 16
+	for _, batched := range []bool{false, true} {
+		name := "sequential"
+		if batched {
+			name = "batch"
+		}
+		b.Run(name, func(b *testing.B) {
+			router := NewRouter(RouterConfig{
+				SyncQueueSize:         64,
+				AsyncWorkers:          1,
+				AsyncQueueSize:        1,
+				MaxInflightPerSession: 64,
+				MaxInflight:           64,
+				SessionIdleTimeout:    time.Minute,
+			})
+			handled := make(chan struct{}, batchSize)
+			router.HandleSync(10, func(Context) error {
+				handled <- struct{}{}
+				return nil
+			})
+			session := newFakeSession(1)
+			message := Message{ID: 10}
+			var contexts [batchSize]Context
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				for j := range contexts {
+					contexts[j] = AcquireContext(session, message)
+				}
+				if batched {
+					if !router.TryDispatchSyncBatch(contexts[:]) {
+						b.Fatal("batch dispatch unexpectedly fell back")
+					}
+				} else {
+					for _, dispatchContext := range contexts {
+						if err := router.Dispatch(dispatchContext); err != nil {
+							b.Fatal(err)
+						}
+					}
+				}
+				for range batchSize {
+					<-handled
+				}
+			}
+			b.StopTimer()
+			if err := router.Shutdown(context.Background()); err != nil {
+				b.Fatal(err)
+			}
+		})
+	}
+}
+
 func middlewareCountName(count int) string {
 	switch count {
 	case 0:
