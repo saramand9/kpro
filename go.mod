@@ -4,7 +4,7 @@ go 1.25.12
 
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.32.0
-	github.com/alicebob/miniredis/v2 v2.33.0
+	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/elastic/go-elasticsearch/v8 v8.14.0
 	github.com/fasthttp/router v1.5.4
 	github.com/getkin/kin-openapi v0.133.0
@@ -37,7 +37,6 @@ require (
 require (
 	filippo.io/edwards25519 v1.1.1 // indirect
 	github.com/ClickHouse/ch-go v0.65.0 // indirect
-	github.com/alicebob/gopher-json v0.0.0-20200520072559-a9ecdc9d1d3a // indirect
 	github.com/andybalholm/brotli v1.2.1 // indirect
 	github.com/apapsch/go-jsonmerge/v2 v2.0.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
