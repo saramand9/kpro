@@ -15,11 +15,12 @@ func (s *session) encodeOutboundFrame(msg core.Message) (outboundFrame, error) {
 		encoded, err := s.server.config.Codec.Encode(msg)
 		return outboundFrame{payload: encoded}, err
 	}
-	payload := s.server.payloadPool.GetUninitialized(len(msg.Data))
+	pool := s.outboundPayloadPool()
+	payload := pool.GetUninitialized(len(msg.Data))
 	frameOwnsPayload := false
 	defer func() {
 		if !frameOwnsPayload {
-			s.server.payloadPool.Put(payload)
+			pool.Put(payload)
 		}
 	}()
 	copy(payload, msg.Data)
@@ -77,7 +78,7 @@ func isExactKProV1Codec(streamCodec codec.StreamCodec) bool {
 
 func (s *session) kproV1Frame(msg core.Message, payload []byte) (outboundFrame, error) {
 	msg.Data = payload
-	frame := outboundFrame{payload: payload, pool: s.server.payloadPool}
+	frame := outboundFrame{payload: payload, pool: s.outboundPayloadPool()}
 	if err := codec.WriteKProV1Header(frame.header[:], msg); err != nil {
 		return outboundFrame{}, err
 	}
@@ -92,7 +93,7 @@ func (s *session) customSegmentedFrame(
 	payload []byte,
 ) (outboundFrame, error) {
 	msg.Data = payload[:len(payload):len(payload)]
-	frame := outboundFrame{payload: payload, pool: s.server.payloadPool}
+	frame := outboundFrame{payload: payload, pool: s.outboundPayloadPool()}
 	header, err := framing.AppendHeader(frame.header[:0], msg)
 	if err != nil {
 		return outboundFrame{}, err

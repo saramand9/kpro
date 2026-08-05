@@ -320,12 +320,16 @@ func TestSessionCloseUsesPublishedGracefulModeBeforeRouterDoneCloses(t *testing.
 		session: executor,
 	}
 
-	router.globalSlots <- struct{}{}
+	if !router.globalCapacity.tryAcquire() {
+		t.Fatal("failed to seed global capacity")
+	}
 	router.globalInflight.Store(1)
 	executor.inflightSlots <- struct{}{}
 	executor.inflight = 1
 	executor.queueSlots <- struct{}{}
-	executor.queue <- task
+	if !executor.queue.Push(task) {
+		t.Fatal("failed to seed executor queue")
+	}
 	router.syncQueued.Store(1)
 	router.accepted.Store(1)
 

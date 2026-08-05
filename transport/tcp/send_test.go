@@ -159,6 +159,9 @@ func TestPendingByteConfigDefaultsAndValidation(t *testing.T) {
 	if server.config.MaxRetainedBufferBytes != DefaultMaxRetainedBufferBytes {
 		t.Fatalf("MaxRetainedBufferBytes = %d, want %d", server.config.MaxRetainedBufferBytes, DefaultMaxRetainedBufferBytes)
 	}
+	if server.config.MaxReadBufferSize != DefaultMaxReadBufferSize {
+		t.Fatalf("MaxReadBufferSize = %d, want %d", server.config.MaxReadBufferSize, DefaultMaxReadBufferSize)
+	}
 	for _, test := range []struct {
 		name   string
 		config Config
@@ -166,6 +169,7 @@ func TestPendingByteConfigDefaultsAndValidation(t *testing.T) {
 		{name: "MaxWriteBatchFrames", config: Config{MaxWriteBatchFrames: -1}},
 		{name: "MaxWriteBatchBytes", config: Config{MaxWriteBatchBytes: -1}},
 		{name: "MaxRetainedBufferBytes", config: Config{MaxRetainedBufferBytes: -1}},
+		{name: "MaxReadBufferSize", config: Config{MaxReadBufferSize: -1}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if err := New(test.config).Validate(); err == nil || !strings.Contains(err.Error(), test.name) {

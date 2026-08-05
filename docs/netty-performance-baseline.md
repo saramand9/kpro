@@ -8,7 +8,7 @@ result, capacity guarantee, or claim of Netty parity.
 
 | Field | Baseline |
 | --- | --- |
-| Assessment date | 2026-08-04 |
+| Assessment date | 2026-08-05 |
 | KPro source | The repository revision containing this document and the segmented TCP/WebSocket FastPath work |
 | Netty source | Local Netty 4.2 checkout at `b022b4786f2b8258ea75d5b613957a01f2246c5b` |
 | KPro measured evidence | [FastPath regression baseline](../benchmark/RESULTS.md#2026-08-03-fastpath-regression-baseline), plus the 2026-08-04 loopback matrix below |
@@ -60,10 +60,10 @@ that workload.
 | Dimension | Current KPro implementation | Netty 4.2 implementation | Theoretical position |
 | --- | --- | --- | --- |
 | Outbound framing | Inline fixed header, pooled payload, optional transport-owned buffer, and gathered regions | Direct/reference-counted buffers, outbound buffer, gathered writes, and mature allocator integration | KPro has closed much of the narrow framing/admission gap |
-| TCP receive | Fixed header `ReadFull`, payload allocation, then payload `ReadFull` for each non-empty frame | Adaptive socket reads, cumulative decoding, and multiple frames from one read buffer | Netty has a large small-message advantage |
+| TCP receive | Adaptive socket aggregation plus Context-owned reusable codec scratch; KProV1 reuses the same storage for header and payload, but emits one frame per codec call | Adaptive socket reads, cumulative decoding, and multiple frames from one read buffer | Netty retains a decode/scheduling advantage for small coalesced frames |
 | Execution topology | Typical synchronous message path crosses reader, per-session Router executor, outbound queue, and writer goroutines | Decode, handler, and write can remain on one EventLoop when no executor boundary is crossed | Netty has fewer hops for non-blocking I/O work |
 | Write formation | Fixed, bounded, opportunistic FIFO drain using `net.Buffers` | Separate write/flush, flush consolidation, adaptive gather limits, write-spin, and partial-progress state | Netty is more adaptive under mixed and partial writes |
-| Buffer allocation | Simple server-wide bounded Go slice pool with a hard idle-retention cap | Adaptive/pooled direct-buffer allocators, caches, arenas, and reference-counted ownership | Netty favors throughput/locality; KPro favors simplicity and explicit bounds |
+| Buffer allocation | Sharded size-class pools with one aggregate idle-retention hard limit and Context-reference-counted receive ownership | Adaptive/pooled direct-buffer allocators, caches, arenas, and reference-counted ownership | KPro has removed steady receive allocation while retaining a simpler hard budget |
 | Backpressure | Hard frame/byte admission limits, watermarks, bounded waiters, and close-on-hard-full behavior | High/low writability watermarks, queued-byte accounting, and read-interest control | KPro is strongly bounded; Netty provides finer gradual flow control |
 | Large immutable payloads | No file-region or kernel copy-avoidance API | `FileRegion`/transfer support and native transports | Netty has a large advantage for eligible file transfer |
 | Platform backends | Go runtime network poller and standard `net` APIs | NIO plus Linux epoll and io_uring implementations | Netty exposes more specialized Linux tuning |
@@ -101,33 +101,71 @@ negative control, the corrected client completed zero responses and reported
 eight validation errors against the unsafe binary with 8 connections, 64-byte
 payloads, inflight 16, and a 2-second window. The historical numbers remain in
 Git history but must not be used as current performance evidence. A corrected
-Netty comparison has not yet been recorded.
+comparison is recorded below.
 
-## Largest current gap: inbound processing
+## 2026-08-05 safe receive ownership and loopback diagnostic
+
+TCP now uses `ReusableStreamCodec` through an explicit ownership transfer. A
+receive buffer is attached to the pooled message Context and is returned only
+after the transport caller and any accepted Router task release their
+references. KProV1 also reads the 20-byte header and then the payload through
+the same scratch allocation. A race-enabled lifecycle test verifies that the
+buffer is not returned while a Router handler is active, and the corrected
+sequence-dependent load generator reported zero validation errors in every run
+below.
+
+The local Windows loopback diagnostic used an Intel Core i5-14400, Go's default
+`GOMAXPROCS`, JDK 21, Netty 4.2 at the pinned checkout above, fresh processes,
+two seconds of warm-up, four seconds of measurement, alternating order, and
+three paired runs. T04 is 64 connections x 16 KiB x inflight 1; T07 is 64 x
+64 B x inflight 16 with 16 coalesced requests; T08 is 256 x 1 KiB x inflight
+16 with 16 coalesced requests. Every response payload was fully validated.
+
+| Case | KPro throughput range | Netty throughput range | Median paired KPro/Netty | KPro p99 range | Netty p99 range |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| T04 | 58,948-76,234 msg/s | 61,074-82,975 msg/s | 91.9% | 2.01-2.54 ms | 3.70-6.55 ms |
+| T07 | 1,087,508-1,173,788 msg/s | 1,229,892-1,511,790 msg/s | 83.0% | 2.02-2.23 ms | 4.00-5.00 ms |
+| T08 | 748,068-872,968 msg/s | 817,422-1,030,460 msg/s | 88.1% | 12.53-15.61 ms | 12.99-16.59 ms |
+
+This is not the acceptance matrix defined later in this document. It is
+loopback, short, closed-loop, and has only three process runs. The Netty lane
+also echoes a retained wire buffer on its EventLoop, while the KPro lane uses
+Router dispatch, recovery middleware, receive ownership, outbound ownership
+copying, queue accounting, and a writer goroutine. The table is useful for
+tracking this implementation, not for a public parity or production-capacity
+claim.
+
+Against the KPro binary at the start of this optimization iteration, the same
+paired method observed median throughput changes of +25.8% (T04), +34.1%
+(T07), and +22.4% (T08). Median CPU-seconds per completed message fell by about
+41%, 36%, and 43%, respectively. T07/T08 tail latency improved substantially;
+T08 p50 increased from roughly 2.5-3.0 ms to 4.7-5.2 ms, so the result includes
+a visible median-latency/throughput trade-off.
+
+## Largest current gap: scheduling and cumulative decode
 
 The normal KProV1 TCP receive path currently performs:
 
 ```text
-ReadFull(20-byte header)
--> validate payload length
--> allocate an independently owned payload
--> ReadFull(payload)
+adaptive socket aggregation
+-> ReadInto(reusable owned scratch)
+-> validate header and payload length
+-> transfer scratch ownership to Context
 -> Router dispatch
 ```
 
-The allocation is currently required because normal Router dispatch may retain
-the message after the transport's handler call returns. The optional
-`ReusableStreamCodec` contract explicitly documents its aliasing lifetime, and
-TCP does not use it without a transport-to-consumer ownership transfer or copy.
-The codec also has no persistent cumulative receive buffer from which one
-socket read can decode several complete frames, so that remains the main
-receive-side gap versus Netty.
+The receive payload and header no longer require steady per-message backing
+allocations after the pool is warm. The remaining decoder gap is structural:
+the codec interface still returns one frame per call instead of walking a
+cumulative buffer and emitting every complete frame already available.
 
 Netty reads available bytes into an adaptively sized buffer and its cumulative
 decoder can preserve partial frames and emit several messages from the same
-input buffer. That difference is expected to dominate small-packet, high-QPS
-echo or gateway workloads. Optimizing another few nanoseconds from outbound
-header construction is unlikely to compensate for it.
+input buffer. The final T07 CPU profile attributed about 9% cumulative CPU to
+`readFrame`/KProV1 decoding, while Windows `WSASend`/writev and Go scheduler
+work were materially larger. A multi-frame decoder is therefore no longer an
+automatic first change: it needs an isolated prototype and measured benefit
+large enough to justify widening the codec/transport contract.
 
 ## Scheduling and batching trade-offs
 
@@ -179,8 +217,8 @@ does not prove a 39% service-throughput improvement or a lead over Netty.
 | Workload | Source-based expectation before measurement |
 | --- | --- |
 | Up to roughly 1,000 users, with database/RPC-dominated handlers | Framework I/O difference is unlikely to be the primary bottleneck; KPro is technically suitable when limits are configured and validated |
-| 64 B to 1 KiB pure echo at high QPS | Netty is likely to lead clearly because of receive cumulation and fewer scheduling hops |
-| Several frames available in each socket read | Netty is likely to lead clearly until KPro adds multi-frame receive decoding |
+| 64 B to 1 KiB pure echo at high QPS | The local diagnostic shows Netty leading throughput; cumulative decode and fewer scheduling hops remain the likely reasons |
+| Several frames available in each socket read | Netty retains an advantage because KPro aggregates socket reads but still invokes the codec once per frame |
 | Bursty writers, partial writes, and slow consumers | Netty is likely to lead in efficiency and tail stability; KPro still provides explicit hard resource bounds |
 | Blocking database or filesystem handlers | KPro is easier to use safely; a correctly configured Netty application must offload the work |
 | Large file or immutable-region transfer | Netty has a large structural advantage until KPro adds a file-region/sendfile path |
@@ -196,14 +234,15 @@ still belong in the application load model.
 
 The next work should target measured architectural gaps in this order:
 
-1. Add a bounded cumulative TCP receive buffer that preserves partial frames
-   and decodes multiple frames per socket read.
-2. Measure and then add bounded flush consolidation, adaptive write quanta, and
-   explicit partial-write progress where the measurements justify them.
-3. Refine read-side backpressure so sustained outbound pressure can pause and
+1. Prototype cumulative multi-frame decoding behind a codec-neutral ownership
+   contract, and retain it only if CPU profiles and full-payload A/B tests show
+   a material win.
+2. Investigate scheduler topology and runnable-goroutine stealing without
+   weakening per-session ordering or blocking-handler isolation.
+3. Measure write syscall density, then refine flush consolidation, adaptive
+   write quanta, and partial-write progress only where justified.
+4. Refine read-side backpressure so sustained outbound pressure can pause and
    resume reads before the hard close boundary.
-4. Shard buffer reuse only after contention profiles show the server-wide pool
-   is material.
 5. Add a separate file-region/sendfile capability for eligible large immutable
    payloads; consider Linux-specific copy avoidance only after that path has a
    reproducible CPU-per-GiB requirement.

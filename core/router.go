@@ -28,6 +28,7 @@ const (
 	DefaultSessionIdleTimeout = time.Minute
 	// DefaultRouterShutdownTimeout bounds graceful router shutdown.
 	DefaultRouterShutdownTimeout = 5 * time.Second
+	defaultSessionRunBatch       = 32
 )
 
 // DispatchMode controls whether a route is serialized per session or run by async workers.
@@ -130,6 +131,51 @@ type dispatchTask struct {
 	session   *sessionExecutor
 }
 
+type dispatchTaskRing struct {
+	items []dispatchTask
+	head  int
+	tail  int
+	count int
+}
+
+func newDispatchTaskRing(size int) dispatchTaskRing {
+	return dispatchTaskRing{items: make([]dispatchTask, size)}
+}
+
+func (q *dispatchTaskRing) Push(task dispatchTask) bool {
+	if q == nil || q.count == len(q.items) {
+		return false
+	}
+	q.items[q.tail] = task
+	q.tail++
+	if q.tail == len(q.items) {
+		q.tail = 0
+	}
+	q.count++
+	return true
+}
+
+func (q *dispatchTaskRing) Pop() (dispatchTask, bool) {
+	if q == nil || q.count == 0 {
+		return dispatchTask{}, false
+	}
+	task := q.items[q.head]
+	q.items[q.head] = dispatchTask{}
+	q.head++
+	if q.head == len(q.items) {
+		q.head = 0
+	}
+	q.count--
+	return task, true
+}
+
+func (q *dispatchTaskRing) Len() int {
+	if q == nil {
+		return 0
+	}
+	return q.count
+}
+
 // Router maps message ids to handlers and owns dispatch scheduling.
 type Router struct {
 	mu            sync.RWMutex
@@ -152,7 +198,7 @@ type Router struct {
 	asyncStartOnce sync.Once
 	asyncMu        sync.Mutex
 
-	globalSlots    chan struct{}
+	globalCapacity *atomicCapacity
 	waiters        *waiterRegistry
 	globalInflight atomic.Int64
 	syncQueued     atomic.Int64
@@ -175,15 +221,15 @@ func NewRouter(config ...RouterConfig) *Router {
 		errorObserver = logRouterError
 	}
 	r := &Router{
-		routes:        make(map[uint32]route),
-		config:        cfg,
-		errorObserver: errorObserver,
-		done:          make(chan struct{}),
-		drained:       make(chan struct{}),
-		asyncQueue:    make(chan dispatchTask, cfg.AsyncQueueSize),
-		asyncSlots:    newCapacity(cfg.AsyncQueueSize),
-		globalSlots:   newCapacity(cfg.MaxInflight),
-		waiters:       newWaiterRegistry(cfg.MaxWaitingDispatches, cfg.MaxWaitingDispatchesPerSession),
+		routes:         make(map[uint32]route),
+		config:         cfg,
+		errorObserver:  errorObserver,
+		done:           make(chan struct{}),
+		drained:        make(chan struct{}),
+		asyncQueue:     make(chan dispatchTask, cfg.AsyncQueueSize),
+		asyncSlots:     newCapacity(cfg.AsyncQueueSize),
+		globalCapacity: newAtomicCapacity(cfg.MaxInflight),
+		waiters:        newWaiterRegistry(cfg.MaxWaitingDispatches, cfg.MaxWaitingDispatchesPerSession),
 	}
 	return r
 }
@@ -658,7 +704,7 @@ func (r *Router) execute(task dispatchTask) {
 			r.notifyError(event)
 		}
 	}()
-	inv := acquireMessageInvocation(context.Background(), task.ctx, task.operation)
+	inv := acquireMessageInvocation(task.session.invocationCtx, task.ctx, task.operation)
 	defer releaseMessageInvocation(inv)
 	if err := task.handler(inv); err != nil {
 		event := newRouterErrorEvent(RouterErrorStageHandler, task.ctx, err)
@@ -830,7 +876,9 @@ type sessionExecutor struct {
 	router        *Router
 	key           sessionExecutorKey
 	done          <-chan struct{}
-	queue         chan dispatchTask
+	invocationCtx context.Context
+	queue         dispatchTaskRing
+	ready         chan struct{}
 	closedCh      chan struct{}
 	inflightSlots chan struct{}
 	queueSlots    chan struct{}
@@ -847,7 +895,9 @@ func newSessionExecutor(router *Router, key sessionExecutorKey) *sessionExecutor
 		router:        router,
 		key:           key,
 		done:          key.done,
-		queue:         make(chan dispatchTask, router.config.SyncQueueSize),
+		invocationCtx: contextForSessionDone(context.Background(), key.done),
+		queue:         newDispatchTaskRing(router.config.SyncQueueSize),
+		ready:         make(chan struct{}, 1),
 		closedCh:      make(chan struct{}),
 		inflightSlots: newCapacity(router.config.MaxInflightPerSession),
 		queueSlots:    newCapacity(router.config.SyncQueueSize),
@@ -875,28 +925,33 @@ func (s *sessionExecutor) enqueueReserved(
 		return waited, err
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.router.closed() {
+		s.mu.Unlock()
 		releaseCapacity(s.queueSlots)
 		return waited, ErrRouterClosed
 	}
 	if s.closed.Load() {
+		s.mu.Unlock()
 		releaseCapacity(s.queueSlots)
 		return waited, errSessionExecutorClosed
 	}
 	if channelClosed(s.done) {
+		s.mu.Unlock()
 		releaseCapacity(s.queueSlots)
 		return waited, ErrClosed
 	}
-	s.router.syncQueued.Add(1)
-	select {
-	case s.queue <- task:
-		return waited, nil
-	default:
-		s.router.syncQueued.Add(-1)
+	wasEmpty := s.queue.Len() == 0
+	if !s.queue.Push(task) {
+		s.mu.Unlock()
 		releaseCapacity(s.queueSlots)
 		return waited, ErrDispatchQueueFull
 	}
+	s.router.syncQueued.Add(1)
+	s.mu.Unlock()
+	if wasEmpty {
+		s.signalReady()
+	}
+	return waited, nil
 }
 
 func (s *sessionExecutor) acquire() error {
@@ -960,6 +1015,49 @@ func (s *sessionExecutor) isClosed() bool {
 	return s.closed.Load()
 }
 
+func (s *sessionExecutor) signalReady() {
+	select {
+	case s.ready <- struct{}{}:
+	default:
+	}
+}
+
+func (s *sessionExecutor) dequeue() (dispatchTask, bool) {
+	s.mu.Lock()
+	task, ok := s.queue.Pop()
+	s.mu.Unlock()
+	if ok {
+		s.router.syncQueued.Add(-1)
+		releaseCapacity(s.queueSlots)
+	}
+	return task, ok
+}
+
+func (s *sessionExecutor) hasQueued() bool {
+	s.mu.Lock()
+	queued := s.queue.Len() > 0
+	s.mu.Unlock()
+	return queued
+}
+
+func (s *sessionExecutor) runReady(timer *time.Timer) {
+	processed := 0
+	for processed < defaultSessionRunBatch {
+		task, ok := s.dequeue()
+		if !ok {
+			break
+		}
+		s.router.execute(task)
+		processed++
+	}
+	if processed > 0 {
+		resetTimer(timer, s.router.config.SessionIdleTimeout)
+	}
+	if s.hasQueued() {
+		s.signalReady()
+	}
+}
+
 func (s *sessionExecutor) run() {
 	defer s.router.wg.Done()
 	timer := time.NewTimer(s.router.config.SessionIdleTimeout)
@@ -967,11 +1065,8 @@ func (s *sessionExecutor) run() {
 
 	for {
 		select {
-		case task := <-s.queue:
-			s.router.syncQueued.Add(-1)
-			releaseCapacity(s.queueSlots)
-			resetTimer(timer, s.router.config.SessionIdleTimeout)
-			s.router.execute(task)
+		case <-s.ready:
+			s.runReady(timer)
 		case <-s.done:
 			s.stopOnSessionClose()
 			return
@@ -1011,21 +1106,18 @@ func (s *sessionExecutor) drainAccepted() {
 	// so observing an empty queue is a stable drain boundary.
 	s.beginDrain()
 	for {
-		select {
-		case task := <-s.queue:
-			s.router.syncQueued.Add(-1)
-			releaseCapacity(s.queueSlots)
-			s.router.execute(task)
-		default:
+		task, ok := s.dequeue()
+		if !ok {
 			s.router.removeSession(s)
 			return
 		}
+		s.router.execute(task)
 	}
 }
 
 func (s *sessionExecutor) closeIfIdle() bool {
 	s.mu.Lock()
-	if s.closed.Load() || len(s.queue) > 0 || s.inflight > 0 {
+	if s.closed.Load() || s.queue.Len() > 0 || s.inflight > 0 {
 		s.mu.Unlock()
 		return false
 	}
@@ -1038,10 +1130,10 @@ func (s *sessionExecutor) closeIfIdle() bool {
 func (s *sessionExecutor) close() {
 	s.mu.Lock()
 	s.markClosedLocked()
-	drained := make([]dispatchTask, 0, len(s.queue))
+	drained := make([]dispatchTask, 0, s.queue.Len())
 	for {
-		select {
-		case task := <-s.queue:
+		task, ok := s.queue.Pop()
+		if ok {
 			if s.inflight > 0 {
 				s.inflight--
 				releaseCapacity(s.inflightSlots)
@@ -1049,7 +1141,7 @@ func (s *sessionExecutor) close() {
 			s.router.syncQueued.Add(-1)
 			releaseCapacity(s.queueSlots)
 			drained = append(drained, task)
-		default:
+		} else {
 			s.mu.Unlock()
 			s.router.removeSession(s)
 			for _, task := range drained {
@@ -1087,9 +1179,9 @@ func (r *Router) acquireGlobal(
 	sessionDone <-chan struct{},
 	waiter *dispatchWaiter,
 ) (bool, error) {
-	waited, err := acquireCapacity(
+	waited, err := acquireAtomicCapacity(
 		ctx,
-		r.globalSlots,
+		r.globalCapacity,
 		r.config.Backpressure,
 		ErrGlobalInflightLimit,
 		r.done,
@@ -1102,11 +1194,11 @@ func (r *Router) acquireGlobal(
 		return waited, err
 	}
 	if r.closed() {
-		releaseCapacity(r.globalSlots)
+		r.globalCapacity.release()
 		return waited, ErrRouterClosed
 	}
 	if channelClosed(sessionDone) {
-		releaseCapacity(r.globalSlots)
+		r.globalCapacity.release()
 		return waited, ErrClosed
 	}
 	r.globalInflight.Add(1)
@@ -1115,7 +1207,59 @@ func (r *Router) acquireGlobal(
 
 func (r *Router) releaseGlobal() {
 	r.globalInflight.Add(-1)
-	releaseCapacity(r.globalSlots)
+	r.globalCapacity.release()
+}
+
+// atomicCapacity keeps the uncontended admission path out of the runtime
+// channel locks. The notification channel is only a coalesced wake-up for
+// BackpressureWait callers; used remains the source of truth for the hard
+// capacity limit.
+type atomicCapacity struct {
+	limit     int64
+	used      atomic.Int64
+	available chan struct{}
+}
+
+func newAtomicCapacity(limit int) *atomicCapacity {
+	return &atomicCapacity{
+		limit:     int64(limit),
+		available: make(chan struct{}, 1),
+	}
+}
+
+func (c *atomicCapacity) tryAcquire() bool {
+	for {
+		used := c.used.Load()
+		if used >= c.limit {
+			return false
+		}
+		if c.used.CompareAndSwap(used, used+1) {
+			return true
+		}
+	}
+}
+
+func (c *atomicCapacity) release() {
+	for {
+		used := c.used.Load()
+		if used <= 0 {
+			panic("core: atomic capacity released without matching acquisition")
+		}
+		if c.used.CompareAndSwap(used, used-1) {
+			c.signalAvailable()
+			return
+		}
+	}
+}
+
+func (c *atomicCapacity) signalAvailable() {
+	if c.used.Load() >= c.limit {
+		return
+	}
+	select {
+	case c.available <- struct{}{}:
+	default:
+	}
 }
 
 func newCapacity(size int) chan struct{} {
@@ -1273,6 +1417,84 @@ func acquireCapacity(
 	case <-ownerDone:
 		return true, ownerErr
 	}
+}
+
+func acquireAtomicCapacity(
+	ctx context.Context,
+	capacity *atomicCapacity,
+	policy BackpressurePolicy,
+	fullErr error,
+	routerDone <-chan struct{},
+	sessionDone <-chan struct{},
+	ownerDone <-chan struct{},
+	ownerErr error,
+	waiter *dispatchWaiter,
+) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := capacityAcquireError(ctx, routerDone, sessionDone, ownerDone, ownerErr); err != nil {
+		return false, err
+	}
+	if capacity.tryAcquire() {
+		if err := capacityAcquireError(ctx, routerDone, sessionDone, ownerDone, ownerErr); err != nil {
+			capacity.release()
+			return false, err
+		}
+		return false, nil
+	}
+	if policy != BackpressureWait || waiter == nil {
+		return false, fullErr
+	}
+	if err := waiter.acquire(); err != nil {
+		return false, err
+	}
+
+	for {
+		if capacity.tryAcquire() {
+			if err := capacityAcquireError(ctx, routerDone, sessionDone, ownerDone, ownerErr); err != nil {
+				capacity.release()
+				return true, err
+			}
+			// A single release notification may represent several newly free
+			// slots. Pass the wake-up on while capacity remains available.
+			capacity.signalAvailable()
+			return true, nil
+		}
+		select {
+		case <-capacity.available:
+		case <-ctx.Done():
+			return true, ctx.Err()
+		case <-routerDone:
+			return true, ErrRouterClosed
+		case <-sessionDone:
+			return true, ErrClosed
+		case <-ownerDone:
+			return true, ownerErr
+		}
+	}
+}
+
+func capacityAcquireError(
+	ctx context.Context,
+	routerDone <-chan struct{},
+	sessionDone <-chan struct{},
+	ownerDone <-chan struct{},
+	ownerErr error,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if channelClosed(routerDone) {
+		return ErrRouterClosed
+	}
+	if channelClosed(sessionDone) {
+		return ErrClosed
+	}
+	if channelClosed(ownerDone) {
+		return ownerErr
+	}
+	return nil
 }
 
 func releaseCapacity(slots <-chan struct{}) {
