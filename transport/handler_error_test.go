@@ -109,6 +109,23 @@ func TestInvokeHandlerReturnsResultAndRecoversPanics(t *testing.T) {
 	}
 }
 
+func TestInvokeBatchHandlerReturnsResultAndRecoversPanics(t *testing.T) {
+	accepted, err := InvokeBatchHandler(func([]core.Context) bool { return true }, nil)
+	if err != nil || !accepted {
+		t.Fatalf("InvokeBatchHandler() = (accepted %v, error %v)", accepted, err)
+	}
+	panicErr := errors.New("batch panic")
+	accepted, err = InvokeBatchHandler(func([]core.Context) bool {
+		panic(panicErr)
+	}, nil)
+	if accepted || !errors.Is(err, core.ErrRecovered) || !errors.Is(err, panicErr) {
+		t.Fatalf("panic result = (accepted %v, error %v)", accepted, err)
+	}
+	if accepted, err = InvokeBatchHandler(nil, nil); accepted || !errors.Is(err, core.ErrNilHandler) {
+		t.Fatalf("nil handler result = (accepted %v, error %v)", accepted, err)
+	}
+}
+
 func TestInvokeOwnedHandlerKeepsBufferUntilRouterCompletion(t *testing.T) {
 	router := core.NewRouter(core.RouterConfig{
 		SyncQueueSize:         1,

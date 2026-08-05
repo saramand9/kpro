@@ -35,6 +35,7 @@ const (
 	DefaultReadTimeout            = 90 * time.Second
 	DefaultWriteTimeout           = 5 * time.Second
 	defaultPayloadPoolShards      = 64
+	defaultMaxReadBatchFrames     = 16
 )
 
 // Config controls TCP listener, codec, queue, and timeout settings.
@@ -92,6 +93,7 @@ type Server struct {
 	dispatch    *dispatchgate.Gate
 	payloadPool *bufferpool.ShardedPool
 	reuseCodec  codec.ReusableStreamCodec
+	bufferCodec codec.BufferedStreamCodec
 
 	nextID    uint64
 	active    int64
@@ -115,6 +117,7 @@ func New(config Config) *Server {
 		ready: make(chan struct{}),
 	}
 	server.reuseCodec, _ = normalized.Codec.(codec.ReusableStreamCodec)
+	server.bufferCodec, _ = normalized.Codec.(codec.BufferedStreamCodec)
 	return server
 }
 
@@ -138,6 +141,24 @@ func (s *Server) Ready() <-chan struct{} {
 
 // ListenAndServe accepts TCP connections until ctx is cancelled or the listener fails.
 func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error {
+	return s.listenAndServe(ctx, handler, nil)
+}
+
+// ListenAndServeBatch enables optional same-read message batching while
+// preserving the ordinary handler as an exact fallback.
+func (s *Server) ListenAndServeBatch(
+	ctx context.Context,
+	handler core.Handler,
+	batchHandler transportapi.BatchHandler,
+) error {
+	return s.listenAndServe(ctx, handler, batchHandler)
+}
+
+func (s *Server) listenAndServe(
+	ctx context.Context,
+	handler core.Handler,
+	batchHandler transportapi.BatchHandler,
+) error {
 	if err := s.Validate(); err != nil {
 		return err
 	}
@@ -189,7 +210,7 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 			done:      make(chan struct{}),
 		}
 		session.payloadPool = s.payloadPool.Shard(id)
-		if !s.registerSession(session, handler) {
+		if !s.registerSessionWithBatch(session, handler, batchHandler) {
 			_ = raw.Close()
 			s.releaseConnectionSlot()
 		}
@@ -276,13 +297,21 @@ func (s *Server) isAccepting() bool {
 }
 
 func (s *Server) registerSession(session *session, handler core.Handler) bool {
+	return s.registerSessionWithBatch(session, handler, nil)
+}
+
+func (s *Server) registerSessionWithBatch(
+	session *session,
+	handler core.Handler,
+	batchHandler transportapi.BatchHandler,
+) bool {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
 	if !s.accepting {
 		return false
 	}
 	s.sessions.Store(session.id, session)
-	session.start(handler)
+	session.start(handler, batchHandler)
 	return true
 }
 
@@ -325,6 +354,13 @@ type session struct {
 	readPayloadSize      int
 	writeDeadlineRefresh time.Time
 	closeOnce            sync.Once
+	readFrames           [defaultMaxReadBatchFrames]inboundFrame
+	readContexts         [defaultMaxReadBatchFrames]core.Context
+}
+
+type inboundFrame struct {
+	message core.Message
+	buffer  []byte
 }
 
 func (s *session) outboundPayloadPool() *bufferpool.Pool {
@@ -340,7 +376,9 @@ func (s *session) ReleaseTransportBuffer(buffer []byte) {
 
 var _ core.OutboundStateProvider = (*session)(nil)
 var _ core.OutboundWritableWaiter = (*session)(nil)
+var _ core.OwnedPayloadSender = (*session)(nil)
 var _ transportapi.Quiescer = (*Server)(nil)
+var _ transportapi.BatchMessageServer = (*Server)(nil)
 
 func (s *session) ID() uint64 {
 	return s.id
@@ -377,6 +415,49 @@ func (s *session) Send(msg core.Message) error {
 	if err != nil {
 		return err
 	}
+	if err := reservation.Commit(frame, frame.wireBytes()); err != nil {
+		frame.release()
+		return s.outboundError(err)
+	}
+	return nil
+}
+
+// SendOwnedPayload consumes one transport Context reference on every return
+// path. Segmented codecs can retain Message.Data directly until frame
+// completion; other codecs preserve correctness by falling back to Send.
+func (s *session) SendOwnedPayload(msg core.Message, owner *core.BaseContext) error {
+	ownerTransferred := false
+	defer func() {
+		if !ownerTransferred {
+			core.ReleaseTransportContext(owner)
+		}
+	}()
+	select {
+	case <-s.done:
+		return core.ErrClosed
+	default:
+	}
+	if err := validateSegmentedPayloadSize(s.server.config.Codec, len(msg.Data)); err != nil {
+		return err
+	}
+	headerSize, segmented := segmentedHeaderSize(s.server.config.Codec)
+	if !segmented {
+		return s.Send(msg)
+	}
+	reservation, err := s.sendQueue.Reserve(
+		outbound.EstimateBytes(len(msg.Data), int64(headerSize)),
+	)
+	if err != nil {
+		return s.outboundError(err)
+	}
+	defer reservation.Cancel()
+	frame, err := s.segmentedFrame(msg, msg.Data)
+	if err != nil {
+		return err
+	}
+	frame.pool = nil
+	frame.owned = owner
+	ownerTransferred = true
 	if err := reservation.Commit(frame, frame.wireBytes()); err != nil {
 		frame.release()
 		return s.outboundError(err)
@@ -436,12 +517,12 @@ func (s *session) WaitOutboundWritable(ctx context.Context) error {
 	}
 }
 
-func (s *session) start(handler core.Handler) {
-	go s.readLoop(handler)
+func (s *session) start(handler core.Handler, batchHandler transportapi.BatchHandler) {
+	go s.readLoop(handler, batchHandler)
 	go s.writeLoop()
 }
 
-func (s *session) readLoop(handler core.Handler) {
+func (s *session) readLoop(handler core.Handler, batchHandler transportapi.BatchHandler) {
 	preserveSession := false
 	var readDeadlineRefresh time.Time
 	if timeout := s.server.config.ReadTimeout; timeout > 0 {
@@ -479,7 +560,18 @@ func (s *session) readLoop(handler core.Handler) {
 				readDeadlineRefresh = now.Add(s.server.config.ReadTimeout / 2)
 			}
 		}
-		result, readBuffer, err := s.readFrame()
+		var result codec.ReadResult
+		var readBuffer []byte
+		var err error
+		if batchHandler == nil {
+			result, readBuffer, err = s.readFrame()
+		} else {
+			var buffered bool
+			result, readBuffer, buffered, err = s.readBufferedFrame()
+			if err == nil && !buffered {
+				result, readBuffer, err = s.readFrame()
+			}
+		}
 		if err != nil {
 			preserveSession = s.server.dispatch.Stopped()
 			if err == io.EOF {
@@ -487,28 +579,32 @@ func (s *session) readLoop(handler core.Handler) {
 			}
 			return
 		}
-		msg := result.Message
-		if !s.server.dispatch.Begin() {
-			s.ReleaseTransportBuffer(readBuffer)
-			preserveSession = true
-			return
-		}
-		keepReading := func() bool {
-			defer s.server.dispatch.End()
-			if msg.ID == core.MsgHeartbeat {
-				_ = s.Send(core.Message{ID: core.MsgPong, Seq: msg.Seq})
-				s.ReleaseTransportBuffer(readBuffer)
-				return true
+		frameCount := 1
+		s.readFrames[0] = inboundFrame{message: result.Message, buffer: readBuffer}
+		var bufferedErr error
+		if batchHandler != nil {
+			for frameCount < len(s.readFrames) {
+				if s.server.dispatch.Stopped() {
+					s.releaseInboundFrames(frameCount)
+					preserveSession = true
+					return
+				}
+				next, nextBuffer, complete, nextErr := s.readBufferedFrame()
+				if nextErr != nil {
+					bufferedErr = nextErr
+					break
+				}
+				if !complete {
+					break
+				}
+				s.readFrames[frameCount] = inboundFrame{
+					message: next.Message,
+					buffer:  nextBuffer,
+				}
+				frameCount++
 			}
-			err = transportapi.InvokeOwnedHandler(handler, s, msg, readBuffer, s)
-			return transportapi.ContinueAfterHandlerError(
-				s.server.config.HandlerErrorPolicy,
-				s.server.config.OnHandlerError,
-				s,
-				msg,
-				err,
-			)
-		}()
+		}
+		keepReading := s.dispatchInboundFrames(handler, batchHandler, frameCount)
 		if s.server.dispatch.Stopped() {
 			preserveSession = true
 			return
@@ -516,6 +612,156 @@ func (s *session) readLoop(handler core.Handler) {
 		if !keepReading {
 			return
 		}
+		if bufferedErr != nil {
+			return
+		}
+	}
+}
+
+func (s *session) dispatchInboundFrames(
+	handler core.Handler,
+	batchHandler transportapi.BatchHandler,
+	count int,
+) bool {
+	for start := 0; start < count; {
+		if s.readFrames[start].message.ID == core.MsgHeartbeat {
+			if !s.dispatchHeartbeat(start) {
+				s.releaseInboundFramesRange(start+1, count)
+				return false
+			}
+			start++
+			continue
+		}
+
+		end := start + 1
+		for end < count && s.readFrames[end].message.ID != core.MsgHeartbeat {
+			end++
+		}
+		if batchHandler != nil && end-start > 1 {
+			if !s.dispatchInboundBatch(handler, batchHandler, start, end) {
+				s.releaseInboundFramesRange(end, count)
+				return false
+			}
+		} else {
+			for index := start; index < end; index++ {
+				if !s.dispatchInboundOne(handler, index) {
+					s.releaseInboundFramesRange(index+1, count)
+					return false
+				}
+			}
+		}
+		start = end
+	}
+	return true
+}
+
+func (s *session) dispatchHeartbeat(index int) bool {
+	frame := s.readFrames[index]
+	s.readFrames[index] = inboundFrame{}
+	if !s.server.dispatch.Begin() {
+		s.ReleaseTransportBuffer(frame.buffer)
+		return false
+	}
+	defer s.server.dispatch.End()
+	_ = s.Send(core.Message{ID: core.MsgPong, Seq: frame.message.Seq})
+	s.ReleaseTransportBuffer(frame.buffer)
+	return true
+}
+
+func (s *session) dispatchInboundOne(handler core.Handler, index int) bool {
+	frame := s.readFrames[index]
+	s.readFrames[index] = inboundFrame{}
+	if !s.server.dispatch.Begin() {
+		s.ReleaseTransportBuffer(frame.buffer)
+		return false
+	}
+	defer s.server.dispatch.End()
+	err := transportapi.InvokeOwnedHandler(handler, s, frame.message, frame.buffer, s)
+	return transportapi.ContinueAfterHandlerError(
+		s.server.config.HandlerErrorPolicy,
+		s.server.config.OnHandlerError,
+		s,
+		frame.message,
+		err,
+	)
+}
+
+func (s *session) dispatchInboundBatch(
+	handler core.Handler,
+	batchHandler transportapi.BatchHandler,
+	start int,
+	end int,
+) bool {
+	if !s.server.dispatch.Begin() {
+		s.releaseInboundFramesRange(start, end)
+		return false
+	}
+	defer s.server.dispatch.End()
+
+	firstMessage := s.readFrames[start].message
+	contexts := s.readContexts[:end-start]
+	for index := start; index < end; index++ {
+		frame := s.readFrames[index]
+		contexts[index-start] = core.AcquireOwnedTransportContext(
+			s,
+			frame.message,
+			frame.buffer,
+			s,
+		)
+		s.readFrames[index] = inboundFrame{}
+	}
+	accepted, batchErr := transportapi.InvokeBatchHandler(batchHandler, contexts)
+	if batchErr != nil {
+		for index := range contexts {
+			core.ReleaseTransportContext(contexts[index])
+			contexts[index] = nil
+		}
+		return transportapi.ContinueAfterHandlerError(
+			s.server.config.HandlerErrorPolicy,
+			s.server.config.OnHandlerError,
+			s,
+			firstMessage,
+			batchErr,
+		)
+	}
+	if accepted {
+		for index := range contexts {
+			core.ReleaseTransportContext(contexts[index])
+			contexts[index] = nil
+		}
+		return true
+	}
+
+	for index, dispatchContext := range contexts {
+		message := dispatchContext.Message()
+		err := transportapi.InvokeContextHandler(handler, dispatchContext)
+		core.ReleaseTransportContext(dispatchContext)
+		contexts[index] = nil
+		if !transportapi.ContinueAfterHandlerError(
+			s.server.config.HandlerErrorPolicy,
+			s.server.config.OnHandlerError,
+			s,
+			message,
+			err,
+		) {
+			for remaining := index + 1; remaining < len(contexts); remaining++ {
+				core.ReleaseTransportContext(contexts[remaining])
+				contexts[remaining] = nil
+			}
+			return false
+		}
+	}
+	return true
+}
+
+func (s *session) releaseInboundFrames(count int) {
+	s.releaseInboundFramesRange(0, count)
+}
+
+func (s *session) releaseInboundFramesRange(start int, end int) {
+	for index := start; index < end; index++ {
+		s.ReleaseTransportBuffer(s.readFrames[index].buffer)
+		s.readFrames[index] = inboundFrame{}
 	}
 }
 
@@ -549,6 +795,29 @@ func (s *session) readFrame() (codec.ReadResult, []byte, error) {
 	}
 	s.readPayloadSize = len(result.Message.Data)
 	return result, owned, nil
+}
+
+func (s *session) readBufferedFrame() (codec.ReadResult, []byte, bool, error) {
+	if s.server.bufferCodec == nil || s.readBuffer == nil {
+		return codec.ReadResult{}, nil, false, nil
+	}
+	result, complete, err := s.server.bufferCodec.DecodeBuffered(
+		s.readBuffer.bufferedBytes(),
+		s.server.config.MaxFrameSize,
+	)
+	if err != nil || !complete {
+		return codec.ReadResult{}, nil, false, err
+	}
+
+	var owned []byte
+	if payloadSize := len(result.Message.Data); payloadSize > 0 {
+		owned = s.outboundPayloadPool().GetUninitialized(payloadSize)
+		copy(owned, result.Message.Data)
+		result.Message.Data = owned
+		s.readPayloadSize = payloadSize
+	}
+	s.readBuffer.discardBuffered(result.Bytes)
+	return result, owned, true, nil
 }
 
 func (s *session) writeLoop() {

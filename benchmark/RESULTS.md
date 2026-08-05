@@ -1,5 +1,93 @@
 # KPro benchmark results
 
+## 2026-08-05 bounded receive batch candidate
+
+Environment and measured source:
+
+```text
+goos: windows
+goarch: amd64
+go: go1.26.4
+jdk: 21.0.3
+cpu: Intel(R) Core(TM) i5-14400
+KPro base commit: d0f037f955d971bb580570ad3d2ba402bcabaded
+KPro candidate Go-source manifest SHA-256: 81cded3eb3232cb7c6094c8967ecd9b592459ab8bf1caa750511589f597ab088
+KPro server executable SHA-256: 264f44210640af492c585406f7bfe45a8382b6747a6ebb74755808d1a00a291c
+load-generator executable SHA-256: c05619b257cfa26288e91e5092a2b6579e45d32e30d407f3f861a7f700c041be
+Netty commit: b022b4786f2b8258ea75d5b613957a01f2246c5b
+```
+
+The source manifest hashes the sorted path plus Git blob ID of every `*.go`
+file, `go.mod`, `go.sum`, and `benchmark/budgets.json` in the dirty candidate
+worktree. It excludes documentation and saved output. The Netty NIO fixture is
+saved at
+[`benchmark/fixtures/netty/NettyKProEchoServer.java`](fixtures/netty/NettyKProEchoServer.java);
+its SHA-256 is
+`5a9fc10a2f4d52023dd88dea92e1be791396e4346b96a2f98c0533e344ace1c1`.
+
+### One-variable candidate decisions
+
+Each end-to-end A/B used fresh processes, full payload validation, server
+affinity on logical CPUs 0-7, load-generator affinity on CPUs 8-15,
+`GOMAXPROCS=8`, two seconds of warm-up, ten seconds of measurement, and the
+balanced order `B-C-C-B-C-B-B-C`. Percentages below are paired-median changes
+from the named baseline. A microbenchmark result was never accepted by itself.
+
+| Candidate | Isolated evidence | Decision |
+| --- | --- | --- |
+| Buffered KProV1 decoding alone | After-first-frame decode segment: 490.4 -> 407.5 ns (-16.9%, equivalent +20.3%), 0 allocations; T07 throughput -1.2%, CPU/message -0.6% | Not a standalone direct-TCP optimization; retained only as bounded plumbing for endpoint batching |
+| Buffered decode plus Router batch admission | Router 16-message segment: 11.11 -> 8.75 us (-21.2%), 0 allocations; cumulative versus clean: T07 throughput +2.5%, CPU/message -14.7%; T08 throughput -0.3%, CPU/message -13.3% | Retained for robust CPU reduction with exact per-message fallback |
+| Copy small gathered writes into one contiguous buffer | T07 paired throughput +1.3%, CPU/message +2.7%; standalone medians did not confirm the throughput gain | Rejected and removed |
+| Weighted capacity credits for a batch | T07 throughput +3.6%, CPU/message -5.5%; T08 throughput -1.7%, CPU/message -1.5% | Rejected and removed because T08 throughput regressed |
+| Direct-mapped session-executor cache | Isolated lookup did not beat the ordinary path; profile-based maximum benefit was below roughly 1% | Rejected and removed |
+| Two-slot session-local buffer magazine | Pool microbenchmark 44.16 -> 34.24 ns (-22.5%); T07 throughput -3.4%, CPU/message -1.8% | Rejected and removed because end-to-end throughput regressed |
+| Explicit `core.ReplyCurrentPayload` | 64 B reply segment: 255.0 -> 208.3 ns (-18.3%), 0 allocations; versus ordinary reply: T04 throughput +2.7%, CPU/message -4.2%; T07 +1.8%/-2.9%; T08 -0.7%/-2.3% | Retained as an explicit workload-specific API; normal `Reply` copy semantics remain unchanged |
+
+The retained Router path accepts only 2-32 same-session synchronous contexts
+under `BackpressureReject` when the whole group fits every capacity limit.
+Any unsupported shape returns `false` without retaining a Context or accepting
+a task; TCP then uses ordinary per-message dispatch. TCP itself collects at
+most 16 complete frames already present in its adaptive reader and splits
+groups at heartbeat messages. Direct `tcp.Server.ListenAndServe` keeps the
+original receive path.
+
+### Current KPro/Netty loopback diagnostic
+
+The comparison used four fresh processes per implementation per cell in
+`K-N-N-K-N-K-K-N` order. KPro and the load generator used `GOMAXPROCS=8`;
+Netty used `-XX:ActiveProcessorCount=8`. Values are medians of the four
+processes. CPU is server CPU seconds per one million fully validated responses.
+
+| Case | KPro msg/s | Netty msg/s | KPro gap | p50 K/N | p99 K/N | p99.9 K/N | CPU seconds/million K/N |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| T04: 64 conn, 16 KiB, inflight/coalesce 1 | 78,114 | 81,519 | -4.2% | 0.864/0.999 ms | 2.407/2.718 ms | 6.654/8.758 ms | 37.473/33.081 |
+| T07: 64 conn, 64 B, inflight/coalesce 16 | 1,599,423 | 1,769,514 | -9.6% | 0.995/0.815 ms | 2.455/2.001 ms | 4.719/3.692 ms | 2.901/1.891 |
+| T08: 256 conn, 1 KiB, inflight/coalesce 16 | 831,994 | 982,788 | -15.3% | 5.000/4.000 ms | 8.365/6.716 ms | 14.980/11.068 ms | 4.645/2.710 |
+
+All 24 measured processes reported `validation_errors=0` and `io_errors=0`.
+The exact process samples, including incomplete final groups and
+window-boundary timeouts, are saved in
+[`results/2026-08-05-kpro-netty-loopback.csv`](results/2026-08-05-kpro-netty-loopback.csv).
+
+The Netty lane cumulatively decodes and echoes a retained wire buffer on its
+EventLoop. The KPro lane uses a mounted Endpoint, Router admission, recovery
+middleware, per-session execution, ordinary `ctx.Reply` copying, outbound
+accounting, and a writer goroutine. The optional `ReplyCurrentPayload` path was
+not enabled. This short Windows closed-loop result is an implementation
+diagnostic, not an equal-semantics framework ranking or production-capacity
+claim. The interpretation and future acceptance gates are in
+[`docs/netty-performance-baseline.md`](../docs/netty-performance-baseline.md#2026-08-05-bounded-receive-batch-candidate-and-loopback-retest).
+
+### Candidate verification
+
+After the retained changes:
+
+- `go test -p 1 ./... -count=1` passed;
+- `go test -race -p 1 ./core ./server ./transport/... ./observability/... ./eventing/... ./cmd/kpro ./cmd/benchguard -count=1` passed;
+- `go vet ./...` passed;
+- `go mod tidy -diff` produced no changes; and
+- `git diff --check` passed.
+
 ## 2026-08-03 FastPath regression baseline
 
 Environment:
@@ -490,4 +578,3 @@ Notes:
 - KPro `httpx` is backed by raw `fasthttp` in this run.
 - KPro now matches Fiber allocation counts in the common 64B/1024B sequential and 64-worker cases, and is one allocation lower at 1024B/16c.
 - On this Windows localhost run, KPro is ahead at 16 workers and near parity at sequential/64 workers, with visible run-to-run variance.
-

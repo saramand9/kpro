@@ -89,3 +89,21 @@ func (r *adaptiveReader) takeReadError() error {
 	r.readErr = nil
 	return err
 }
+
+func (r *adaptiveReader) bufferedBytes() []byte {
+	if r == nil || r.start == r.end {
+		return nil
+	}
+	return r.buffer[r.start:r.end]
+}
+
+func (r *adaptiveReader) discardBuffered(size int) {
+	if r == nil || size < 0 || size > r.end-r.start {
+		panic("tcp: invalid buffered discard")
+	}
+	r.start += size
+	if r.start == r.end {
+		r.start = 0
+		r.end = 0
+	}
+}

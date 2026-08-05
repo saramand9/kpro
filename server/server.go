@@ -1158,7 +1158,12 @@ func (e *Endpoint) ListenAndServe(ctx context.Context) error {
 		}
 	}()
 
-	serveErr := e.transport.ListenAndServe(serveCtx, e.dispatch)
+	var serveErr error
+	if batchTransport, ok := e.transport.(transport.BatchMessageServer); ok {
+		serveErr = batchTransport.ListenAndServeBatch(serveCtx, e.dispatch, e.dispatchBatch)
+	} else {
+		serveErr = e.transport.ListenAndServe(serveCtx, e.dispatch)
+	}
 	close(serveReturned)
 	cancelServe()
 	return errors.Join(serveErr, <-shutdownResult)
@@ -1196,4 +1201,8 @@ func (e *Endpoint) dispatch(ctx core.Context) error {
 	// unexpected EOF for clients.
 	_ = e.router.Dispatch(ctx)
 	return nil
+}
+
+func (e *Endpoint) dispatchBatch(contexts []core.Context) bool {
+	return e.router.TryDispatchSyncBatch(contexts)
 }
