@@ -1,9 +1,11 @@
 package transport
 
 import (
+	"context"
 	"errors"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/saramand9/kpro/core"
 )
@@ -107,6 +109,56 @@ func TestInvokeHandlerReturnsResultAndRecoversPanics(t *testing.T) {
 	}
 }
 
+func TestInvokeOwnedHandlerKeepsBufferUntilRouterCompletion(t *testing.T) {
+	router := core.NewRouter(core.RouterConfig{
+		SyncQueueSize:         1,
+		MaxInflightPerSession: 1,
+	})
+	started := make(chan struct{})
+	finish := make(chan struct{})
+	router.HandleSync(17, func(core.Context) error {
+		close(started)
+		<-finish
+		return nil
+	})
+
+	owner := &handlerTestBufferOwner{released: make(chan []byte, 1)}
+	buffer := make([]byte, 16, 64)
+	err := InvokeOwnedHandler(
+		router.Dispatch,
+		&handlerErrorTestSession{id: 7},
+		core.Message{ID: 17, Data: buffer[:16]},
+		buffer,
+		owner,
+	)
+	if err != nil {
+		t.Fatalf("InvokeOwnedHandler() error = %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("Router handler did not start")
+	}
+	select {
+	case <-owner.released:
+		t.Fatal("buffer was released while Router handler still owned the Context")
+	default:
+	}
+
+	close(finish)
+	select {
+	case released := <-owner.released:
+		if cap(released) != cap(buffer) || &released[:1][0] != &buffer[:1][0] {
+			t.Fatal("owner received a different buffer")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("buffer was not released after Router completion")
+	}
+	if err := router.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown Router: %v", err)
+	}
+}
+
 func TestRecoveredDispatchErrorStillUsesHandlerPolicy(t *testing.T) {
 	err := InvokeHandler(func(core.Context) error {
 		panic(core.ErrDispatchQueueFull)
@@ -131,6 +183,14 @@ func TestHandlerErrorPolicyRejectsUnknownValue(t *testing.T) {
 type handlerErrorTestSession struct {
 	id     uint64
 	remote net.Addr
+}
+
+type handlerTestBufferOwner struct {
+	released chan []byte
+}
+
+func (o *handlerTestBufferOwner) ReleaseTransportBuffer(buffer []byte) {
+	o.released <- buffer
 }
 
 func (s *handlerErrorTestSession) ID() uint64              { return s.id }

@@ -90,19 +90,23 @@ type InvocationOptions struct {
 
 // BaseInvocation is the default Invocation implementation.
 type BaseInvocation struct {
-	ctx       context.Context
-	transport Transport
-	operation string
-	connID    uint64
-	remote    string
-	headers   map[string]string
-	meta      map[string]any
-	payload   any
-	native    any
-	done      <-chan struct{}
-	connDone  <-chan struct{}
-	values    map[string]any
-	cleanup   func()
+	ctx              context.Context
+	contextMerged    bool
+	transport        Transport
+	operation        string
+	connID           uint64
+	remote           string
+	remoteLoaded     bool
+	headers          map[string]string
+	meta             map[string]any
+	payload          any
+	messagePayload   []byte
+	isMessagePayload bool
+	native           any
+	done             <-chan struct{}
+	connDone         <-chan struct{}
+	values           map[string]any
+	cleanup          func()
 }
 
 var messageInvocationPool = sync.Pool{
@@ -118,17 +122,19 @@ func NewInvocation(opts InvocationOptions) *BaseInvocation {
 		ctx = context.Background()
 	}
 	return &BaseInvocation{
-		ctx:       ctx,
-		transport: opts.Transport,
-		operation: opts.Operation,
-		connID:    opts.ConnID,
-		remote:    opts.Remote,
-		headers:   cloneStringMap(opts.Headers),
-		meta:      cloneAnyMap(opts.Meta),
-		payload:   opts.Payload,
-		native:    opts.Native,
-		done:      opts.Done,
-		connDone:  opts.ConnDone,
+		ctx:           ctx,
+		contextMerged: true,
+		transport:     opts.Transport,
+		operation:     opts.Operation,
+		connID:        opts.ConnID,
+		remote:        opts.Remote,
+		remoteLoaded:  true,
+		headers:       cloneStringMap(opts.Headers),
+		meta:          cloneAnyMap(opts.Meta),
+		payload:       opts.Payload,
+		native:        opts.Native,
+		done:          opts.Done,
+		connDone:      opts.ConnDone,
 	}
 }
 
@@ -168,20 +174,19 @@ func initializeMessageInvocation(
 	operation string,
 ) {
 	done := SessionDone(msgCtx.Session())
-	invocationCtx, cleanup := mergeSessionContext(ctx, done)
+	ctx = normalizeContext(ctx)
 	*invocation = BaseInvocation{
-		ctx:       invocationCtx,
-		transport: msgCtx.Transport(),
-		operation: operation,
-		connID:    msgCtx.ConnID(),
-		remote:    msgCtx.RemoteAddr(),
-		headers:   cloneStringMap(msg.Headers),
-		meta:      cloneAnyMap(msg.Meta),
-		payload:   msg.Data,
-		native:    msgCtx,
-		done:      done,
-		connDone:  done,
-		cleanup:   cleanup,
+		ctx:              ctx,
+		transport:        msgCtx.Transport(),
+		operation:        operation,
+		connID:           msgCtx.ConnID(),
+		headers:          cloneStringMap(msg.Headers),
+		meta:             cloneAnyMap(msg.Meta),
+		messagePayload:   msg.Data,
+		isMessagePayload: true,
+		native:           msgCtx,
+		done:             done,
+		connDone:         done,
 	}
 }
 
@@ -258,6 +263,10 @@ func InvocationConnDone(invocation Invocation) <-chan struct{} {
 
 // Context returns the request or stream context associated with the invocation.
 func (c *BaseInvocation) Context() context.Context {
+	if !c.contextMerged {
+		c.ctx, c.cleanup = mergeSessionContext(c.ctx, c.done)
+		c.contextMerged = true
+	}
 	return c.ctx
 }
 
@@ -278,6 +287,12 @@ func (c *BaseInvocation) ConnID() uint64 {
 
 // RemoteAddr returns the peer address string when one is available.
 func (c *BaseInvocation) RemoteAddr() string {
+	if !c.remoteLoaded {
+		if source, ok := c.native.(interface{ RemoteAddr() string }); ok {
+			c.remote = source.RemoteAddr()
+		}
+		c.remoteLoaded = true
+	}
 	return c.remote
 }
 
@@ -293,6 +308,9 @@ func (c *BaseInvocation) Meta() map[string]any {
 
 // Payload returns the protocol-specific request payload view.
 func (c *BaseInvocation) Payload() any {
+	if c.isMessagePayload {
+		return c.messagePayload
+	}
 	return c.payload
 }
 
@@ -314,6 +332,17 @@ func (c *BaseInvocation) ConnDone() <-chan struct{} {
 // Release releases cancellation callbacks owned by a message invocation.
 // It is safe to call more than once.
 func (c *BaseInvocation) Release() {
+	// A cancelable caller context owns a merge callback even when middleware did
+	// not ask for Context during handling. Materialize it here so Release keeps
+	// its documented cancellation behavior. The common background-context
+	// message path remains lazy and allocation-free.
+	if !c.contextMerged &&
+		c.ctx != nil &&
+		c.ctx.Done() != nil &&
+		c.done != nil &&
+		c.ctx.Done() != c.done {
+		_ = c.Context()
+	}
 	cleanup := c.cleanup
 	c.cleanup = nil
 	if cleanup != nil {

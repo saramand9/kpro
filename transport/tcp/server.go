@@ -4,7 +4,6 @@
 package tcp
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -32,8 +31,10 @@ const (
 	DefaultMaxWriteBatchBytes     = 256 * 1024
 	DefaultMaxWriteBatchDelay     = 2 * time.Microsecond
 	DefaultMaxRetainedBufferBytes = 4 * 1024 * 1024
+	DefaultMaxReadBufferSize      = 32 * 1024
 	DefaultReadTimeout            = 90 * time.Second
 	DefaultWriteTimeout           = 5 * time.Second
+	defaultPayloadPoolShards      = 64
 )
 
 // Config controls TCP listener, codec, queue, and timeout settings.
@@ -61,11 +62,15 @@ type Config struct {
 	// MaxWriteBatchDelay is the bounded coalescing window used when a writer
 	// observes only one queued frame. Non-positive values use the default.
 	MaxWriteBatchDelay time.Duration
-	// MaxRetainedBufferBytes caps idle payload memory kept by the shared
-	// size-class pool. Queue limits bound admitted wire bytes and frame count;
-	// active size-class capacity can be larger than logical payload bytes.
+	// MaxRetainedBufferBytes caps idle inbound and outbound payload memory
+	// across the server's sharded size-class pools. Queue and Router limits
+	// separately bound active buffers and admitted work.
 	MaxRetainedBufferBytes int64
-	// ReadTimeout is applied before each frame read.
+	// MaxReadBufferSize caps per-connection adaptive receive aggregation.
+	// Buffers start at 4 KiB and grow only when lower-level reads fill them.
+	MaxReadBufferSize int
+	// ReadTimeout bounds read inactivity. The transport establishes a deadline
+	// before reading and refreshes it by a bounded time window under traffic.
 	ReadTimeout time.Duration
 	// WriteTimeout bounds an inactive or blocked write. The transport refreshes
 	// it per write activity window rather than before every batch.
@@ -85,7 +90,8 @@ type Server struct {
 	accepting   bool
 	started     bool
 	dispatch    *dispatchgate.Gate
-	payloadPool *bufferpool.Pool
+	payloadPool *bufferpool.ShardedPool
+	reuseCodec  codec.ReusableStreamCodec
 
 	nextID    uint64
 	active    int64
@@ -97,17 +103,19 @@ type Server struct {
 // New creates a TCP transport with normalized defaults.
 func New(config Config) *Server {
 	normalized := normalizeConfig(config)
-	return &Server{
+	server := &Server{
 		config:    normalized,
 		rawConfig: config,
 		accepting: true,
 		dispatch:  dispatchgate.New(),
-		payloadPool: bufferpool.New(bufferpool.Config{
+		payloadPool: bufferpool.NewSharded(bufferpool.Config{
 			MaxRetainedBytes: normalized.MaxRetainedBufferBytes,
 			MaxPooledSize:    DefaultMaxFrameSize,
-		}),
+		}, defaultPayloadPoolShards),
 		ready: make(chan struct{}),
 	}
+	server.reuseCodec, _ = normalized.Codec.(codec.ReusableStreamCodec)
+	return server
 }
 
 // NewServer is an alias for New.
@@ -180,6 +188,7 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) error
 			sendQueue: newSessionOutboundQueue(s.config),
 			done:      make(chan struct{}),
 		}
+		session.payloadPool = s.payloadPool.Shard(id)
 		if !s.registerSession(session, handler) {
 			_ = raw.Close()
 			s.releaseConnectionSlot()
@@ -310,10 +319,23 @@ type session struct {
 	server               *Server
 	raw                  net.Conn
 	sendQueue            *outbound.Queue[outboundFrame]
+	payloadPool          *bufferpool.Pool
 	done                 chan struct{}
-	readBuffer           *bufio.Reader
+	readBuffer           *adaptiveReader
+	readPayloadSize      int
 	writeDeadlineRefresh time.Time
 	closeOnce            sync.Once
+}
+
+func (s *session) outboundPayloadPool() *bufferpool.Pool {
+	if s.payloadPool != nil {
+		return s.payloadPool
+	}
+	return s.server.payloadPool.Shard(s.id)
+}
+
+func (s *session) ReleaseTransportBuffer(buffer []byte) {
+	s.outboundPayloadPool().Put(buffer)
 }
 
 var _ core.OutboundStateProvider = (*session)(nil)
@@ -447,10 +469,6 @@ func (s *session) readLoop(handler core.Handler) {
 			preserveSession = true
 			return
 		}
-		if s.server.dispatch.Stopped() {
-			preserveSession = true
-			return
-		}
 		if !readDeadlineRefresh.IsZero() {
 			now := time.Now()
 			if !now.Before(readDeadlineRefresh) {
@@ -461,7 +479,7 @@ func (s *session) readLoop(handler core.Handler) {
 				readDeadlineRefresh = now.Add(s.server.config.ReadTimeout / 2)
 			}
 		}
-		result, err := s.readFrame()
+		result, readBuffer, err := s.readFrame()
 		if err != nil {
 			preserveSession = s.server.dispatch.Stopped()
 			if err == io.EOF {
@@ -471,6 +489,7 @@ func (s *session) readLoop(handler core.Handler) {
 		}
 		msg := result.Message
 		if !s.server.dispatch.Begin() {
+			s.ReleaseTransportBuffer(readBuffer)
 			preserveSession = true
 			return
 		}
@@ -478,9 +497,10 @@ func (s *session) readLoop(handler core.Handler) {
 			defer s.server.dispatch.End()
 			if msg.ID == core.MsgHeartbeat {
 				_ = s.Send(core.Message{ID: core.MsgPong, Seq: msg.Seq})
+				s.ReleaseTransportBuffer(readBuffer)
 				return true
 			}
-			err = transportapi.InvokeHandler(handler, s, msg)
+			err = transportapi.InvokeOwnedHandler(handler, s, msg, readBuffer, s)
 			return transportapi.ContinueAfterHandlerError(
 				s.server.config.HandlerErrorPolicy,
 				s.server.config.OnHandlerError,
@@ -499,11 +519,36 @@ func (s *session) readLoop(handler core.Handler) {
 	}
 }
 
-func (s *session) readFrame() (codec.ReadResult, error) {
+func (s *session) readFrame() (codec.ReadResult, []byte, error) {
 	if s.readBuffer == nil {
-		s.readBuffer = bufio.NewReaderSize(s.raw, 4*1024)
+		initialSize := min(4*1024, s.server.config.MaxReadBufferSize)
+		s.readBuffer = newAdaptiveReader(s.raw, initialSize, s.server.config.MaxReadBufferSize)
 	}
-	return s.server.config.Codec.Read(s.readBuffer, s.server.config.MaxFrameSize)
+	if s.server.reuseCodec == nil {
+		result, err := s.server.config.Codec.Read(s.readBuffer, s.server.config.MaxFrameSize)
+		return result, nil, err
+	}
+
+	pool := s.outboundPayloadPool()
+	scratch := pool.GetUninitialized(s.readPayloadSize)
+	result, owned, err := s.server.reuseCodec.ReadInto(
+		s.readBuffer,
+		s.server.config.MaxFrameSize,
+		scratch,
+	)
+	// If the codec grew scratch, the original pooled buffer is deliberately
+	// discarded instead of being returned early: a custom codec may return a
+	// subslice, and retaining both until ownership is known avoids alias bugs.
+	if err != nil {
+		pool.Put(owned)
+		return codec.ReadResult{}, nil, err
+	}
+	if len(result.Message.Data) == 0 {
+		pool.Put(owned)
+		return result, nil, nil
+	}
+	s.readPayloadSize = len(result.Message.Data)
+	return result, owned, nil
 }
 
 func (s *session) writeLoop() {
@@ -575,6 +620,9 @@ func normalizeConfig(config Config) Config {
 	}
 	if config.MaxRetainedBufferBytes <= 0 {
 		config.MaxRetainedBufferBytes = DefaultMaxRetainedBufferBytes
+	}
+	if config.MaxReadBufferSize <= 0 {
+		config.MaxReadBufferSize = DefaultMaxReadBufferSize
 	}
 	if config.ReadTimeout <= 0 {
 		config.ReadTimeout = DefaultReadTimeout

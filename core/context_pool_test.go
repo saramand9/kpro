@@ -62,3 +62,40 @@ func TestTransportContextWaitsForRouterOwnership(t *testing.T) {
 		t.Fatalf("refs after router release = %d, want 0", got)
 	}
 }
+
+func TestOwnedTransportContextReleasesBufferAfterFinalReference(t *testing.T) {
+	owner := &contextTestBufferOwner{}
+	buffer := make([]byte, 16, 64)
+	ctx := AcquireOwnedTransportContext(
+		newFakeSession(1),
+		Message{ID: 10, Data: buffer[:16]},
+		buffer,
+		owner,
+	)
+	retainRouterContext(ctx)
+	ReleaseTransportContext(ctx)
+	if owner.releases != 0 {
+		t.Fatalf("buffer releases after transport reference = %d, want 0", owner.releases)
+	}
+
+	releaseContext(ctx)
+	if owner.releases != 1 {
+		t.Fatalf("buffer releases after final reference = %d, want 1", owner.releases)
+	}
+	if cap(owner.buffer) != cap(buffer) || &owner.buffer[:1][0] != &buffer[:1][0] {
+		t.Fatal("buffer owner received a different backing allocation")
+	}
+	if ctx.transportBuffer != nil || ctx.bufferOwner != nil {
+		t.Fatal("released context retained transport buffer ownership")
+	}
+}
+
+type contextTestBufferOwner struct {
+	releases int
+	buffer   []byte
+}
+
+func (o *contextTestBufferOwner) ReleaseTransportBuffer(buffer []byte) {
+	o.releases++
+	o.buffer = buffer
+}

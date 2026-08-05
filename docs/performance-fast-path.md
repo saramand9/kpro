@@ -1,7 +1,7 @@
 # Performance fast paths
 
 This document describes the performance mechanisms currently implemented in
-the TCP and WebSocket write paths. It is an implementation guide and a
+the TCP receive/write paths and WebSocket write path. It is an implementation guide and a
 measurement contract, not a throughput, latency, or Netty-parity claim.
 
 The important distinction is ownership. KPro can avoid constructing some
@@ -50,10 +50,10 @@ promotion.
 
 ### Bounded payload reuse
 
-Each TCP server owns a concurrent, power-of-two size-class payload pool. The
-pool is deliberately bounded:
+Each TCP server owns sharded concurrent, power-of-two size-class payload
+pools. The shards share one deliberately bounded retention budget:
 
-- `MaxRetainedBufferBytes` limits idle memory retained by the server-wide pool;
+- `MaxRetainedBufferBytes` limits total idle memory retained across every shard;
 - the default retained-byte limit is 4 MiB;
 - the current pool retains buffers up to 64 KiB and discards larger buffers;
 - `MaxPendingBytes` and `SendQueueSize` continue to bound reserved, queued, and
@@ -61,9 +61,10 @@ pool is deliberately bounded:
 - queue completion and queue close both release transport-owned payloads
   exactly once.
 
-The retained-byte limit and the per-session pending-byte limit cover different
-states. The first is a hard limit on reusable idle buffer capacity after
-writes. The second limits admitted logical wire bytes, including a reservation
+The retained-byte limit and the per-session pending-byte/Router inflight limits
+cover different states. The first is a hard limit on reusable idle inbound and
+outbound buffer capacity. The others limit admitted logical wire bytes and
+active work, including a reservation
 made before encoding. Actual active allocation capacity is rounded up to a
 power-of-two class from 16 bytes through 64 KiB; it can therefore exceed the
 logical payload count (by less than 2x at 16 bytes and above, and up to 16x for
@@ -75,6 +76,29 @@ state, codec allocations, and application-owned memory.
 Application-visible reserved buffers are cleared before reuse. The internal
 `Session.Send` copy path may request uncleared scratch storage because it
 overwrites every visible byte before the buffer can be sent.
+
+### Owned reusable receive buffers
+
+TCP uses `codec.ReusableStreamCodec` when the configured codec implements it.
+The default KProV1 codec reads its header and payload sequentially into the
+same scratch allocation. The transport transfers that allocation to an owned
+message Context, so it is returned to the session's pool only after both the
+TCP handler call and any accepted Router task release their Context references.
+The next socket read therefore cannot overwrite a payload still queued in the
+Router.
+
+The adaptive per-connection reader starts at 4 KiB and grows, only after a
+completely full lower-level read, to `MaxReadBufferSize` (32 KiB by default).
+This amortizes receive syscalls under coalesced traffic without allocating the
+maximum buffer for idle connections. The codec still emits one frame per
+`ReadInto` call; KPro does not yet have Netty-style cumulative decoding that
+emits several frames from one decoder invocation.
+
+Non-reusable custom codecs keep the original `StreamCodec.Read` behavior.
+Reusable custom codecs keep compatibility but must honor the documented
+scratch ownership contract. Live receive buffers are bounded by transport and
+Router admission, while `MaxRetainedBufferBytes` bounds only idle buffers after
+their final Context reference is released.
 
 ### Bounded gather-write batching
 
@@ -168,6 +192,7 @@ Use the narrowest accurate term when describing a result:
 | Mechanism | What it can avoid | What it does not avoid |
 | --- | --- | --- |
 | Bounded buffer pool | Repeated backing allocations for eligible sizes when an idle class buffer is available | Pool misses, oversized allocations, payload copying, or socket copying |
+| Owned reusable receive buffer | Repeated receive-payload backing allocation after warm-up for reusable codecs | Socket copying, decode work, Router scheduling, or a cumulative multi-frame decoder |
 | Segmented header and payload | A contiguous header-plus-payload frame allocation and representation | Normal `Session.Send` ownership copy; user-to-kernel copy |
 | `core.OutboundBuffer` | A separate application-owned payload allocation and ownership copy when filled directly | A transport allocation on pool miss; user-to-kernel copy |
 | `net.Buffers.WriteTo` | Intermediate concatenation; it can group regions into one logical submission | A guaranteed syscall reduction; kernel copy of dynamic user memory |
@@ -193,6 +218,10 @@ Unit tests currently establish:
 - normal `Session.Send` preserves caller-copy semantics;
 - an owned outbound buffer is consumed exactly once and is returned after
   completion or release;
+- a reusable receive buffer remains owned while a Router handler is active and
+  is returned only after the final Context reference;
+- KProV1 `ReadInto` performs zero allocations with correctly sized scratch;
+- sharded pools preserve their aggregate retained-byte hard limit;
 - the idle pool does not exceed its retained-byte setting;
 - TCP and WebSocket batching preserves FIFO wire order and queue accounting;
 - write failure releases every drained item; and

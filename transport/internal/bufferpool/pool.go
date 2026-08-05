@@ -36,14 +36,7 @@ type sizeClass struct {
 // New constructs a bounded pool. A non-positive retained-byte limit disables
 // retention while preserving the allocation API.
 func New(config Config) *Pool {
-	maxSize := config.MaxPooledSize
-	if maxSize <= 0 {
-		maxSize = defaultMaxClassSize
-	}
-	if maxSize < defaultMinClassSize {
-		maxSize = defaultMinClassSize
-	}
-	maxSize = nextPowerOfTwo(maxSize)
+	maxSize := normalizedMaxPooledSize(config.MaxPooledSize)
 
 	pool := &Pool{maxRetained: max(config.MaxRetainedBytes, 0)}
 	for size := defaultMinClassSize; ; size <<= 1 {
@@ -60,6 +53,16 @@ func New(config Config) *Pool {
 		}
 	}
 	return pool
+}
+
+func normalizedMaxPooledSize(size int) int {
+	if size <= 0 {
+		size = defaultMaxClassSize
+	}
+	if size < defaultMinClassSize {
+		size = defaultMinClassSize
+	}
+	return nextPowerOfTwo(size)
 }
 
 // Get returns a zeroed slice of exactly size bytes. Buffers larger than the
