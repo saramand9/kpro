@@ -8,10 +8,10 @@ result, capacity guarantee, or claim of Netty parity.
 
 | Field | Baseline |
 | --- | --- |
-| Assessment date | 2026-08-05 |
-| KPro source | The repository revision containing this document and the segmented TCP/WebSocket FastPath work |
+| Assessment date | 2026-08-06 |
+| KPro source | `863001bbba3ddc3911a0501cd87310ebc086a510` for the latest measured diagnostic; the source comparison also follows the repository revision containing this document |
 | Netty source | Local Netty 4.2 checkout at `b022b4786f2b8258ea75d5b613957a01f2246c5b` |
-| KPro measured evidence | [FastPath regression baseline](../benchmark/RESULTS.md#2026-08-03-fastpath-regression-baseline), plus the 2026-08-04 loopback matrix below |
+| KPro measured evidence | [Expanded named TCP diagnostic](../benchmark/RESULTS.md#2026-08-06-expanded-named-tcp-loopback-diagnostic), plus the historical matrices below |
 | Comparison acceptance contract | [Performance Fast Paths](performance-fast-path.md#kpro-versus-netty-baseline-contract) |
 
 The implementation comparison comes from the two source trees. The public
@@ -220,6 +220,67 @@ per-session execution, safe receive ownership, ordinary reply copying,
 outbound accounting, and writer-goroutine submission. This is intentionally a
 repeatable implementation diagnostic, not a claim that the two framework lanes
 provide equal scheduling, overload, or blocking-handler semantics.
+
+## 2026-08-06 expanded named TCP diagnostic and PGO check
+
+The follow-up expands the corrected loopback diagnostic to T01-T09, including
+T08b, and measures three builds from the same source: ordinary KPro, KPro
+compiled with a T07-trained PGO profile, and the pinned Netty NIO fixture.
+Every case ran all six implementation-order permutations with fresh processes.
+The nine normal cases used three seconds of warm-up and eight seconds of
+measurement. T09 used one second of warm-up and two seconds of measurement to
+bound the Netty fixture's retained output for non-reading peers.
+
+The run produced 180 process samples and 497,259,490 fully validated
+responses, with zero validation errors and zero healthy-peer non-deadline I/O
+errors. The durable evidence is split into
+[raw samples](../benchmark/results/2026-08-06-kpro-netty-tcp-diagnostic-raw.csv),
+[same-cycle ratios](../benchmark/results/2026-08-06-kpro-netty-tcp-diagnostic-pairs.csv),
+and the
+[case summary](../benchmark/results/2026-08-06-kpro-netty-tcp-diagnostic-summary.csv).
+
+The QPS columns below are six-process medians. The relative columns are the
+median of six same-cycle KPro/Netty ratios and are the primary comparison
+because the host showed time-dependent drift.
+
+| Case | Ordinary KPro msg/s | PGO KPro msg/s | Netty msg/s | Ordinary/Netty paired | PGO/Netty paired |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| T01: 1 conn, 64 B, inflight/coalesce 1 | 15,964 | 17,154 | 19,209 | 82.9% | 85.9% |
+| T02: 64 conn, 64 B, inflight/coalesce 1 | 93,874 | 95,851 | 97,892 | 95.9% | 96.9% |
+| T03: 64 conn, 1 KiB, inflight/coalesce 1 | 93,507 | 96,845 | 97,546 | 98.4% | 97.6% |
+| T04: 64 conn, 16 KiB, inflight/coalesce 1 | 59,477 | 60,562 | 63,648 | 97.7% | 96.7% |
+| T05: 1,000 conn, 64 B, inflight/coalesce 1 | 80,569 | 83,596 | 87,376 | 92.6% | 94.3% |
+| T06: 1,000 conn, 1 KiB, inflight/coalesce 1 | 81,294 | 79,970 | 85,600 | 94.0% | 92.1% |
+| T07: 64 conn, 64 B, inflight/coalesce 16 | 1,439,724 | 1,271,079 | 1,499,586 | 89.1% | 88.4% |
+| T08: 256 conn, 1 KiB, inflight/coalesce 16 | 809,777 | 829,656 | 891,678 | 90.1% | 92.2% |
+| T08b: 1,000 conn, 1 KiB, inflight/coalesce 16 | 753,369 | 766,542 | 837,592 | 89.0% | 90.2% |
+
+Across those nine normal cells, the unweighted geometric means are:
+
+| Build | Paired throughput | Paired p99 | Paired CPU/message |
+| --- | ---: | ---: | ---: |
+| Ordinary KPro / Netty | 92.1% | 104.7% | 119.4% |
+| PGO KPro / Netty | 92.6% | 105.6% | 115.3% |
+
+This resolves two interpretation questions. First, T02-T04 are close in this
+short diagnostic, while the batched T07-T08b cases retain a roughly 8-11%
+paired throughput gap and a roughly 31-43% CPU/message gap. Second, the
+T07-trained PGO profile reduces aggregate CPU consumption but is not a
+universal improvement: T06 throughput and tail latency regress, and the
+nine-case aggregate p99 is slightly worse.
+
+T09 is an overload-policy diagnostic rather than a same-semantics throughput
+comparison. In every run, each KPro build closed all ten non-reading clients
+after its bounded backpressure limit was exhausted and kept healthy-peer I/O
+errors at zero. The Netty fixture retained those peers until the deadline and
+its healthy throughput fell to 12,794 msg/s. That evidence validates KPro's
+configured isolation behavior; it does not establish a 6.76x framework
+performance advantage.
+
+Like the earlier runs, this remains a short Windows closed-loop diagnostic.
+It lacks the independent generator host, long steady state, RSS/PSS evidence,
+confidence intervals, and 24-shape/72-offered-load coverage required by the
+formal acceptance contract.
 
 ## Largest current gap: scheduling and write-submission efficiency
 

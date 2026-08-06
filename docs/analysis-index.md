@@ -187,7 +187,9 @@ gate rules rather than replacing the score with an unversioned impression.
 ## Do Not Recreate As Repo Artifacts
 
 Do not commit editor indexes, `gopls` caches, local search databases, generated
-temporary analysis dumps, or machine-specific benchmark output. Keep durable
-analysis in this document,
+temporary analysis dumps, or uncurated machine-specific benchmark output.
+Curated benchmark evidence belongs in `benchmark/results/` only when its
+environment, source identity, method, validation status, and limitations are
+recorded in `benchmark/RESULTS.md`. Keep durable analysis in this document,
 [framework-quality-assessment.md](framework-quality-assessment.md),
 [project-map.md](project-map.md), or the relevant guide.

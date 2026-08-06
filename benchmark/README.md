@@ -29,11 +29,15 @@ allocs/op
 qps
 ```
 
-Latest saved benchmark evidence: [RESULTS.md](RESULTS.md). The current
-KPro/Netty diagnostic keeps its
-[24 raw process samples](results/2026-08-05-kpro-netty-loopback.csv) and the
-exact [Netty NIO echo fixture](fixtures/netty/NettyKProEchoServer.java) beside
-that interpretation.
+Latest saved benchmark evidence: [RESULTS.md](RESULTS.md). The expanded
+2026-08-06 KPro/Netty TCP diagnostic preserves
+[180 raw process samples](results/2026-08-06-kpro-netty-tcp-diagnostic-raw.csv),
+[60 same-cycle comparisons](results/2026-08-06-kpro-netty-tcp-diagnostic-pairs.csv),
+and a [10-case summary](results/2026-08-06-kpro-netty-tcp-diagnostic-summary.csv).
+The earlier
+[24-process diagnostic](results/2026-08-05-kpro-netty-loopback.csv) remains as
+historical evidence. Both use the checked-in
+[Netty NIO echo fixture](fixtures/netty/NettyKProEchoServer.java).
 
 ## TCP comparison load generator
 

@@ -1,5 +1,111 @@
 # KPro benchmark results
 
+## 2026-08-06 expanded named TCP loopback diagnostic
+
+This run expands the corrected KPro/Netty loopback diagnostic from three
+hotspot cases to the ten historical named TCP cases, including `T08b` and the
+`T09` slow-consumer case. It compares the ordinary KPro build, the same source
+compiled with a T07-trained PGO profile, and the pinned Netty NIO fixture.
+
+Environment and measured inputs:
+
+```text
+goos: windows
+goarch: amd64
+go: go1.26.4
+jdk: 21.0.3
+cpu: Intel(R) Core(TM) i5-14400
+KPro commit: 863001bbba3ddc3911a0501cd87310ebc086a510
+ordinary KPro executable SHA-256: C7BC3BE1D961262D85149FCA10C02A01E75E0CEEE534309D0D9FDFF63112B235
+PGO KPro executable SHA-256: EC98F09CBBA117496EED4D15FB5C7EEF81BFB179F00B5701892428E51FAA0C29
+T07 PGO profile SHA-256: 148EF6DEDC95D4A2B1B7850D0DDF9FFFBFA6DFEEA763007A775A6CE5DBB14147
+load-generator executable SHA-256: 7A4A818B8A62A5D4E8E0D87DBD39FF50F9C77F28DC19A5F40BEE3D118A756318
+Netty commit: b022b4786f2b8258ea75d5b613957a01f2246c5b
+```
+
+KPro and the load generator used `GOMAXPROCS=8`; Netty used
+`-XX:ActiveProcessorCount=8`. Servers were restricted to logical CPUs 0-7 and
+the load generator to CPUs 8-15. Every case used fresh processes in all six
+permutations of ordinary KPro, PGO KPro, and Netty. The nine normal cases used
+three seconds of warm-up and eight seconds of measurement. T09 used one second
+of warm-up and two seconds of measurement because the Netty fixture has no
+equivalent bounded backpressure and can retain output for non-reading peers.
+
+The run contains 180 measured processes and 497,259,490 fully validated
+responses. It reported zero payload-validation errors and zero healthy-peer
+non-deadline I/O errors. The result layers are:
+
+- [raw process samples](results/2026-08-06-kpro-netty-tcp-diagnostic-raw.csv);
+- [same-cycle ratios](results/2026-08-06-kpro-netty-tcp-diagnostic-pairs.csv);
+  and
+- [case medians, ranges, and paired medians](results/2026-08-06-kpro-netty-tcp-diagnostic-summary.csv).
+
+The `direct` percentage below divides the independently observed QPS medians.
+The `paired` percentage first divides KPro by Netty inside each same-cycle
+three-way group and then takes the median of the six ratios. The paired value
+is the primary relative comparison because the host showed material
+time-dependent variation. The absolute QPS medians remain useful as observed
+capacity scale; their full six-process ranges are in the summary CSV.
+
+| Case | Shape | Ordinary KPro msg/s | PGO KPro msg/s | Netty msg/s | Ordinary/Netty direct / paired | PGO/Netty direct / paired |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| T01 | 1 conn, 64 B, inflight/coalesce 1 | 15,964 | 17,154 | 19,209 | 83.1% / 82.9% | 89.3% / 85.9% |
+| T02 | 64 conn, 64 B, inflight/coalesce 1 | 93,874 | 95,851 | 97,892 | 95.9% / 95.9% | 97.9% / 96.9% |
+| T03 | 64 conn, 1 KiB, inflight/coalesce 1 | 93,507 | 96,845 | 97,546 | 95.9% / 98.4% | 99.3% / 97.6% |
+| T04 | 64 conn, 16 KiB, inflight/coalesce 1 | 59,477 | 60,562 | 63,648 | 93.4% / 97.7% | 95.2% / 96.7% |
+| T05 | 1,000 conn, 64 B, inflight/coalesce 1 | 80,569 | 83,596 | 87,376 | 92.2% / 92.6% | 95.7% / 94.3% |
+| T06 | 1,000 conn, 1 KiB, inflight/coalesce 1 | 81,294 | 79,970 | 85,600 | 95.0% / 94.0% | 93.4% / 92.1% |
+| T07 | 64 conn, 64 B, inflight/coalesce 16 | 1,439,724 | 1,271,079 | 1,499,586 | 96.0% / 89.1% | 84.8% / 88.4% |
+| T08 | 256 conn, 1 KiB, inflight/coalesce 16 | 809,777 | 829,656 | 891,678 | 90.8% / 90.1% | 93.0% / 92.2% |
+| T08b | 1,000 conn, 1 KiB, inflight/coalesce 16 | 753,369 | 766,542 | 837,592 | 89.9% / 89.0% | 91.5% / 90.2% |
+| T09 | 1,000 conn, 64 B, inflight/coalesce 1, 1% non-reading | 87,454 | 79,545 | 12,794 | 683.6% / 675.6% | 621.7% / 654.1% |
+
+Tail and CPU ratios are also same-cycle paired medians. A latency or CPU ratio
+below 100% favors KPro.
+
+| Case | Ordinary p99 / Netty | PGO p99 / Netty | Ordinary CPU/message / Netty | PGO CPU/message / Netty |
+| --- | ---: | ---: | ---: | ---: |
+| T01 | 100.0% | 100.0% | 137.0% | 125.8% |
+| T02 | 100.2% | 111.0% | 99.5% | 99.7% |
+| T03 | 103.5% | 105.4% | 99.5% | 96.8% |
+| T04 | 80.0% | 83.0% | 100.3% | 97.7% |
+| T05 | 109.5% | 107.2% | 114.5% | 110.7% |
+| T06 | 107.1% | 123.2% | 117.5% | 114.7% |
+| T07 | 115.6% | 100.3% | 136.1% | 133.3% |
+| T08 | 112.8% | 111.0% | 138.5% | 130.8% |
+| T08b | 119.1% | 114.8% | 142.9% | 137.2% |
+| T09 | 4.8% | 8.0% | 12.5% | 11.6% |
+
+Across the nine normal cases, excluding T09, the unweighted geometric means
+are:
+
+| Build | Direct median-QPS ratio | Paired throughput ratio | Paired p99 ratio | Paired CPU/message ratio |
+| --- | ---: | ---: | ---: | ---: |
+| Ordinary KPro / Netty | 92.4% | 92.1% | 104.7% | 119.4% |
+| PGO KPro / Netty | 93.2% | 92.6% | 105.6% | 115.3% |
+
+The ordinary build reaches at least 95% of Netty's paired throughput in T02,
+T03, and T04. The high-throughput batched cases T07-T08b reach about 89-92%
+and consume about 31-43% more server CPU per successful message. The
+T07-trained profile reduces the nine-case aggregate CPU ratio but is not a
+universal win: T06 throughput and tail latency regress, and aggregate p99 is
+slightly worse.
+
+T09 is an overload-policy diagnostic, not a normal throughput cell. Across the
+six runs, ordinary and PGO KPro each closed all ten non-reading clients per run
+after bounded backpressure was exhausted, producing 60 slow-peer I/O errors
+per build and no healthy-peer errors. Netty left its ten non-reading clients
+until the measurement deadline and the fixture's healthy throughput collapsed.
+That demonstrates KPro's configured isolation behavior, not a same-semantics
+6.76x framework performance lead.
+
+This remains a short Windows closed-loop diagnostic. It is not the
+predeclared 24-shape, 72-offered-load open-loop matrix: the run has no
+independent load-generator host, long steady state, RSS/PSS evidence, or
+confidence bounds. An aggregate mean must not hide a failed cell, and these
+numbers must not be presented as production capacity or universal Netty
+parity.
+
 ## 2026-08-05 bounded receive batch candidate
 
 Environment and measured source:
