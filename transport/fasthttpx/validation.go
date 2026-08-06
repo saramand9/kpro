@@ -35,6 +35,7 @@ func (e *Endpoint) Validate() error {
 		configcheck.NonNegativeInt("Concurrency", e.rawConfig.Concurrency),
 		configcheck.NonNegativeInt("MaxConnsPerIP", e.rawConfig.MaxConnsPerIP),
 		configcheck.NonNegativeInt("MaxRequestsPerConn", e.rawConfig.MaxRequestsPerConn),
+		e.rawConfig.ProxyProtocol.Validate(),
 	)
 	if e.config.MaxBodyBytes > int64(maxInt()) {
 		validationErr = errors.Join(validationErr, fmt.Errorf(

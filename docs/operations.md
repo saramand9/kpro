@@ -25,6 +25,16 @@ matching certificate/key pair. It does not prove validity dates, SANs, or a
 trust chain. For dynamic `tls.Config`, preflight can only confirm that a static
 certificate or selection callback exists, not that a callback will succeed.
 
+HAProxy PROXY protocol is an explicit listener contract. On TCP-based
+transports it is disabled by default; when enabled, the direct peer must match
+`TrustedProxies` and every connection must supply v1 or v2 before TLS or
+application bytes. A direct client, an LB health check without the header, or
+an L7 proxy that sends only `Forwarded`/`X-Forwarded-For` will be rejected.
+Record bounded rejection categories through `OnReject`, keep the callback
+non-blocking, and retain both the advertised client and direct LB address in
+security logs. See [HAProxy PROXY Protocol](proxy-protocol.md) for supported
+transports and rollout checks.
+
 `server.Server.Start(ctx)` synchronously claims one lifecycle generation, then
 starts every mounted runner concurrently and uses `ctx`
 as the process lifetime. The first runner to exit, or cancellation of `ctx`,

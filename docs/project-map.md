@@ -28,7 +28,7 @@ contract for application code.
 | --- | --- | --- |
 | `core/` | Transport-neutral runtime primitives, message dispatch, and optional session capabilities. | `router.go`, `router_config.go`, `context.go`, `session_lifecycle.go`, `outbound_state.go`, `outbound_buffer.go`, `invocation.go`, `backpressure.go`, `lifecycle.go` |
 | `server/` | Dependency-neutral process owner for mounted transport contracts, middleware, readiness, component error provenance, and managed resources. | `server.go`, `mount.go`, `component_error.go`, `lifecycle.go` |
-| `transport/` | Shared transport contracts, optional quiesce/readiness capabilities, handler-error policy, public extension helpers, capability descriptors, validation, built-in protocol packages, and their private dispatch/outbound controls. | `transport.go`, `handler_error.go`, `transportkit/`, `capability.go`, `validation.go`, `internal/dispatchgate/`, `internal/outbound/` |
+| `transport/` | Shared transport contracts, optional quiesce/readiness capabilities, handler-error policy, public extension helpers, capability descriptors, validation, built-in protocol packages, trusted PROXY protocol parsing, and private dispatch/outbound controls. | `transport.go`, `handler_error.go`, `transportkit/`, `proxyproto/`, `capability.go`, `validation.go`, `internal/dispatchgate/`, `internal/outbound/` |
 | `codec/` | Binary protocol implementation and optional segmented-frame contract for KPro message traffic. | `kpro.go`, `kpro_segmented.go`, `segmented.go`, `codec.go` |
 | `middleware/` | Reusable invocation middleware. | `recover.go`, `ratelimit.go`, `limit.go`, `metrics.go` |
 | `observability/` | Optional integrations for health, Prometheus, OTel, and Zap. | `healthx/`, `prometheusx/`, `otelx/`, `zapx/` |

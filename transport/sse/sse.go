@@ -17,6 +17,7 @@ import (
 
 	"github.com/saramand9/kpro/core"
 	"github.com/saramand9/kpro/transport/internal/serveutil"
+	"github.com/saramand9/kpro/transport/proxyproto"
 )
 
 const (
@@ -35,6 +36,9 @@ var ErrTooManyStreams = errors.New("sse stream limit reached")
 type Config struct {
 	// Addr is the HTTP listen address for the SSE endpoint.
 	Addr string
+	// ProxyProtocol optionally requires HAProxy PROXY protocol v1/v2 from
+	// explicitly trusted L4 proxies. The zero value disables it.
+	ProxyProtocol proxyproto.Config
 	// Path is the SSE route path, for example "/events".
 	Path string
 	// TLS switches ListenAndServe to ListenAndServeTLS.
@@ -176,7 +180,7 @@ func (e *Endpoint) ListenAndServe(ctx context.Context) (serveErr error) {
 	}
 	e.started = true
 	e.mu.Unlock()
-	listener, err := net.Listen("tcp", e.config.Addr)
+	rawListener, err := net.Listen("tcp", e.config.Addr)
 	if err != nil {
 		e.mu.Lock()
 		if e.accepting && e.listener == nil {
@@ -184,6 +188,16 @@ func (e *Endpoint) ListenAndServe(ctx context.Context) (serveErr error) {
 		}
 		e.mu.Unlock()
 		return err
+	}
+	listener, err := proxyproto.WrapListener(rawListener, e.config.ProxyProtocol)
+	if err != nil {
+		_ = rawListener.Close()
+		e.mu.Lock()
+		if e.accepting && e.listener == nil {
+			e.started = false
+		}
+		e.mu.Unlock()
+		return fmt.Errorf("sse proxy protocol: %w", err)
 	}
 	e.mu.Lock()
 	if !e.accepting {
@@ -282,6 +296,9 @@ func (e *Endpoint) forceClose() error {
 }
 
 func (e *Endpoint) connContext(ctx context.Context, conn net.Conn) context.Context {
+	if info, ok := proxyproto.InfoFrom(conn); ok {
+		ctx = proxyproto.WithInfo(ctx, info)
+	}
 	state := &connState{
 		remote: remoteFromConn(conn),
 		done:   make(chan struct{}),

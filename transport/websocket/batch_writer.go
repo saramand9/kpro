@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/saramand9/kpro/transport/internal/outbound"
+	"github.com/saramand9/kpro/transport/proxyproto"
 )
 
 const maxServerFrameHeader = 10
@@ -92,7 +93,7 @@ func (w *sessionBatchWriter) writeAvailable(s *session, first *outbound.Item[wsF
 		// Keep the mutable net.Buffers receiver on the reusable writer so its
 		// slice header does not escape once per submission.
 		w.writev = buffers
-		written, err := w.writev.WriteTo(s.raw)
+		written, err := proxyproto.WriteBuffers(&w.writev, s.raw)
 		s.writeMu.Unlock()
 		if err != nil {
 			doneWebSocketItems(items[start:])

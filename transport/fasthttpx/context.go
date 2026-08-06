@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/saramand9/kpro/transport/proxyproto"
 	"github.com/valyala/fasthttp"
 )
 
@@ -25,6 +26,9 @@ func (c *Context) initialize(endpoint *Endpoint, native *fasthttp.RequestCtx) {
 	c.native = native
 	c.endpoint = endpoint
 	c.requestContext = endpoint.shutdownCtx
+	if info, ok := proxyproto.InfoFrom(native.Conn()); ok {
+		c.requestContext = proxyproto.WithInfo(c.requestContext, info)
+	}
 	c.maxBody = endpoint.config.MaxBodyBytes
 	c.status = 0
 	c.wroteHeader = false

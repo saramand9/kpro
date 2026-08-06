@@ -6,6 +6,7 @@ package grpcx
 import (
 	"context"
 	"errors"
+	"fmt"
 	"hash/fnv"
 	"net"
 	"reflect"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/saramand9/kpro/core"
 	"github.com/saramand9/kpro/transport/internal/serveutil"
+	"github.com/saramand9/kpro/transport/proxyproto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -44,6 +46,7 @@ type Server struct {
 	connTracker     *connStatsHandler
 	shutdownTimeout time.Duration
 	errorMapper     ErrorMapper
+	proxyProtocol   proxyproto.Config
 	ready           chan struct{}
 	readyOnce       sync.Once
 
@@ -86,6 +89,14 @@ func WithShutdownTimeout(timeout time.Duration) Option {
 		if timeout != 0 {
 			s.shutdownTimeout = timeout
 		}
+	}
+}
+
+// WithProxyProtocol requires HAProxy PROXY protocol v1/v2 from explicitly
+// trusted L4 proxies. Parsing runs before any configured gRPC TLS handshake.
+func WithProxyProtocol(config proxyproto.Config) Option {
+	return func(s *Server) {
+		s.proxyProtocol = config
 	}
 }
 
@@ -141,10 +152,16 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	if err := s.claimStart(); err != nil {
 		return err
 	}
-	ln, err := net.Listen("tcp", s.addr)
+	rawListener, err := net.Listen("tcp", s.addr)
 	if err != nil {
 		s.rollbackStart()
 		return err
+	}
+	ln, err := proxyproto.WrapListener(rawListener, s.proxyProtocol)
+	if err != nil {
+		_ = rawListener.Close()
+		s.rollbackStart()
+		return fmt.Errorf("grpc proxy protocol: %w", err)
 	}
 	return s.serveClaimed(ctx, ln)
 }
@@ -170,10 +187,14 @@ func (s *Server) ServeListenerContext(ctx context.Context, ln net.Listener) erro
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	wrappedListener, err := proxyproto.WrapListener(ln, s.proxyProtocol)
+	if err != nil {
+		return fmt.Errorf("grpc proxy protocol: %w", err)
+	}
 	if err := s.claimStart(); err != nil {
 		return err
 	}
-	return s.serveClaimed(ctx, ln)
+	return s.serveClaimed(ctx, wrappedListener)
 }
 
 func (s *Server) serveClaimed(ctx context.Context, ln net.Listener) (serveErr error) {
@@ -353,6 +374,9 @@ type connStatsHandler struct {
 }
 
 func (h *connStatsHandler) TagConn(ctx context.Context, info *stats.ConnTagInfo) context.Context {
+	if proxyInfo, ok := proxyproto.InfoFrom(info.RemoteAddr); ok {
+		ctx = proxyproto.WithInfo(ctx, proxyInfo)
+	}
 	state := &connState{
 		id:     atomic.AddUint64(&h.nextID, 1),
 		remote: grpcRemoteFromAddr(info.RemoteAddr),

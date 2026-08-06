@@ -27,6 +27,7 @@ func (e *Endpoint) Validate() error {
 		configcheck.NonNegativeDuration("ShutdownTimeout", e.rawConfig.ShutdownTimeout),
 		configcheck.NonNegativeInt("MaxHeaderBytes", e.rawConfig.MaxHeaderBytes),
 		configcheck.NonNegativeInt64("MaxBodyBytes", e.rawConfig.MaxBodyBytes),
+		e.rawConfig.ProxyProtocol.Validate(),
 	)
 	switch e.transport {
 	case core.TransportHTTP:

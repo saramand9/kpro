@@ -18,6 +18,7 @@ import (
 
 	"github.com/saramand9/kpro/core"
 	"github.com/saramand9/kpro/transport/internal/serveutil"
+	"github.com/saramand9/kpro/transport/proxyproto"
 )
 
 // Handler processes one native HTTP request.
@@ -295,10 +296,16 @@ func (e *Endpoint) ListenAndServe(ctx context.Context) (serveErr error) {
 		}
 		server.TLSConfig = &tls.Config{Certificates: []tls.Certificate{certificate}}
 	}
-	listener, err := net.Listen("tcp", e.config.Addr)
+	rawListener, err := net.Listen("tcp", e.config.Addr)
 	if err != nil {
 		e.rollbackStart()
 		return err
+	}
+	listener, err := proxyproto.WrapListener(rawListener, e.config.ProxyProtocol)
+	if err != nil {
+		_ = rawListener.Close()
+		e.rollbackStart()
+		return fmt.Errorf("http proxy protocol: %w", err)
 	}
 	if !e.publishServer(server, listener) {
 		_ = listener.Close()
@@ -433,6 +440,9 @@ func (e *Endpoint) buildServer() *http.Server {
 }
 
 func (e *Endpoint) connContext(ctx context.Context, conn net.Conn) context.Context {
+	if info, ok := proxyproto.InfoFrom(conn); ok {
+		ctx = proxyproto.WithInfo(ctx, info)
+	}
 	done := make(chan struct{})
 	state := &connState{
 		id:        atomic.AddUint64(&e.nextConnID, 1),

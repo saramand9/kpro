@@ -28,5 +28,6 @@ func (s *Server) validateRuntime() error {
 	return errors.Join(
 		s.Descriptor().Validate(),
 		configcheck.NonNegativeDuration("ShutdownTimeout", s.shutdownTimeout),
+		s.proxyProtocol.Validate(),
 	)
 }

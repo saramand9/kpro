@@ -15,6 +15,7 @@ Start with the quickstart and golden path. The remaining guides separate impleme
 | [Observability Example](../examples/observability/main.go) | Run bounded health and Prometheus endpoints with Zap, OTel wiring, and a custom runner descriptor. |
 | [Examples](../examples/README.md) | Run standalone and modular examples for each implemented protocol. |
 | [Fast HTTP/1.1 Endpoint](fasthttp.md) | Decide when to use the optional fasthttp runner and understand its native context, limits, and lifecycle. |
+| [HAProxy PROXY Protocol](proxy-protocol.md) | Preserve original client addresses behind trusted L4 proxies across TCP-based transports. |
 
 ## Ship and operate
 

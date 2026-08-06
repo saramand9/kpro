@@ -124,6 +124,16 @@ Status terms used below:
 ## Security
 
 - [ ] **Configure and verify:** Use TLS where the protocol supports it, validate protocol versions and cipher policy, and test certificate reload or restart rotation.
+- [ ] **Built in:** TCP, HTTP/HTTPS/HTTP2, fasthttp, WebSocket, SSE, and gRPC
+  can require HAProxy PROXY protocol v1/v2 before TLS or application parsing.
+  Disabled configuration leaves the normal listener path unchanged.
+- [ ] **Configure and verify:** Enable PROXY protocol only when every backend
+  connection, including health checks, comes from a configured exact IP/CIDR
+  and carries the header. Keep `TrustedProxies` narrow, enforce the same source
+  boundary in the network, set a header timeout, and alert on connection-level
+  rejection categories. Never auto-detect it on a public listener or treat
+  `X-Forwarded-For` as an equivalent header. See
+  [HAProxy PROXY Protocol](proxy-protocol.md).
 - [ ] **Built in:** WebSocket upgrades with an `Origin` header default to a
   same-host check; non-browser clients without `Origin` remain supported.
 - [ ] **Configure and verify:** Set `websocket.Config.CheckOrigin` to an
