@@ -28,6 +28,7 @@ import (
 	"github.com/saramand9/kpro/transport/internal/outbound"
 	"github.com/saramand9/kpro/transport/internal/serveutil"
 	"github.com/saramand9/kpro/transport/internal/streamutil"
+	"github.com/saramand9/kpro/transport/proxyproto"
 )
 
 const (
@@ -64,6 +65,9 @@ var (
 type Config struct {
 	// Addr is the HTTP listen address used for WebSocket upgrades.
 	Addr string
+	// ProxyProtocol optionally requires HAProxy PROXY protocol v1/v2 from
+	// explicitly trusted L4 proxies. The zero value disables it.
+	ProxyProtocol proxyproto.Config
 	// Path is the WebSocket upgrade route path.
 	Path string
 	// Codec decodes and encodes binary WebSocket payloads. Nil uses codec.KProV1().
@@ -169,10 +173,16 @@ func (s *Server) ListenAndServe(ctx context.Context, handler core.Handler) (serv
 		return fmt.Errorf("websocket: %w", core.ErrNoHandler)
 	}
 	server := s.buildHTTPServer(handler)
-	listener, err := net.Listen("tcp", s.config.Addr)
+	rawListener, err := net.Listen("tcp", s.config.Addr)
 	if err != nil {
 		s.rollbackStart()
 		return err
+	}
+	listener, err := proxyproto.WrapListener(rawListener, s.config.ProxyProtocol)
+	if err != nil {
+		_ = rawListener.Close()
+		s.rollbackStart()
+		return fmt.Errorf("websocket proxy protocol: %w", err)
 	}
 	if !s.publishServer(server, listener) {
 		_ = listener.Close()
@@ -238,6 +248,12 @@ func (s *Server) buildHTTPServer(handler core.Handler) *http.Server {
 		Addr:              s.config.Addr,
 		Handler:           mux,
 		ReadHeaderTimeout: s.config.HandshakeTimeout,
+		ConnContext: func(ctx context.Context, conn net.Conn) context.Context {
+			if info, ok := proxyproto.InfoFrom(conn); ok {
+				return proxyproto.WithInfo(ctx, info)
+			}
+			return ctx
+		},
 	}
 }
 

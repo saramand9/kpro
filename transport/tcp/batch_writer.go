@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/saramand9/kpro/transport/internal/outbound"
+	"github.com/saramand9/kpro/transport/proxyproto"
 )
 
 type sessionBatchWriter struct {
@@ -71,7 +72,7 @@ func (w *sessionBatchWriter) writeAvailable(s *session, first *outbound.Item[out
 		// the reusable writer rather than taking the address of a local slice
 		// header, which otherwise escapes once per submission.
 		w.writev = buffers
-		written, err := w.writev.WriteTo(s.raw)
+		written, err := proxyproto.WriteBuffers(&w.writev, s.raw)
 		if err != nil {
 			doneOutboundItems(items[start:])
 			return err

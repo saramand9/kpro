@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/saramand9/kpro/transport/proxyproto"
 )
 
 const (
@@ -20,7 +22,10 @@ const (
 )
 
 type Config struct {
-	Addr              string
+	Addr string
+	// ProxyProtocol optionally requires HAProxy PROXY protocol v1/v2 from
+	// explicitly trusted L4 proxies. The zero value disables it.
+	ProxyProtocol     proxyproto.Config
 	TLS               bool
 	CertFile          string
 	KeyFile           string

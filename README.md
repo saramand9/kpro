@@ -61,6 +61,7 @@ application or platform responsibilities.
 | Understand compile-time dependency boundaries | [Dependency Boundaries](docs/dependency-boundaries.md) |
 | Prepare a deployment | [Production Readiness Checklist](docs/production-readiness.md) |
 | Plan failure recovery and capacity | [Operations and Capacity Planning](docs/operations.md) |
+| Preserve client addresses behind an L4 load balancer | [HAProxy PROXY Protocol](docs/proxy-protocol.md) |
 | Understand compatibility expectations | [API Stability, Versioning, and Deprecation](docs/api-stability.md) |
 | Add a transport, middleware, codec, or database adapter | [Extending KPro](docs/extending-kpro.md) |
 
@@ -503,6 +504,10 @@ See [examples/README.md](examples/README.md) for startup commands.
   context API. It reuses KPro lifecycle and middleware but does not emulate
   `net/http` or negotiate HTTP/2; see [Fast HTTP/1.1 Endpoint](docs/fasthttp.md).
 - HTTP/3 uses the same path-routing handler model over QUIC/UDP and requires TLS certificates.
+- TCP, HTTP/HTTPS/HTTP2, fasthttp, WebSocket, SSE, and gRPC can explicitly
+  require HAProxy PROXY protocol v1/v2 from a trusted proxy IP/CIDR allowlist.
+  It is disabled by default and parsed before TLS; see
+  [HAProxy PROXY Protocol](docs/proxy-protocol.md).
 - WebSocket upgrades default to a same-host `Origin` check when the header is
   present; use `Config.CheckOrigin` for an explicit cross-origin allowlist.
 - HTTP/3 shutdown sends GOAWAY and drains accepted requests until its deadline.

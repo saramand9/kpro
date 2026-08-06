@@ -27,6 +27,7 @@ func (s *Server) Validate() error {
 		configcheck.NonNegativeDuration("ReadTimeout", s.rawConfig.ReadTimeout),
 		configcheck.NonNegativeDuration("WriteTimeout", s.rawConfig.WriteTimeout),
 		configcheck.NonNegativeDuration("HandshakeTimeout", s.rawConfig.HandshakeTimeout),
+		s.rawConfig.ProxyProtocol.Validate(),
 		s.rawConfig.HandlerErrorPolicy.Validate(),
 	)
 	validationErr = errors.Join(validationErr, configcheck.HTTPPath("WebSocket path", s.config.Path))

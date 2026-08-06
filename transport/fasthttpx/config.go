@@ -1,6 +1,10 @@
 package fasthttpx
 
-import "time"
+import (
+	"time"
+
+	"github.com/saramand9/kpro/transport/proxyproto"
+)
 
 const (
 	DefaultAddr            = ":8080"
@@ -15,10 +19,13 @@ const (
 
 // Config controls the optional fasthttp-backed HTTP/1.1 endpoint.
 type Config struct {
-	Addr     string
-	TLS      bool
-	CertFile string
-	KeyFile  string
+	Addr string
+	// ProxyProtocol optionally requires HAProxy PROXY protocol v1/v2 from
+	// explicitly trusted L4 proxies. The zero value disables it.
+	ProxyProtocol proxyproto.Config
+	TLS           bool
+	CertFile      string
+	KeyFile       string
 
 	ReadTimeout     time.Duration
 	WriteTimeout    time.Duration

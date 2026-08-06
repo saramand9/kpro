@@ -28,6 +28,7 @@ func (s *Server) Validate() error {
 		configcheck.NonNegativeInt("MaxReadBufferSize", s.rawConfig.MaxReadBufferSize),
 		configcheck.NonNegativeDuration("ReadTimeout", s.rawConfig.ReadTimeout),
 		configcheck.NonNegativeDuration("WriteTimeout", s.rawConfig.WriteTimeout),
+		s.rawConfig.ProxyProtocol.Validate(),
 		s.rawConfig.HandlerErrorPolicy.Validate(),
 	)
 }

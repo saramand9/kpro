@@ -22,6 +22,7 @@ func (e *Endpoint) Validate() error {
 		configcheck.NonNegativeDuration("HandshakeTimeout", e.rawConfig.HandshakeTimeout),
 		configcheck.NonNegativeDuration("IdleTimeout", e.rawConfig.IdleTimeout),
 		configcheck.NonNegativeDuration("ShutdownTimeout", e.rawConfig.ShutdownTimeout),
+		e.rawConfig.ProxyProtocol.Validate(),
 	)
 	validationErr = errors.Join(validationErr, configcheck.HTTPPath("SSE path", e.config.Path))
 	if e.config.TLS {

@@ -20,6 +20,7 @@ import (
 	"github.com/saramand9/kpro/transport/internal/dispatchgate"
 	"github.com/saramand9/kpro/transport/internal/outbound"
 	"github.com/saramand9/kpro/transport/internal/serveutil"
+	"github.com/saramand9/kpro/transport/proxyproto"
 )
 
 const (
@@ -42,6 +43,9 @@ const (
 type Config struct {
 	// Addr is the TCP listen address.
 	Addr string
+	// ProxyProtocol optionally requires HAProxy PROXY protocol v1/v2 from
+	// explicitly trusted L4 proxies. The zero value disables it.
+	ProxyProtocol proxyproto.Config
 	// Codec decodes and encodes stream frames. Nil uses codec.KProV1().
 	Codec codec.StreamCodec
 	// MaxFrameSize limits decoded inbound frame payload size. Outbound writes
@@ -172,10 +176,16 @@ func (s *Server) listenAndServe(
 		s.rollbackStart()
 		return fmt.Errorf("tcp: %w", core.ErrNoHandler)
 	}
-	ln, err := net.Listen("tcp", s.config.Addr)
+	rawListener, err := net.Listen("tcp", s.config.Addr)
 	if err != nil {
 		s.rollbackStart()
 		return err
+	}
+	ln, err := proxyproto.WrapListener(rawListener, s.config.ProxyProtocol)
+	if err != nil {
+		_ = rawListener.Close()
+		s.rollbackStart()
+		return fmt.Errorf("tcp proxy protocol: %w", err)
 	}
 	if !s.publishListener(ln) {
 		_ = ln.Close()

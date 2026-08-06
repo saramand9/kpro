@@ -16,6 +16,7 @@ import (
 	"github.com/saramand9/kpro/transport/http3"
 	"github.com/saramand9/kpro/transport/httpx"
 	"github.com/saramand9/kpro/transport/kcp"
+	"github.com/saramand9/kpro/transport/proxyproto"
 	quictransport "github.com/saramand9/kpro/transport/quic"
 	"github.com/saramand9/kpro/transport/sse"
 	"github.com/saramand9/kpro/transport/tcp"
@@ -74,6 +75,48 @@ func TestBuiltInValidationRejectsInvalidAddressesAndNegativeLimits(t *testing.T)
 		{name: "sse handshake timeout", validate: func() error { return sse.New(sse.Config{HandshakeTimeout: -time.Second}).Validate() }, want: "HandshakeTimeout"},
 		{name: "sse path", validate: func() error { return sse.New(sse.Config{Path: "/{"}).Validate() }, want: "unsupported path characters"},
 		{name: "grpc timeout", validate: func() error { return grpcx.NewServer(":0", grpcx.WithShutdownTimeout(-time.Second)).Validate() }, want: "ShutdownTimeout"},
+		{
+			name: "tcp proxy protocol trust",
+			validate: func() error {
+				return tcp.New(tcp.Config{ProxyProtocol: proxyproto.Config{Enabled: true}}).Validate()
+			},
+			want: "TrustedProxies",
+		},
+		{
+			name: "websocket proxy protocol trust",
+			validate: func() error {
+				return websocket.New(websocket.Config{ProxyProtocol: proxyproto.Config{Enabled: true}}).Validate()
+			},
+			want: "TrustedProxies",
+		},
+		{
+			name: "http proxy protocol trust",
+			validate: func() error {
+				return httpx.New(httpx.Config{ProxyProtocol: proxyproto.Config{Enabled: true}}).Validate()
+			},
+			want: "TrustedProxies",
+		},
+		{
+			name: "fasthttp proxy protocol trust",
+			validate: func() error {
+				return fasthttpx.New(fasthttpx.Config{ProxyProtocol: proxyproto.Config{Enabled: true}}).Validate()
+			},
+			want: "TrustedProxies",
+		},
+		{
+			name: "sse proxy protocol trust",
+			validate: func() error {
+				return sse.New(sse.Config{ProxyProtocol: proxyproto.Config{Enabled: true}}).Validate()
+			},
+			want: "TrustedProxies",
+		},
+		{
+			name: "grpc proxy protocol trust",
+			validate: func() error {
+				return grpcx.NewServer(":0", grpcx.WithProxyProtocol(proxyproto.Config{Enabled: true})).Validate()
+			},
+			want: "TrustedProxies",
+		},
 		{name: "quic limit", validate: func() error { return quictransport.New(quictransport.Config{MaxStreams: -1}).Validate() }, want: "MaxStreams"},
 		{
 			name: "quic ALPN",

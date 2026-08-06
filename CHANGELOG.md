@@ -12,6 +12,11 @@ upgrading between minor versions.
 
 ### Added
 
+- `transport/proxyproto` provides opt-in HAProxy PROXY protocol v1/v2 parsing
+  with a mandatory trusted-proxy IP/CIDR allowlist, bounded header reads, pre-TLS listener
+  wrapping, effective/direct address visibility, and connection-level reject
+  observation. TCP, HTTP/HTTPS/HTTP2, fasthttp, WebSocket, SSE, and gRPC expose
+  the integration while leaving their zero-value listener paths unchanged.
 - `transport/fasthttpx` provides an opt-in fasthttp-native HTTP/1.1 runner with
   method/path routing, unified invocation middleware, checked limits,
   readiness, TLS restricted to HTTP/1.1, and bounded graceful shutdown. The
