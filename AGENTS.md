@@ -44,7 +44,7 @@ the task explicitly changes that boundary.
 | --- | --- |
 | `core/` | Message, Context, Session, Router, middleware invocation, lifecycle state, backpressure. |
 | `server/` | Dependency-neutral process assembly, checked construction, endpoint mounting, runner ownership, shutdown. |
-| `transport/` | Common transport contracts, descriptors, validation, and protocol implementations. |
+| `transport/` | Common transport contracts, descriptors, validation, public `transporttest` conformance helpers, and protocol implementations. |
 | `codec/` | KPro binary message codecs for stream and packet transports. |
 | `middleware/` | Shared invocation middleware such as recovery, limits, metrics, and rate limiting. |
 | `observability/` | Optional health, Prometheus, OpenTelemetry, and Zap integrations. |
@@ -86,6 +86,16 @@ Run race-sensitive coverage for core runtime packages:
 go test -race ./core ./server ./transport/... ./observability/... ./eventing/... ./cmd/kpro ./cmd/benchguard -count=1
 ```
 
+Run deterministic TCP fault injection separately when changing connection,
+write, receipt, deadline, or shutdown behavior:
+
+```sh
+go test -race -count=1 -timeout=3m ./transport/tcp -run '^TestTCPFault'
+```
+
+The 1,000-connection and soak tests are environment-enabled; read
+`docs/transport-resilience-testing.md` before running or changing them.
+
 Check formatting, dependency metadata, and benchmark budgets before a release
 or large commit:
 
@@ -108,10 +118,12 @@ go test -tags dbintegration ./database/gorm ./eventing/delivery
 
 The framework now has checked server construction, transport preflight
 validation, one-shot lifecycle ownership, bounded Router queues/in-flight
-limits, transport capacity guards, graceful shutdown behavior, observability
-adapters, event delivery/projector operational controls, scaffolding,
-declarative template overlays, contract catalogs, typed OpenAPI clients, and
-benchmark budgets.
+limits, transport capacity guards, graceful shutdown with outbound write
+receipts and drain, aggregate outbound snapshots, a shared live transport
+contract suite, protocol conformance/fuzz coverage, observability adapters,
+event delivery/projector operational controls, scaffolding, declarative
+template overlays, contract catalogs, typed OpenAPI clients, and benchmark
+budgets.
 
 Remaining maturity gaps are a v1 API freeze, workload-specific load tests,
 failure-injection evidence, and production deployment records.

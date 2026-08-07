@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"errors"
+	"io"
 	"reflect"
 	"testing"
 
@@ -160,6 +161,109 @@ func TestKProV1DecodePacketRejectsTrailingData(t *testing.T) {
 	}
 }
 
+func TestKProV1DecodersAgree(t *testing.T) {
+	messages := []core.Message{
+		{},
+		{Flags: 0xff, ID: ^uint32(0), Seq: ^uint64(0)},
+		{Flags: 1, ID: 1, Seq: 1, Data: []byte{0}},
+		{Flags: 2, ID: 42, Seq: 99, Data: bytes.Repeat([]byte("x"), 125)},
+		{Flags: 3, ID: 0x01020304, Seq: 0x0102030405060708, Data: bytes.Repeat([]byte("y"), 126)},
+		{Flags: 4, ID: 7, Seq: 9, Data: bytes.Repeat([]byte("z"), 4096)},
+	}
+	wireCodec := KProV1()
+	for index, message := range messages {
+		frame, err := wireCodec.Encode(message)
+		if err != nil {
+			t.Fatalf("case %d Encode(): %v", index, err)
+		}
+		stream, err := wireCodec.Read(bytes.NewReader(frame), uint32(len(message.Data)))
+		if err != nil {
+			t.Fatalf("case %d Read(): %v", index, err)
+		}
+		packet, err := wireCodec.DecodePacket(frame)
+		if err != nil {
+			t.Fatalf("case %d DecodePacket(): %v", index, err)
+		}
+		buffered, complete, err := wireCodec.DecodeBuffered(frame, uint32(len(message.Data)))
+		if err != nil || !complete {
+			t.Fatalf("case %d DecodeBuffered() = (complete %v, error %v)", index, complete, err)
+		}
+		if stream.Bytes != len(frame) || buffered.Bytes != len(frame) {
+			t.Fatalf("case %d consumed bytes = (%d, %d), want %d", index, stream.Bytes, buffered.Bytes, len(frame))
+		}
+		assertKProMessageEqual(t, stream.Message, packet)
+		assertKProMessageEqual(t, stream.Message, buffered.Message)
+		assertKProMessageEqual(t, stream.Message, message)
+	}
+}
+
+func TestKProV1StreamAndBufferedDecodingAtEveryBoundary(t *testing.T) {
+	wireCodec := KProV1()
+	want := core.Message{
+		Flags: 0xa5,
+		ID:    0x01020304,
+		Seq:   0x0102030405060708,
+		Data:  bytes.Repeat([]byte("fragment"), 37),
+	}
+	frame, err := wireCodec.Encode(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for boundary := 0; boundary < len(frame); boundary++ {
+		if _, complete, err := wireCodec.DecodeBuffered(frame[:boundary], uint32(len(want.Data))); err != nil || complete {
+			t.Fatalf("boundary %d DecodeBuffered() = (complete %v, error %v), want incomplete", boundary, complete, err)
+		}
+		reader := io.MultiReader(
+			bytes.NewReader(frame[:boundary]),
+			bytes.NewReader(frame[boundary:]),
+		)
+		result, err := wireCodec.Read(reader, uint32(len(want.Data)))
+		if err != nil {
+			t.Fatalf("boundary %d Read(): %v", boundary, err)
+		}
+		assertKProMessageEqual(t, result.Message, want)
+	}
+}
+
+func TestKProV1DecodersRejectHeaderCorruptionConsistently(t *testing.T) {
+	wireCodec := KProV1()
+	valid, err := wireCodec.Encode(core.Message{ID: 7, Data: []byte("payload")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name    string
+		mutate  func([]byte)
+		wantErr error
+	}{
+		{
+			name:    "magic",
+			mutate:  func(frame []byte) { frame[0] ^= 0xff },
+			wantErr: ErrBadMagic,
+		},
+		{
+			name:    "version",
+			mutate:  func(frame []byte) { frame[2]++ },
+			wantErr: ErrBadVersion,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			frame := append([]byte(nil), valid...)
+			test.mutate(frame)
+			if _, err := wireCodec.Read(bytes.NewReader(frame), 64); !errors.Is(err, test.wantErr) {
+				t.Fatalf("Read() error = %v, want %v", err, test.wantErr)
+			}
+			if _, err := wireCodec.DecodePacket(frame); !errors.Is(err, test.wantErr) {
+				t.Fatalf("DecodePacket() error = %v, want %v", err, test.wantErr)
+			}
+			if _, _, err := wireCodec.DecodeBuffered(frame, 64); !errors.Is(err, test.wantErr) {
+				t.Fatalf("DecodeBuffered() error = %v, want %v", err, test.wantErr)
+			}
+		})
+	}
+}
+
 func FuzzKProV1DecodePacket(f *testing.F) {
 	valid, err := KProV1().EncodePacket(core.Message{ID: 7, Seq: 9, Data: []byte("seed")})
 	if err != nil {
@@ -181,4 +285,45 @@ func FuzzKProV1DecodePacket(f *testing.F) {
 			t.Fatalf("successful decode was not canonical: got %x want %x", encoded, packet)
 		}
 	})
+}
+
+func FuzzKProV1DecodersAgree(f *testing.F) {
+	f.Add(uint8(0xa5), uint32(7), uint64(9), []byte("seed"))
+	f.Add(uint8(0), uint32(0), uint64(0), []byte{})
+	f.Fuzz(func(t *testing.T, flags uint8, id uint32, sequence uint64, payload []byte) {
+		if len(payload) > 4096 {
+			payload = payload[:4096]
+		}
+		wireCodec := KProV1()
+		frame, err := wireCodec.Encode(core.Message{
+			Flags: flags,
+			ID:    id,
+			Seq:   sequence,
+			Data:  payload,
+		})
+		if err != nil {
+			t.Fatalf("Encode(): %v", err)
+		}
+		stream, err := wireCodec.Read(bytes.NewReader(frame), uint32(len(payload)))
+		if err != nil {
+			t.Fatalf("Read(): %v", err)
+		}
+		packet, err := wireCodec.DecodePacket(frame)
+		if err != nil {
+			t.Fatalf("DecodePacket(): %v", err)
+		}
+		buffered, complete, err := wireCodec.DecodeBuffered(frame, uint32(len(payload)))
+		if err != nil || !complete {
+			t.Fatalf("DecodeBuffered() = (complete %v, error %v)", complete, err)
+		}
+		assertKProMessageEqual(t, stream.Message, packet)
+		assertKProMessageEqual(t, stream.Message, buffered.Message)
+	})
+}
+
+func assertKProMessageEqual(t testing.TB, got, want core.Message) {
+	t.Helper()
+	if got.Flags != want.Flags || got.ID != want.ID || got.Seq != want.Seq || !bytes.Equal(got.Data, want.Data) {
+		t.Fatalf("message = %+v, want %+v", got, want)
+	}
 }

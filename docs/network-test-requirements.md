@@ -14,6 +14,8 @@ The current reference implementation is the TCP test set in:
 These rules apply to message-based transports:
 
 - TCP
+- KCP
+- QUIC
 - UDP
 - WebSocket
 - Any future transport that carries `core.Message` through `codec.KProV1`
@@ -265,21 +267,28 @@ Tests should include graceful and partial close behavior:
 - Quiesce is idempotent, prevents handler dispatch after its boundary, and
   leaves an already established writer usable by an accepted handler.
 - Endpoint shutdown orders optional transport quiesce before Router drain and
-  terminal transport shutdown. A quiesce/drain error does not skip shutdown,
-  and returned errors preserve every failed phase.
+  optional outbound drain before terminal transport shutdown. A
+  quiesce/Router/outbound error does not skip shutdown, and returned errors
+  preserve every failed phase.
 - TCP, UDP, and WebSocket stop their new admission/read paths. KCP keeps its
   shared UDP listener open for established writers, accepts and closes new raw
   sessions without registration/dispatch, and closes that listener only at
-  terminal shutdown. QUIC closes its connection listener but accepts and
-  cancels new streams on retained connections without session registration or
-  handler dispatch until terminal shutdown.
+  terminal shutdown after outbound drain. QUIC closes its connection listener
+  but accepts and cancels new streams on retained connections without session
+  registration or handler dispatch until outbound drain finishes.
 - A third-party transport without `transport.Quiescer` is tested against the
-  documented Router-drain-then-shutdown compatibility path rather than the
-  stronger receive-side cutover.
+  documented compatibility path, including `transport.OutboundDrainer` only
+  when it implements that independent capability. It cannot claim the stronger
+  receive-side cutover.
 - Endpoint shutdown lets already accepted handlers finish their final send
-  attempt and queue admission before transport shutdown. Terminal shutdown
-  does not wait for queued/writer-owned bytes to flush to the network, so this
-  is not a peer-delivery assertion.
+  attempt and queue admission before transport shutdown. Built-in outbound
+  drain waits for reservations, queued writes, and writer-owned writes. Its
+  success is a transport-write result, not a peer-delivery assertion.
+- `SessionSendWithReceipt` does not complete at queue admission. It completes
+  after a successful full write, with the concrete write/deadline error, with
+  `io.ErrShortWrite` for silent short writes, or with `core.ErrClosed` when
+  close discards the accepted item. `SessionDrainOutbound` seals future sends,
+  honors context cancellation, and releases every receipt before returning.
 - Graceful Router shutdown executes accepted sync work even if the session
   closes during drain. Immediate `Router.Close` is tested for cleanup but
   must not be asserted as a barrier that prevents every already-ready task from
@@ -287,6 +296,67 @@ Tests should include graceful and partial close behavior:
 - Blocked queues unblock on session close or router shutdown.
 - A `Send` blocked inside a test codec cannot commit after concurrent session
   close has linearized, and all reservation/write accounting returns to zero.
+
+### R13: Codec And Standards Conformance
+
+The KProV1 stream, packet, and buffered decoders must agree on flags, message
+ID, sequence, payload, and consumed bytes for every canonical encoded frame.
+Exercise empty and boundary payloads, every stream split boundary, corrupt
+magic/version fields, and fuzz-generated messages.
+
+WebSocket tests must additionally cover the RFC 6455 accept-key vector, masking,
+reserved bits and opcodes, fragmented/oversized control frames, canonical
+16/64-bit length encoding, the 64-bit length high-bit rule, close payload
+validation, and bounded parser fuzzing. Repository tests are not a substitute
+for an external interoperability suite against every deployed client version.
+
+SSE tests must verify CR, LF, and CRLF data boundaries all serialize as
+independent `data:` fields and event names cannot inject a line break.
+
+### R14: Fault Injection And Long-Running Stability
+
+The canonical TCP transport must have a deterministic, race-safe fault matrix
+that injects slow writes, short writes, partial progress with a concrete error,
+transport-write versus drain-deadline ordering, peer half-close, and peer RST.
+Every terminal path must complete accepted receipts exactly once, return the
+authoritative error, release pending frame/byte capacity, close the affected
+session when required, and avoid a process-wide stall.
+
+Real-socket shutdown tests must prove a bounded connection fanout in the
+ordinary suite and provide an opt-in test for at least 1,000 simultaneously
+active connections. The latter may use bounded dial retries for transient
+listen-queue saturation, but it must not begin shutdown until every configured
+connection is active.
+
+A configurable opt-in soak must keep multiple request/reply streams active,
+validate every response, then verify bounded shutdown and post-GC goroutine,
+heap, and object-count guardrails. Report duration, clients, payload bytes,
+completed messages, observed throughput, memory, and goroutines with the test
+artifact. A repository smoke or two-minute workflow is not a substitute for a
+deployment-specific multi-hour run.
+
+The current commands, semantics, and evidence format are defined in
+[Transport Fault Injection And Soak Testing](transport-resilience-testing.md).
+
+### R15: Shared Public Transport Contract
+
+Every `transport.MessageServer` should run
+`transporttest.RunMessageServerContract` through a real protocol-native peer.
+The harness must create a fresh, never-started server for every subtest and the
+peer must honor context cancellation for sends and receives.
+
+The common suite verifies one-shot startup, readiness, descriptor validity,
+idempotent shutdown, rejection after shutdown, message field preservation,
+stable non-zero session identity, session close signaling, and send-after-close
+behavior. It also verifies every optional outbound state/wait, write receipt,
+session drain, quiesce, transport drain, and aggregate snapshot capability that
+the implementation exposes. `MessageRequirements` makes selected optional
+capabilities mandatory.
+
+TCP, KCP, QUIC, UDP, and WebSocket must all remain wired to this same suite.
+Protocol-specific parsing, malformed input, backpressure saturation, injected
+write failure, and long-running tests remain separate because the common suite
+cannot manufacture every carrier-specific fault safely.
 
 ## Minimum Scenario Matrix
 
@@ -303,6 +373,8 @@ Every message-based transport should eventually cover this matrix:
 | Queue full errors | Yes |
 | Global/per-session Router waiter isolation | Yes |
 | Outbound writable wait wake/cancel/bound | Yes |
+| Write receipt success/error/abort result | Yes |
+| Outbound drain order, timeout, and send seal | Yes |
 | Pending-byte limit and watermark transitions | Yes |
 | Concurrent Send/close admission ordering | Yes |
 | Max in-flight errors | Yes |
@@ -312,7 +384,14 @@ Every message-based transport should eventually cover this matrix:
 | Flags preservation | Yes |
 | Transport batching or fragmentation | Yes, when applicable |
 | Protocol fault input | Yes |
+| Cross-decoder/standards conformance | Yes |
+| Shared public live transport contract | Yes |
 | Quiesce, close, and shutdown ordering | Yes |
+| Slow peer and write/drain deadline ordering | Yes for stream transports |
+| Short write and partial-progress error cleanup | Yes for stream transports |
+| Peer half-close and reset cleanup | Yes for TCP |
+| Bounded real-connection shutdown fanout | Yes for connection transports |
+| Configurable long-running soak | Opt-in, with recorded environment evidence |
 
 Connectionless transports such as UDP should replace multi-connection isolation
 with peer/session isolation if the transport maps remote addresses to sessions.

@@ -341,6 +341,143 @@ func TestCloseRejectsInflightCommitAndFutureReservations(t *testing.T) {
 	}
 }
 
+func TestSealPreservesAcceptedItemsUntilDrain(t *testing.T) {
+	queue := New[int](Config{MaxFrames: 2, MaxBytes: 10})
+	item := reserveAndCommit(t, queue, 4, 7)
+	queue.Seal()
+
+	if _, err := queue.Reserve(1); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Reserve() after Seal error = %v, want %v", err, ErrClosed)
+	}
+	if snapshot := queue.Snapshot(); !snapshot.Closed || snapshot.PendingFrames != 1 || snapshot.PendingBytes != 4 {
+		t.Fatalf("sealed snapshot = %+v", snapshot)
+	}
+
+	result := make(chan error, 1)
+	go func() { result <- queue.WaitDrained(context.Background()) }()
+	select {
+	case err := <-result:
+		t.Fatalf("WaitDrained() returned before writer completion: %v", err)
+	case <-time.After(10 * time.Millisecond):
+	}
+	item.Done()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("WaitDrained() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WaitDrained() did not observe completion")
+	}
+}
+
+func TestWaitDrainedReturnsWriteResultAfterCompletionNotification(t *testing.T) {
+	queue := New[int](Config{MaxFrames: 1, MaxBytes: 10})
+	completion := &testCompletion{done: make(chan struct{})}
+	reservation, err := queue.Reserve(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reservation.CommitWithCompletion(1, 1, completion); err != nil {
+		t.Fatal(err)
+	}
+	item := <-queue.Items()
+	queue.Seal()
+	wantErr := errors.New("write failed")
+	item.Complete(wantErr)
+
+	if err := queue.WaitDrained(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("WaitDrained() error = %v, want %v", err, wantErr)
+	}
+	select {
+	case <-completion.done:
+	default:
+		t.Fatal("WaitDrained() returned before completion notification")
+	}
+	if !errors.Is(completion.err, wantErr) {
+		t.Fatalf("completion error = %v, want %v", completion.err, wantErr)
+	}
+}
+
+func TestWaitDrainedHonorsContext(t *testing.T) {
+	queue := New[int](Config{MaxFrames: 1, MaxBytes: 10})
+	item := reserveAndCommit(t, queue, 1, 1)
+	queue.Seal()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if err := queue.WaitDrained(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("WaitDrained() error = %v, want %v", err, context.DeadlineExceeded)
+	}
+	item.Done()
+	if err := queue.WaitDrained(context.Background()); err != nil {
+		t.Fatalf("WaitDrained() after completion error = %v", err)
+	}
+}
+
+func TestWaitDrainedBroadcastsWithoutLostWakeups(t *testing.T) {
+	for iteration := 0; iteration < 200; iteration++ {
+		queue := New[int](Config{MaxFrames: 1, MaxBytes: 10})
+		item := reserveAndCommit(t, queue, 1, iteration)
+		queue.Seal()
+		results := make(chan error, 4)
+		for range 4 {
+			go func() { results <- queue.WaitDrained(context.Background()) }()
+		}
+		item.Done()
+		for range 4 {
+			select {
+			case err := <-results:
+				if err != nil {
+					t.Fatalf("iteration %d WaitDrained() error = %v", iteration, err)
+				}
+			case <-time.After(time.Second):
+				t.Fatalf("iteration %d lost a drain wakeup", iteration)
+			}
+		}
+	}
+}
+
+func TestSealRejectsReservationCommitAndReleasesDrain(t *testing.T) {
+	queue := New[int](Config{MaxFrames: 1, MaxBytes: 10})
+	reservation, err := queue.Reserve(5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue.Seal()
+	if err := reservation.Commit(1, 5); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Commit() after Seal error = %v, want %v", err, ErrClosed)
+	}
+	if err := queue.WaitDrained(context.Background()); err != nil {
+		t.Fatalf("WaitDrained() error = %v", err)
+	}
+}
+
+func TestCloseWithErrorCompletesQueuedItems(t *testing.T) {
+	queue := New[int](Config{MaxFrames: 1, MaxBytes: 10})
+	completion := &testCompletion{done: make(chan struct{})}
+	reservation, err := queue.Reserve(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reservation.CommitWithCompletion(1, 1, completion); err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("session aborted")
+	queue.CloseWithError(wantErr)
+
+	select {
+	case <-completion.done:
+	case <-time.After(time.Second):
+		t.Fatal("queued completion was not released by CloseWithError")
+	}
+	if !errors.Is(completion.err, wantErr) {
+		t.Fatalf("completion error = %v, want %v", completion.err, wantErr)
+	}
+	if err := queue.WaitDrained(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("WaitDrained() error = %v, want %v", err, wantErr)
+	}
+}
+
 func TestConcurrentCloseLeavesNoSuccessfulPostCloseAdmission(t *testing.T) {
 	queue := New[int](Config{MaxFrames: 64, MaxBytes: 1 << 20})
 	start := make(chan struct{})
@@ -369,6 +506,22 @@ func TestConcurrentCloseLeavesNoSuccessfulPostCloseAdmission(t *testing.T) {
 	if snapshot := queue.Snapshot(); snapshot.PendingFrames != 0 || snapshot.PendingBytes != 0 {
 		t.Fatalf("closed snapshot = %+v", snapshot)
 	}
+}
+
+type testCompletion struct {
+	once sync.Once
+	done chan struct{}
+	err  error
+}
+
+func (c *testCompletion) Complete(err error) bool {
+	completed := false
+	c.once.Do(func() {
+		c.err = err
+		close(c.done)
+		completed = true
+	})
+	return completed
 }
 
 func BenchmarkOutboundQueueRoundTrip(b *testing.B) {

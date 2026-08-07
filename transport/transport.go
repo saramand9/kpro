@@ -31,6 +31,14 @@ type Quiescer interface {
 	Quiesce(context.Context) error
 }
 
+// OutboundDrainer is the optional shutdown phase implemented by message
+// transports that can reject new sends and wait for all previously accepted
+// transport writes. Callers should invoke it after application handlers have
+// drained and before terminal Shutdown closes sessions or sockets.
+type OutboundDrainer interface {
+	DrainOutbound(context.Context) error
+}
+
 // MessageServer is implemented by message transports that dispatch
 // core.Context handlers.
 type MessageServer interface {

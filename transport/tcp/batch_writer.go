@@ -62,7 +62,7 @@ func (w *sessionBatchWriter) writeAvailable(s *session, first *outbound.Item[out
 			now := time.Now()
 			if s.writeDeadlineRefresh.IsZero() || !now.Before(s.writeDeadlineRefresh) {
 				if err := s.raw.SetWriteDeadline(now.Add(timeout)); err != nil {
-					doneOutboundItems(items[start:])
+					completeOutboundItems(items[start:], err)
 					return err
 				}
 				s.writeDeadlineRefresh = now.Add(timeout / 2)
@@ -74,11 +74,11 @@ func (w *sessionBatchWriter) writeAvailable(s *session, first *outbound.Item[out
 		w.writev = buffers
 		written, err := proxyproto.WriteBuffers(&w.writev, s.raw)
 		if err != nil {
-			doneOutboundItems(items[start:])
+			completeOutboundItems(items[start:], err)
 			return err
 		}
 		if written != batchBytes {
-			doneOutboundItems(items[start:])
+			completeOutboundItems(items[start:], io.ErrShortWrite)
 			return io.ErrShortWrite
 		}
 		for index := start; index < end; index++ {
@@ -89,8 +89,8 @@ func (w *sessionBatchWriter) writeAvailable(s *session, first *outbound.Item[out
 	return nil
 }
 
-func doneOutboundItems(items []outbound.Item[outboundFrame]) {
+func completeOutboundItems(items []outbound.Item[outboundFrame], err error) {
 	for index := range items {
-		items[index].Done()
+		items[index].Complete(err)
 	}
 }

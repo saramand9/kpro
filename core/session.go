@@ -41,8 +41,12 @@ type Session interface {
 	Transport() Transport
 	// RemoteAddr returns the peer network address when available.
 	RemoteAddr() net.Addr
-	// Send queues or writes a message response to the peer.
+	// Send encodes and admits a message response to the transport write path.
+	// Queue-backed implementations can return before the write itself finishes;
+	// use SessionSendWithReceipt when the optional completion result is needed.
 	Send(Message) error
-	// Close closes the connection or virtual session.
+	// Close aborts the connection or virtual session. Use
+	// SessionDrainOutbound before Close when the optional terminal drain
+	// capability is required.
 	Close() error
 }

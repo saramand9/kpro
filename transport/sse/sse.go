@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -31,6 +32,9 @@ const (
 
 // ErrTooManyStreams reports an SSE request rejected by the active stream cap.
 var ErrTooManyStreams = errors.New("sse stream limit reached")
+
+// ErrInvalidEventName reports an event field containing a protocol line break.
+var ErrInvalidEventName = errors.New("sse event name contains a line break")
 
 // Config controls SSE listener, path, TLS, and shutdown settings.
 type Config struct {
@@ -591,6 +595,9 @@ func (c *Context) Done() <-chan struct{} {
 
 // Send writes one SSE event and flushes the stream.
 func (c *Context) Send(event string, data []byte) (err error) {
+	if strings.ContainsAny(event, "\r\n") {
+		return ErrInvalidEventName
+	}
 	if err := c.applyPacketLimiter(); err != nil {
 		return err
 	}
@@ -602,10 +609,8 @@ func (c *Context) Send(event string, data []byte) (err error) {
 				return err
 			}
 		}
-		for _, line := range strings.Split(string(data), "\n") {
-			if _, err := fmt.Fprintf(c.ResponseWriter, "data: %s\n", line); err != nil {
-				return err
-			}
+		if err := writeSSEData(c.ResponseWriter, data); err != nil {
+			return err
 		}
 		if _, err := fmt.Fprint(c.ResponseWriter, "\n"); err != nil {
 			return err
@@ -615,6 +620,26 @@ func (c *Context) Send(event string, data []byte) (err error) {
 		}
 		return nil
 	})
+}
+
+func writeSSEData(writer io.Writer, data []byte) error {
+	start := 0
+	for index := 0; index < len(data); {
+		if data[index] != '\r' && data[index] != '\n' {
+			index++
+			continue
+		}
+		if _, err := fmt.Fprintf(writer, "data: %s\n", data[start:index]); err != nil {
+			return err
+		}
+		if data[index] == '\r' && index+1 < len(data) && data[index+1] == '\n' {
+			index++
+		}
+		index++
+		start = index
+	}
+	_, err := fmt.Fprintf(writer, "data: %s\n", data[start:])
+	return err
 }
 
 func (c *Context) withWriteDeadline(write func(*http.ResponseController) error) (err error) {

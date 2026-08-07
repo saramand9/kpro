@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -9,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/saramand9/kpro/core"
 )
 
 func TestAppendServerFrameHeaderMatchesWriteFrame(t *testing.T) {
@@ -159,6 +162,34 @@ func TestSessionBatchWriterDropsDataAfterDirectClose(t *testing.T) {
 	}
 }
 
+func TestSessionBatchWriterCompletesDroppedReceiptAsClosed(t *testing.T) {
+	server := New(Config{SendQueueSize: 1, MaxPendingBytes: 1024})
+	session := &session{
+		server:    server,
+		sendQueue: newSessionOutboundQueue(server.config),
+		done:      make(chan struct{}),
+	}
+	receipt := core.NewWriteReceipt()
+	frame := wsFrame{opcode: opBinary, payload: []byte("dropped")}
+	reservation, err := session.sendQueue.Reserve(int64(len(frame.payload)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reservation.CommitWithCompletion(frame, int64(len(frame.payload)), receipt); err != nil {
+		t.Fatal(err)
+	}
+	session.closeRequested.Store(true)
+
+	writer := newSessionBatchWriter(server.config)
+	first := <-session.sendQueue.Items()
+	if closeAfter, err := writer.writeAvailable(session, &first); err != nil || closeAfter {
+		t.Fatalf("writeAvailable() = (close=%v, err=%v)", closeAfter, err)
+	}
+	if err := receipt.Wait(context.Background()); !errors.Is(err, core.ErrClosed) {
+		t.Fatalf("dropped receipt error = %v, want %v", err, core.ErrClosed)
+	}
+}
+
 func TestSessionBatchWriterRejectsShortWriteWithoutError(t *testing.T) {
 	frames := []wsFrame{{opcode: opBinary, payload: []byte("payload")}}
 	server := New(Config{SendQueueSize: 1, MaxPendingBytes: 1024, WriteTimeout: time.Second})
@@ -168,11 +199,12 @@ func TestSessionBatchWriterRejectsShortWriteWithoutError(t *testing.T) {
 		sendQueue: newSessionOutboundQueue(server.config),
 		done:      make(chan struct{}),
 	}
+	receipt := core.NewWriteReceipt()
 	reservation, err := session.sendQueue.Reserve(int64(len(frames[0].payload)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := reservation.Commit(frames[0], int64(len(frames[0].payload))); err != nil {
+	if err := reservation.CommitWithCompletion(frames[0], int64(len(frames[0].payload)), receipt); err != nil {
 		t.Fatal(err)
 	}
 
@@ -180,6 +212,9 @@ func TestSessionBatchWriterRejectsShortWriteWithoutError(t *testing.T) {
 	first := <-session.sendQueue.Items()
 	if _, err := writer.writeAvailable(session, &first); !errors.Is(err, io.ErrShortWrite) {
 		t.Fatalf("writeAvailable() error = %v, want io.ErrShortWrite", err)
+	}
+	if err := receipt.Wait(context.Background()); !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("write receipt error = %v, want io.ErrShortWrite", err)
 	}
 	if snapshot := session.sendQueue.Snapshot(); snapshot.PendingFrames != 0 || snapshot.PendingBytes != 0 {
 		t.Fatalf("snapshot after short write = %+v", snapshot)

@@ -16,7 +16,7 @@ func BenchmarkSessionSendContiguous(b *testing.B) {
 		MaxFrameSize:  1024,
 		SendQueueSize: 1,
 	})
-	session := &session{server: server, sendQueue: newSessionOutboundQueue(server.config), done: make(chan struct{})}
+	session := &session{server: server, sendQueue: newSessionOutboundQueue(server.config, &server.outboundStats), done: make(chan struct{})}
 	message := core.Message{ID: 7, Seq: 9, Data: make([]byte, 1024)}
 	b.ReportAllocs()
 	b.SetBytes(int64(len(message.Data)))
@@ -32,7 +32,7 @@ func BenchmarkSessionSendContiguous(b *testing.B) {
 
 func BenchmarkSessionSendSegmented(b *testing.B) {
 	server := New(Config{MaxFrameSize: 1024, SendQueueSize: 1})
-	session := &session{server: server, sendQueue: newSessionOutboundQueue(server.config), done: make(chan struct{})}
+	session := &session{server: server, sendQueue: newSessionOutboundQueue(server.config, &server.outboundStats), done: make(chan struct{})}
 	message := core.Message{ID: 7, Seq: 9, Data: make([]byte, 1024)}
 	b.ReportAllocs()
 	b.SetBytes(int64(len(message.Data)))
@@ -48,7 +48,7 @@ func BenchmarkSessionSendSegmented(b *testing.B) {
 
 func BenchmarkReserveOutboundBufferCommit(b *testing.B) {
 	server := New(Config{MaxFrameSize: 1024, SendQueueSize: 1})
-	session := &session{server: server, sendQueue: newSessionOutboundQueue(server.config), done: make(chan struct{})}
+	session := &session{server: server, sendQueue: newSessionOutboundQueue(server.config, &server.outboundStats), done: make(chan struct{})}
 	message := core.Message{ID: 7, Seq: 9}
 	b.ReportAllocs()
 	b.SetBytes(1024)
@@ -83,7 +83,7 @@ func BenchmarkReplyCurrentPayload64B(b *testing.B) {
 				id:          1,
 				server:      server,
 				payloadPool: server.payloadPool.Shard(1),
-				sendQueue:   newSessionOutboundQueue(server.config),
+				sendQueue:   newSessionOutboundQueue(server.config, &server.outboundStats),
 				done:        make(chan struct{}),
 			}
 			b.ReportAllocs()
@@ -123,7 +123,7 @@ func BenchmarkTCPSessionBatchWrite16x1KiB(b *testing.B) {
 	session := &session{
 		server:    server,
 		raw:       batchDiscardConn{},
-		sendQueue: newSessionOutboundQueue(server.config),
+		sendQueue: newSessionOutboundQueue(server.config, &server.outboundStats),
 		done:      make(chan struct{}),
 	}
 	frame := outboundFrame{headerLen: codec.FrameHeaderSize, payload: make([]byte, payloadSize)}

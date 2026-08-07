@@ -42,13 +42,15 @@ notes.
 
 ## Compatibility surface
 
-After `v1`, the compatibility commitment covers documented exported identifiers in packages intended for application use, including `core`, `server`, `transport` (including `transport/transportkit`), `middleware`, `codec`, `observability`, `database`, and `eventing` subpackages.
+After `v1`, the compatibility commitment covers documented exported identifiers in packages intended for application use, including `core`, `server`, `transport` (including `transport/transportkit` and `transport/transporttest`), `middleware`, `codec`, `observability`, `database`, and `eventing` subpackages.
 
 The following are not stable API:
 
 - anything under an `internal` directory;
 - unexported identifiers;
-- test helpers, benchmark fixtures, generated temporary artifacts, and example implementation details;
+- ad hoc test helpers outside the documented `transport/transporttest` API,
+  benchmark fixtures, generated temporary artifacts, and example
+  implementation details;
 - undocumented behavior that contradicts an exported contract;
 - performance characteristics not stated as a measured release guarantee.
 
@@ -64,7 +66,10 @@ Behavioral compatibility matters alongside compilation. Changes to routing
 order, cancellation, middleware order, lifecycle ownership, readiness timing,
 `ComponentError` provenance, default limits, HTTP/3 0-RTT policy, message
 handler-error policy, wire encoding, safe response text, or error classification
-must be called out even when function signatures do not change.
+must be called out even when function signatures do not change. Write-receipt
+completion, outbound-drain ordering, aggregate outbound counter semantics, and
+the assertions made by the public transport contract suite are also behavioral
+contracts.
 
 `transport/internal/...` remains private. Third-party transports should use the
 narrow public contracts in `transport` and helpers in `transport/transportkit`;

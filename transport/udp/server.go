@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -65,14 +66,15 @@ type Server struct {
 	// clockBase lets atomic activity timestamps retain Go's monotonic clock.
 	clockBase time.Time
 
-	mu        sync.Mutex
-	sessions  map[string]*packetSession
-	closed    bool
-	accepting bool
-	started   bool
-	dispatch  *dispatchgate.Gate
-	ready     chan struct{}
-	readyOnce sync.Once
+	mu            sync.Mutex
+	sessions      map[string]*packetSession
+	closed        bool
+	accepting     bool
+	started       bool
+	dispatch      *dispatchgate.Gate
+	outboundStats outbound.Tracker
+	ready         chan struct{}
+	readyOnce     sync.Once
 }
 
 // New creates a UDP transport with normalized defaults.
@@ -255,9 +257,10 @@ func (s *Server) Quiesce(context.Context) error {
 	return s.stopAdmissionAndReads()
 }
 
-// Shutdown closes the UDP socket and all virtual sessions.
-func (s *Server) Shutdown(context.Context) error {
+// Shutdown drains peer writes before closing the UDP socket and sessions.
+func (s *Server) Shutdown(ctx context.Context) error {
 	stopErr := s.stopAdmissionAndReads()
+	drainErr := s.DrainOutbound(ctx)
 	s.mu.Lock()
 	s.closed = true
 	s.accepting = false
@@ -277,7 +280,38 @@ func (s *Server) Shutdown(context.Context) error {
 	for _, session := range sessions {
 		_ = session.Close()
 	}
-	return errors.Join(stopErr, closeErr)
+	return errors.Join(stopErr, drainErr, closeErr)
+}
+
+func (s *Server) DrainOutbound(ctx context.Context) (drainErr error) {
+	started := time.Now()
+	defer func() {
+		s.outboundStats.RecordDrain(time.Since(started), drainErr)
+	}()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.mu.Lock()
+	sessions := make([]*packetSession, 0, len(s.sessions))
+	for _, session := range s.sessions {
+		sessions = append(sessions, session)
+	}
+	s.mu.Unlock()
+	for _, session := range sessions {
+		session.sendQueue.Seal()
+	}
+	for _, session := range sessions {
+		drainErr = errors.Join(drainErr, session.sendQueue.WaitDrained(ctx))
+	}
+	return drainErr
+}
+
+// OutboundSnapshot reports bounded aggregate write and drain statistics.
+func (s *Server) OutboundSnapshot() transportapi.OutboundSnapshot {
+	if s == nil {
+		return transportapi.OutboundSnapshot{}
+	}
+	return s.outboundStats.Snapshot()
 }
 
 func (s *Server) stopAdmissionAndReads() error {
@@ -327,7 +361,7 @@ func (s *Server) getOrCreateSession(addr *net.UDPAddr) (*packetSession, bool) {
 		key:       key,
 		server:    s,
 		remote:    &remote,
-		sendQueue: newSessionOutboundQueue(s.config),
+		sendQueue: newSessionOutboundQueue(s.config, &s.outboundStats),
 		done:      make(chan struct{}),
 	}
 	session.lastActive.Store(s.activityTick(now))
@@ -400,7 +434,11 @@ type packetSession struct {
 
 var _ core.OutboundStateProvider = (*packetSession)(nil)
 var _ core.OutboundWritableWaiter = (*packetSession)(nil)
+var _ core.WriteReceiptSender = (*packetSession)(nil)
+var _ core.SessionOutboundDrainer = (*packetSession)(nil)
 var _ transportapi.Quiescer = (*Server)(nil)
+var _ transportapi.OutboundDrainer = (*Server)(nil)
+var _ transportapi.OutboundSnapshotter = (*Server)(nil)
 
 func (s *packetSession) ID() uint64 {
 	return s.id
@@ -419,6 +457,18 @@ func (s *packetSession) Done() <-chan struct{} {
 }
 
 func (s *packetSession) Send(msg core.Message) error {
+	return s.send(msg, nil)
+}
+
+func (s *packetSession) SendWithReceipt(msg core.Message) (*core.WriteReceipt, error) {
+	receipt := core.NewWriteReceipt()
+	if err := s.send(msg, receipt); err != nil {
+		return nil, err
+	}
+	return receipt, nil
+}
+
+func (s *packetSession) send(msg core.Message, completion outbound.Completion) error {
 	if s.server.udpConn() == nil {
 		return core.ErrClosed
 	}
@@ -437,7 +487,7 @@ func (s *packetSession) Send(msg core.Message) error {
 		return err
 	}
 	s.touch()
-	if err := reservation.Commit(packet, int64(len(packet))); err != nil {
+	if err := reservation.CommitWithCompletion(packet, int64(len(packet)), completion); err != nil {
 		return s.outboundError(err)
 	}
 	return nil
@@ -448,6 +498,14 @@ func (s *packetSession) Close() error {
 	s.closeLocked()
 	s.server.mu.Unlock()
 	return nil
+}
+
+func (s *packetSession) DrainOutbound(ctx context.Context) error {
+	if s == nil || s.sendQueue == nil {
+		return core.ErrClosed
+	}
+	s.sendQueue.Seal()
+	return s.sendQueue.WaitDrained(ctx)
 }
 
 func (s *packetSession) OutboundState() core.OutboundState {
@@ -492,7 +550,7 @@ func (s *packetSession) WaitOutboundWritable(ctx context.Context) error {
 func (s *packetSession) closeLocked() {
 	s.closeOnce.Do(func() {
 		if s.sendQueue != nil {
-			s.sendQueue.Close()
+			s.sendQueue.CloseWithError(core.ErrClosed)
 		}
 		s.closed.Store(true)
 		close(s.done)
@@ -509,12 +567,18 @@ func (s *packetSession) writeLoop() {
 			packet := item.Value
 			conn := s.server.udpConn()
 			if conn == nil {
-				item.Done()
+				item.Complete(core.ErrClosed)
 				_ = s.Close()
 				return
 			}
-			if _, err := conn.WriteToUDP(packet, s.remote); err != nil {
-				item.Done()
+			written, err := conn.WriteToUDP(packet, s.remote)
+			if err != nil {
+				item.Complete(err)
+				_ = s.Close()
+				return
+			}
+			if written != len(packet) {
+				item.Complete(io.ErrShortWrite)
 				_ = s.Close()
 				return
 			}
@@ -525,11 +589,15 @@ func (s *packetSession) writeLoop() {
 	}
 }
 
-func newSessionOutboundQueue(config Config) *outbound.Queue[[]byte] {
-	return outbound.New[[]byte](outbound.Config{
+func newSessionOutboundQueue(config Config, trackers ...*outbound.Tracker) *outbound.Queue[[]byte] {
+	var tracker *outbound.Tracker
+	if len(trackers) > 0 {
+		tracker = trackers[0]
+	}
+	return outbound.NewTracked[[]byte](outbound.Config{
 		MaxFrames: config.SendQueueSize,
 		MaxBytes:  config.MaxPendingBytes,
-	})
+	}, tracker)
 }
 
 func (s *packetSession) outboundError(err error) error {

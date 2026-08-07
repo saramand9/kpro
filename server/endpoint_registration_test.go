@@ -200,6 +200,7 @@ func TestEndpointShutdownKeepsTransportOpenWhileAcceptedHandlerDrains(t *testing
 func TestEndpointShutdownQuiescesBeforeRouterDrainAndTransportClose(t *testing.T) {
 	transport := &quiesceOrderingTransport{
 		quiesceCalled:  make(chan struct{}),
+		drainCalled:    make(chan struct{}),
 		shutdownCalled: make(chan struct{}),
 	}
 	endpoint := &Endpoint{
@@ -241,6 +242,8 @@ func TestEndpointShutdownQuiescesBeforeRouterDrainAndTransportClose(t *testing.T
 		t.Fatal("transport was not quiesced before Router drain")
 	}
 	select {
+	case <-transport.drainCalled:
+		t.Fatal("outbound drained while an accepted handler was running")
 	case <-transport.shutdownCalled:
 		t.Fatal("transport shut down while accepted handler was running")
 	case <-time.After(25 * time.Millisecond):
@@ -256,6 +259,11 @@ func TestEndpointShutdownQuiescesBeforeRouterDrainAndTransportClose(t *testing.T
 		t.Fatal("shutdown did not complete after handler drain")
 	}
 	select {
+	case <-transport.drainCalled:
+	default:
+		t.Fatal("outbound was not drained after Router work")
+	}
+	select {
 	case <-transport.shutdownCalled:
 	default:
 		t.Fatal("transport was not closed after Router drain")
@@ -264,17 +272,20 @@ func TestEndpointShutdownQuiescesBeforeRouterDrainAndTransportClose(t *testing.T
 
 func TestEndpointShutdownJoinsQuiesceAndTransportErrors(t *testing.T) {
 	quiesceErr := errors.New("quiesce failed")
+	drainErr := errors.New("outbound drain failed")
 	transportErr := errors.New("transport shutdown failed")
 	transport := &quiesceOrderingTransport{
 		quiesceCalled:  make(chan struct{}),
+		drainCalled:    make(chan struct{}),
 		shutdownCalled: make(chan struct{}),
 		quiesceErr:     quiesceErr,
+		drainErr:       drainErr,
 		shutdownErr:    transportErr,
 	}
 	endpoint := &Endpoint{transport: transport, router: core.NewRouter()}
 	err := endpoint.Shutdown(context.Background())
-	if !errors.Is(err, quiesceErr) || !errors.Is(err, transportErr) {
-		t.Fatalf("Shutdown() error = %v, want joined quiesce and transport errors", err)
+	if !errors.Is(err, quiesceErr) || !errors.Is(err, drainErr) || !errors.Is(err, transportErr) {
+		t.Fatalf("Shutdown() error = %v, want joined quiesce, drain, and transport errors", err)
 	}
 }
 
@@ -366,10 +377,13 @@ func (t *shutdownOrderingTransport) Shutdown(context.Context) error {
 
 type quiesceOrderingTransport struct {
 	quiesceCalled  chan struct{}
+	drainCalled    chan struct{}
 	shutdownCalled chan struct{}
 	quiesceErr     error
+	drainErr       error
 	shutdownErr    error
 	quiesceOnce    sync.Once
+	drainOnce      sync.Once
 	shutdownOnce   sync.Once
 }
 
@@ -384,7 +398,21 @@ func (t *quiesceOrderingTransport) Quiesce(context.Context) error {
 	return t.quiesceErr
 }
 
+func (t *quiesceOrderingTransport) DrainOutbound(context.Context) error {
+	if t.drainCalled != nil {
+		t.drainOnce.Do(func() { close(t.drainCalled) })
+	}
+	return t.drainErr
+}
+
 func (t *quiesceOrderingTransport) Shutdown(context.Context) error {
+	if t.drainCalled != nil {
+		select {
+		case <-t.drainCalled:
+		default:
+			return errors.New("transport shutdown ran before outbound drain")
+		}
+	}
 	t.shutdownOnce.Do(func() { close(t.shutdownCalled) })
 	return t.shutdownErr
 }

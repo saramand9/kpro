@@ -43,7 +43,9 @@ construction and component preflight validation, transport capability
 descriptors, `cmd/kpro` service scaffolding, versioned local template overlays,
 contract code generation, typed OpenAPI HTTP clients, a read-only contract
 catalog, optional OTel/Prometheus/Zap/health packages, and CI-enforced
-Router/HTTP/outbound/codec microbenchmark budgets. OTel exporters,
+Router/HTTP/outbound/codec microbenchmark budgets. Built-in message transports
+also expose bounded aggregate outbound statistics and share a public transport
+conformance suite. OTel exporters,
 telemetry backends, deployment sizing, and workload-specific validation remain
 application or platform responsibilities.
 
@@ -512,16 +514,22 @@ See [examples/README.md](examples/README.md) for startup commands.
   present; use `Config.CheckOrigin` for an explicit cross-origin allowlist.
 - HTTP/3 shutdown sends GOAWAY and drains accepted requests until its deadline.
   A mounted message Endpoint optionally quiesces new transport dispatch, drains
-  accepted Router work, and then shuts down the transport. The five built-in
-  message transports implement that optional phase; custom transports without
-  it fall back to Router drain followed by transport shutdown. This is still
-  an at-most-once reply boundary, not a reply-delivery guarantee.
+  accepted Router work, drains accepted transport writes, and then shuts down
+  the transport. TCP, KCP, QUIC, UDP, and WebSocket implement both optional
+  phases; custom transports fall back to the capabilities they expose.
+  Successful outbound drain proves completion of each transport write call,
+  not peer processing or durable delivery.
 - `core.BackpressureWait` has independent blocked-caller bounds (1024 globally
   and 16 per session by default). A dispatch consumes only one wait ticket even
   when it crosses global, per-session, and queue admission stages.
 - Built-in message sessions expose optional, bounded
   `core.SessionWaitOutboundWritable` support. Success is advisory and reserves
   no capacity for the next `Send`; the send result remains authoritative.
+- `core.SessionSendWithReceipt` discovers the optional built-in write-receipt
+  capability. Admission errors are returned immediately; an accepted receipt
+  completes with the later transport write result. `core.SessionDrainOutbound`
+  seals one session against new sends and waits for its accepted writes.
+  Direct `Session.Close` remains abortive.
 - `Router.Shutdown` drains accepted sync and async work. `Router.Close` is the
   immediate best-effort path and is not a synchronization barrier proving that
   no already-ready queued handler can begin.
@@ -534,6 +542,10 @@ See [examples/README.md](examples/README.md) for startup commands.
 - `server.NewChecked` validates server configuration, while `Start`/`Run` preflight mounted `transport.Validator` components before serving; `server.New` remains the permissive compatibility constructor.
 - Built-in transports advertise mode and capabilities through `transport.Descriptor`; `transport.Describe` gives tooling a conservative fallback for older custom components.
 - `prometheusx` uses bounded transport/operation/result labels, `zapx` uses an application logger, `healthx` bounds probe responses, and every health check must honor its context.
+- TCP, KCP, QUIC, UDP, and WebSocket implement
+  `transport.OutboundSnapshotter`; `prometheusx.NewOutboundCollector` exports
+  current queue pressure plus accepted/success/error/drop and drain counters
+  without connection IDs or peer-address labels.
 - `otelx` instruments invocations with an application-supplied or global provider; the application configures and owns the SDK, sampler, exporter, flush, and shutdown lifecycle.
 - SSE is one-way server push and has its own `sse.Context`; the stream setup can reuse unified `core.Middleware`.
 - HTTP and HTTPS first attempt graceful drain; a failed or expired drain
@@ -548,6 +560,9 @@ See [examples/README.md](examples/README.md) for startup commands.
 - More detailed call-flow diagrams are in [docs/call-flow.md](docs/call-flow.md).
 - TCP internal flow guide is in [docs/tcp-internal-flow.md](docs/tcp-internal-flow.md).
 - Network correctness requirements for message-based transports are in [docs/network-test-requirements.md](docs/network-test-requirements.md).
+- Custom message transports can run the same live lifecycle/session contract as
+  all five built-ins through the public `transport/transporttest` package; see
+  [Extending KPro](docs/extending-kpro.md).
 - Implemented write fast paths and the Netty comparison contract are in [docs/performance-fast-path.md](docs/performance-fast-path.md).
 - The source-based KPro/Netty performance and concurrency baseline is in [docs/netty-performance-baseline.md](docs/netty-performance-baseline.md).
 - The complete documentation index is [docs/README.md](docs/README.md).
@@ -561,6 +576,18 @@ go test ./...
 go vet ./...
 go test -race ./...
 ```
+
+Run the deterministic TCP slow-write, short/partial-write, deadline,
+half-close, reset, and connection-fanout matrix directly with:
+
+```powershell
+go test -race -count=1 -timeout=3m ./transport/tcp -run '^TestTCPFault'
+```
+
+The 1,000-connection shutdown and configurable real-socket soak cases are
+opt-in. See
+[Transport Fault Injection And Soak Testing](docs/transport-resilience-testing.md)
+for local commands and the manual `Transport resilience` workflow.
 
 Run the same selected hot-path budget guard used by CI:
 

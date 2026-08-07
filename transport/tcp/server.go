@@ -88,16 +88,17 @@ type Config struct {
 
 // Server accepts TCP connections and turns frames into core.Message contexts.
 type Server struct {
-	config      Config
-	rawConfig   Config
-	ln          net.Listener
-	lifecycleMu sync.Mutex
-	accepting   bool
-	started     bool
-	dispatch    *dispatchgate.Gate
-	payloadPool *bufferpool.ShardedPool
-	reuseCodec  codec.ReusableStreamCodec
-	bufferCodec codec.BufferedStreamCodec
+	config        Config
+	rawConfig     Config
+	ln            net.Listener
+	lifecycleMu   sync.Mutex
+	accepting     bool
+	started       bool
+	dispatch      *dispatchgate.Gate
+	payloadPool   *bufferpool.ShardedPool
+	outboundStats outbound.Tracker
+	reuseCodec    codec.ReusableStreamCodec
+	bufferCodec   codec.BufferedStreamCodec
 
 	nextID    uint64
 	active    int64
@@ -216,7 +217,7 @@ func (s *Server) listenAndServe(
 			id:        id,
 			server:    s,
 			raw:       raw,
-			sendQueue: newSessionOutboundQueue(s.config),
+			sendQueue: newSessionOutboundQueue(s.config, &s.outboundStats),
 			done:      make(chan struct{}),
 		}
 		session.payloadPool = s.payloadPool.Shard(id)
@@ -264,16 +265,51 @@ func (s *Server) Quiesce(context.Context) error {
 	return s.stopAdmissionAndReads()
 }
 
-// Shutdown closes the listener and all active TCP sessions.
-func (s *Server) Shutdown(context.Context) error {
+// Shutdown drains accepted writes before closing all active TCP sessions.
+func (s *Server) Shutdown(ctx context.Context) error {
 	stopErr := s.stopAdmissionAndReads()
+	drainErr := s.DrainOutbound(ctx)
 	s.sessions.Range(func(_, value interface{}) bool {
 		if session, ok := value.(*session); ok {
 			_ = session.Close()
 		}
 		return true
 	})
-	return stopErr
+	return errors.Join(stopErr, drainErr)
+}
+
+// DrainOutbound seals every current session before waiting so no later session
+// in the snapshot can accept writes while an earlier one drains.
+func (s *Server) DrainOutbound(ctx context.Context) (drainErr error) {
+	started := time.Now()
+	defer func() {
+		s.outboundStats.RecordDrain(time.Since(started), drainErr)
+	}()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	sessions := make([]*session, 0)
+	s.sessions.Range(func(_, value interface{}) bool {
+		if session, ok := value.(*session); ok {
+			sessions = append(sessions, session)
+		}
+		return true
+	})
+	for _, session := range sessions {
+		session.sendQueue.Seal()
+	}
+	for _, session := range sessions {
+		drainErr = errors.Join(drainErr, session.sendQueue.WaitDrained(ctx))
+	}
+	return drainErr
+}
+
+// OutboundSnapshot reports bounded aggregate write and drain statistics.
+func (s *Server) OutboundSnapshot() transportapi.OutboundSnapshot {
+	if s == nil {
+		return transportapi.OutboundSnapshot{}
+	}
+	return s.outboundStats.Snapshot()
 }
 
 func (s *Server) stopAdmissionAndReads() error {
@@ -386,8 +422,12 @@ func (s *session) ReleaseTransportBuffer(buffer []byte) {
 
 var _ core.OutboundStateProvider = (*session)(nil)
 var _ core.OutboundWritableWaiter = (*session)(nil)
+var _ core.WriteReceiptSender = (*session)(nil)
+var _ core.SessionOutboundDrainer = (*session)(nil)
 var _ core.OwnedPayloadSender = (*session)(nil)
 var _ transportapi.Quiescer = (*Server)(nil)
+var _ transportapi.OutboundDrainer = (*Server)(nil)
+var _ transportapi.OutboundSnapshotter = (*Server)(nil)
 var _ transportapi.BatchMessageServer = (*Server)(nil)
 
 func (s *session) ID() uint64 {
@@ -407,6 +447,18 @@ func (s *session) Done() <-chan struct{} {
 }
 
 func (s *session) Send(msg core.Message) error {
+	return s.send(msg, nil)
+}
+
+func (s *session) SendWithReceipt(msg core.Message) (*core.WriteReceipt, error) {
+	receipt := core.NewWriteReceipt()
+	if err := s.send(msg, receipt); err != nil {
+		return nil, err
+	}
+	return receipt, nil
+}
+
+func (s *session) send(msg core.Message, completion outbound.Completion) error {
 	select {
 	case <-s.done:
 		return core.ErrClosed
@@ -425,7 +477,7 @@ func (s *session) Send(msg core.Message) error {
 	if err != nil {
 		return err
 	}
-	if err := reservation.Commit(frame, frame.wireBytes()); err != nil {
+	if err := reservation.CommitWithCompletion(frame, frame.wireBytes(), completion); err != nil {
 		frame.release()
 		return s.outboundError(err)
 	}
@@ -478,7 +530,7 @@ func (s *session) SendOwnedPayload(msg core.Message, owner *core.BaseContext) er
 func (s *session) Close() error {
 	s.closeOnce.Do(func() {
 		if s.sendQueue != nil {
-			s.sendQueue.Close()
+			s.sendQueue.CloseWithError(core.ErrClosed)
 		}
 		close(s.done)
 		if s.raw != nil {
@@ -488,6 +540,14 @@ func (s *session) Close() error {
 		s.server.releaseConnectionSlot()
 	})
 	return nil
+}
+
+func (s *session) DrainOutbound(ctx context.Context) error {
+	if s == nil || s.sendQueue == nil {
+		return core.ErrClosed
+	}
+	s.sendQueue.Seal()
+	return s.sendQueue.WaitDrained(ctx)
 }
 
 func (s *session) OutboundState() core.OutboundState {
@@ -845,11 +905,15 @@ func (s *session) writeLoop() {
 	}
 }
 
-func newSessionOutboundQueue(config Config) *outbound.Queue[outboundFrame] {
-	return outbound.NewWithFinalizer(outbound.Config{
+func newSessionOutboundQueue(config Config, trackers ...*outbound.Tracker) *outbound.Queue[outboundFrame] {
+	var tracker *outbound.Tracker
+	if len(trackers) > 0 {
+		tracker = trackers[0]
+	}
+	return outbound.NewTrackedWithFinalizer(outbound.Config{
 		MaxFrames: config.SendQueueSize,
 		MaxBytes:  config.MaxPendingBytes,
-	}, func(frame outboundFrame) {
+	}, tracker, func(frame outboundFrame) {
 		frame.release()
 	})
 }
