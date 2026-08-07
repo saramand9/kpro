@@ -5,8 +5,6 @@ package app
 
 import (
 	"github.com/saramand9/kpro/codec"
-	loginhandler "github.com/saramand9/kpro/internal/modules/login/handler"
-	loginservice "github.com/saramand9/kpro/internal/modules/login/service"
 	projecthandler "github.com/saramand9/kpro/internal/modules/projects/handler"
 	projectservice "github.com/saramand9/kpro/internal/modules/projects/service"
 	reporthandler "github.com/saramand9/kpro/internal/modules/reports/handler"
@@ -30,9 +28,9 @@ func RegisterHTTPModules(endpoint *httpx.Endpoint, stores Stores) error {
 	return nil
 }
 
-// RegisterUDPModules wires UDP-only modules.
-func RegisterUDPModules(endpoint *server.Endpoint) {
-	loginhandler.RegisterUDP(endpoint, loginservice.New(loginservice.Config{}))
+// RegisterUDPModules exposes the same persisted user service over KPro messages.
+func RegisterUDPModules(endpoint *server.Endpoint, stores Stores) {
+	userhandler.RegisterMessage(endpoint, userservice.NewWithStore(stores.Users))
 }
 
 // RegisterGRPCModules wires gRPC-only modules.
@@ -41,14 +39,14 @@ func RegisterGRPCModules(endpoint *grpcx.Server) {
 }
 
 // MountOptionalProtocolModules mounts optional non-HTTP modules for the example.
-func MountOptionalProtocolModules(app *server.Server, config Config) {
+func MountOptionalProtocolModules(app *server.Server, config Config, stores Stores) {
 	if config.UDPAddr != "" {
 		udpEndpoint := app.Mount(udp.New(udp.Config{
 			Addr:          config.UDPAddr,
 			Codec:         codec.KProV1(),
 			MaxPacketSize: 2048,
 		})).Use(middleware.Recover(), middleware.MaxPayload(1500))
-		RegisterUDPModules(udpEndpoint)
+		RegisterUDPModules(udpEndpoint, stores)
 	}
 	if config.GRPCAddr != "" {
 		grpcEndpoint := grpcx.NewServer(config.GRPCAddr)

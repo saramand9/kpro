@@ -5,6 +5,11 @@ transport setup and wire behavior for learning and protocol checks; they omit
 some application and deployment concerns and are not production templates.
 Start the server in one terminal, then run the matching client in another.
 
+The examples deliberately contain no built-in users, passwords, token issuer,
+or authorization policy. Integrate authentication at the application or
+gateway boundary with a reviewed identity provider; do not treat example
+protocol wiring as a security implementation.
+
 Commands below use forward slashes and run from the repository root in POSIX
 shells and PowerShell. Use `go run ./cmd/kpro doctor` to print local Go/module
 diagnostics and `go run ./cmd/kpro version` to inspect CLI build metadata.

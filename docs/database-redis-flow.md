@@ -1,49 +1,55 @@
-# Redis 流程
+# Redis Data Flow
 
-这份文档用 Redis 作为一个具体例子，说明数据在 KPro 数据库架构里怎么流转。`database/redis` 目录下的 Redis 适配器已经存在；业务模块仍然需要自己提供 projector、repository 或 service 代码，决定什么时候使用 Redis。
+This guide uses Redis to show how data moves through KPro's database
+architecture. The adapter under `database/redis` is implemented, but an
+application module still owns the projector, repository, or service code that
+decides when Redis is appropriate.
 
 ![Redis database flow](assets/database-redis-flow.svg)
 
-## 核心思路
+## Core Model
 
-默认架构里，Redis 通常不是 source of truth，也就是不是事务数据的最终可信来源。更典型的用法是作为读模型：
+Redis is normally a read model rather than the transactional source of truth:
 
 ```text
-source-of-truth 写入成功
--> event 写入应用自己的 delivery store
--> projector 消费 event
--> Redis cache / stream / zset 被更新
--> 读请求可以优先读取 Redis
+source-of-truth write succeeds
+-> event is stored in the application's delivery store
+-> projector consumes the event
+-> Redis cache / stream / sorted set is updated
+-> read requests may prefer Redis
 ```
 
-如果某个模块明确需要 Redis 做锁、stream、sorted set 或短期缓存，也可以由 service 直接调用 Redis adapter。
+A service may also call the Redis adapter directly when it explicitly needs a
+short-lived cache, lock, stream, or sorted set.
 
-## 流程目的总览
+## Flow Overview
 
-| 流程 | 目的 | 解决的问题 | 不负责什么 |
+| Flow | Purpose | Problem addressed | Out of scope |
 | --- | --- | --- | --- |
-| 启动流程 | 把 Redis 连接变成一个可健康检查、可关闭的资源。 | 避免业务启动后才发现 Redis 配置错误或网络不可达。 | 不决定业务数据怎么存，也不做缓存读写。 |
-| 典型 Projector 写入流程 | 在主写入成功后，异步把 event 投影到 Redis 读模型。 | 避免 MySQL/GORM 和 Redis 直接双写导致不一致；失败可重试。 | 不让 Redis 成为事务源，也不阻塞主请求等待 Redis 必须成功。 |
-| Redis Cache 读取流程 | 让查询优先走 Redis，命中时减少 source-of-truth 压力。 | 提高读取性能，降低 GORM SQL 查询压力。 | 不保证数据一定最新，未命中或出错时要由业务决定是否回源。 |
-| 其他 Redis 能力流程 | 复用同一个 Redis client 提供锁、stream、zset 等能力。 | 避免每个模块重复封装 Redis 命令和 key 处理。 | 不把所有 Redis 命令抽象成一个统一 CRUD。 |
-| 最小模块侧 Projector 示例 | 展示业务模块应该如何把 event 转成 Redis cache。 | 说明 adapter 和业务 projector 的职责边界。 | 示例代码不是当前仓库已有业务实现。 |
+| Startup | Turn Redis configuration into a health-checked, closable resource. | Detect invalid configuration or an unreachable server before serving traffic. | Business data design and cache operations. |
+| Projector write | Project committed events asynchronously into a Redis read model. | Avoid an unsafe direct dual write to GORM and Redis; make failures retryable. | Making Redis the transactional source or requiring Redis before the primary request completes. |
+| Cache read | Prefer Redis for eligible queries and reduce source-of-truth load on a hit. | Lower read latency and SQL load. | Strong freshness guarantees; the service owns fallback behavior on misses and errors. |
+| Other Redis capabilities | Reuse one client for locks, streams, and sorted sets. | Centralize key construction and command semantics. | Hiding every Redis command behind a generic CRUD abstraction. |
+| Module projector example | Show how a business event becomes a Redis cache value. | Clarify the boundary between an adapter and a business projector. | Claiming that the sample projector is an implemented application feature. |
 
-## 启动流程
+## Startup Flow
 
-目的：把 Redis 从一段配置变成一个稳定的运行时资源。这个流程负责创建连接、校验配置、启动时 ping Redis，并接入统一的 `lifecycle.Resource`，方便健康检查和关闭释放。
+Startup turns configuration into a stable runtime resource. It validates the
+configuration, creates or wraps a client, pings Redis, and exposes a common
+`lifecycle.Resource` for health checks and shutdown. It answers whether the
+application can reliably connect to Redis; it does not define a cache,
+leaderboard, or stream schema.
 
-这个流程解决的是“应用能不能可靠地连上 Redis”的问题。它不关心用户缓存、排行榜、stream 这些具体业务怎么使用 Redis。
-
-| 步骤 | 文件 | 调用 | 输入 | 输出 | 负责什么 |
+| Step | File | Call | Input | Output | Responsibility |
 | --- | --- | --- | --- | --- | --- |
-| 1 | 模块启动代码，例如 `internal/.../app` | 构造 `redisstore.Config` | `Name`, `Addr`, `DB`, `KeyPrefix`, 可选 `*redis.Client` | config 值 | 决定当前应用连接哪个 Redis。 |
-| 2 | `database/redis/config.go` | `normalizeConfig(config)` | 原始 config | 标准化 config 或 error | 设置默认 `Name`，裁剪 `KeyPrefix`，要求 `Addr` 或 `Client`，设置默认 ping 超时。 |
-| 3 | `database/redis/client.go` | `Open(ctx, config)` | 标准化后的 config | `*redisstore.Client` | 创建或包装 go-redis client。 |
-| 4 | `database/redis/client.go` | `redis.NewClient(redisOptions(config))` | Redis 地址、认证、DB | `*redis.Client` | 调用方没有注入 client 时，创建底层协议 client。 |
-| 5 | `database/redis/client.go` | `client.Ping(ctx)` | ping context | error 或 nil | 启动完成前确认 Redis 可达。 |
-| 6 | `database/common/lifecycle/resource.go` | `lifecycle.Resource` 方法 | `Client` | `Name`, `KindRedis`, `Health`, `Close` | 让 Redis 和其他数据库资源一样参与健康检查和关闭流程。 |
+| 1 | Application assembly, such as `internal/.../app` | Build `redisstore.Config` | `Name`, `Addr`, `DB`, `KeyPrefix`, optional `*redis.Client` | Configuration values | Select the Redis deployment used by this application. |
+| 2 | `database/redis/config.go` | `normalizeConfig(config)` | Raw configuration | Normalized configuration or error | Apply the default name, clean the key prefix, require an address or client, and set the default ping timeout. |
+| 3 | `database/redis/client.go` | `Open(ctx, config)` | Normalized configuration | `*redisstore.Client` | Create or wrap a go-redis client. |
+| 4 | `database/redis/client.go` | `redis.NewClient(redisOptions(config))` | Address, credentials, and database | `*redis.Client` | Create the native client when the caller did not inject one. |
+| 5 | `database/redis/client.go` | `client.Ping(ctx)` | Ping context | Error or nil | Confirm reachability before startup completes. |
+| 6 | `database/common/lifecycle/resource.go` | `lifecycle.Resource` methods | `Client` | `Name`, `KindRedis`, `Health`, `Close` | Participate in the same health and shutdown lifecycle as other database resources. |
 
-启动数据例子：
+Example assembly:
 
 ```go
 redisClient, err := redisstore.Open(ctx, redisstore.Config{
@@ -55,7 +61,7 @@ redisClient, err := redisstore.Open(ctx, redisstore.Config{
 userCache := redisstore.Cache[UserCache](redisClient, "users:")
 ```
 
-结果：
+Result:
 
 ```text
 redisClient.Name() = "redis-cache"
@@ -63,29 +69,34 @@ redisClient.Kind() = lifecycle.KindRedis
 userCache key prefix = "kpro:" + "users:"
 ```
 
-## 典型 Projector 写入流程
+## Projector Write Flow
 
-目的：把主数据库里已经发生的业务变化，可靠地同步成 Redis 读模型。这里的重点不是“立刻写 Redis”，而是“主写入成功后，event 不丢，Redis 失败后可以重试”。
+This flow reliably projects a committed source-of-truth change into a Redis
+read model. The important property is not that Redis is updated immediately;
+it is that the event survives the primary write and a failed Redis update can
+be retried.
 
-当 GORM SQL 负责事务状态，Redis 只负责缓存读模型时，推荐使用这条链路。这样主请求只需要保证 MySQL/GORM 写入成功，并把 event 交给应用自己的 delivery store；Redis 更新可以由后台 projector 慢慢补齐。
+When GORM SQL owns transactional state and Redis owns a cache view, the primary
+request only needs to commit the SQL state and append an event to the
+application's delivery store. A background projector can bring Redis up to date.
 
-| 步骤 | 文件 | 调用 | 输入 | 输出 | 负责什么 |
+| Step | File | Call | Input | Output | Responsibility |
 | --- | --- | --- | --- | --- | --- |
-| 1 | module handler | `CreateUser(...)` 请求入口 | HTTP/gRPC/TCP 请求体 | command DTO | 把传输层数据解码成业务命令。 |
-| 2 | module service | service 方法 | command DTO | domain model 和 event | 校验业务规则，决定发生了什么变化。 |
-| 3 | `eventing/events/codec.go` | `JSONCodec.Encode(event)` | typed event struct | JSON bytes | 序列化 event payload。 |
-| 4 | `eventing/events/event.go` | `NewEnvelope(id, event, payload, occurredAt)` | event id、typed event、payload | `events.Envelope` | 给 event 加上类型、聚合 ID、schema version、时间等元数据。 |
-| 5 | 模块侧 GORM repository | `db.Transaction(...)` | domain model 和 event | MySQL row + outbox row | 在同一事务中保存领域状态，并调用 `GORMStore.AppendTx` 写 event。 |
-| 6 | `eventing/delivery.GORMStore` | `AppendTx(ctx, tx, envelope)` | GORM transaction、`events.Envelope` | durable event record | 由调用者统一提交或回滚，避免领域行与 event 双写不一致。 |
-| 7 | `eventing/projector/runner.go` | `Runner.Run(ctx)` | delivery store 和 projector 列表 | 持续续租和 fenced ack/fail；取消时退出 | 持续拉取可投递 event；处理前续租，长任务运行时按剩余租期的一半续租；`RunOnce` 保留给测试和外部调度器。 |
-| 8 | `eventing/delivery/store.go` | `Store.Fetch(ctx, consumer, limit)` | projector 名称、批大小 | `[]delivery.Record` | 创建 delivery 行，把可投递 event claim 成带 lease 的 `inflight`；进程崩溃后可自动重取。 |
-| 9 | 模块侧 projector，例如 `UserCacheProjector` | `Handle(ctx, envelope)` | `delivery.Record.Envelope` | Redis cache 命令 | 解码 payload，把 event 映射成 Redis 读模型。 |
-| 10 | `database/redis/cache.go` | `CacheView.Set(ctx, key, value, ttl)` | 逻辑 key、typed value、ttl | error 或 nil | 把 value marshal 成 JSON，然后调用 Redis `SET`。 |
-| 11 | `database/redis/client.go` | `Client.key(key, prefix)` | key `u_1001`，prefix `users:` | `kpro:users:u_1001` | 应用全局 prefix 和 cache-specific prefix。 |
-| 12 | go-redis | `SET key json ttl` | 最终 Redis key 和 JSON bytes | Redis reply | 发送 Redis 协议命令。 |
-| 13 | `eventing/projector/runner.go` | `AckAttempt(...)` 或 `FailAttempt(...)` | projector 名称、event id、attempt | delivery 状态更新 | fenced settlement 阻止过期 worker 覆盖新 attempt；失败则重试或进入 dead-letter。 |
+| 1 | Module handler | `CreateUser(...)` entry point | HTTP, gRPC, or Message request | Command DTO | Decode transport data into a business command. |
+| 2 | Module service | Service method | Command DTO | Domain model and event | Enforce business rules and decide what changed. |
+| 3 | `eventing/events/codec.go` | `JSONCodec.Encode(event)` | Typed event | JSON bytes | Encode the event payload. |
+| 4 | `eventing/events/event.go` | `NewEnvelope(id, event, payload, occurredAt)` | Event ID, typed event, payload | `events.Envelope` | Add type, aggregate ID, schema version, and timestamp metadata. |
+| 5 | Module GORM repository | `db.Transaction(...)` | Domain model and event | SQL row and outbox row | Persist domain state and call `GORMStore.AppendTx` in one transaction. |
+| 6 | `eventing/delivery.GORMStore` | `AppendTx(ctx, tx, envelope)` | GORM transaction and envelope | Durable event record | Let the caller commit or roll back both rows together. |
+| 7 | `eventing/projector/runner.go` | `Runner.Run(ctx)` | Delivery store and projectors | Lease renewal and fenced settlement until cancellation | Fetch deliverable events, renew leases before and during long work, and process continuously. `RunOnce` remains available for tests and external schedulers. |
+| 8 | `eventing/delivery/store.go` | `Store.Fetch(ctx, consumer, limit)` | Projector name and batch size | `[]delivery.Record` | Create delivery rows and claim eligible events as leased `inflight` work that can be recovered after a crash. |
+| 9 | Module projector, such as `UserCacheProjector` | `Handle(ctx, envelope)` | `delivery.Record.Envelope` | Redis cache command | Decode the payload and map the event to a Redis read model. |
+| 10 | `database/redis/cache.go` | `CacheView.Set(ctx, key, value, ttl)` | Logical key, typed value, TTL | Error or nil | Marshal the value as JSON and issue Redis `SET`. |
+| 11 | `database/redis/client.go` | `Client.key(key, prefix)` | Key `u_1001` and prefix `users:` | `kpro:users:u_1001` | Apply the application and cache-specific prefixes. |
+| 12 | go-redis | `SET key json ttl` | Final Redis key and JSON bytes | Redis reply | Send the Redis protocol command. |
+| 13 | `eventing/projector/runner.go` | `AckAttempt(...)` or `FailAttempt(...)` | Projector, event ID, and attempt | Updated delivery state | Prevent a stale worker from settling a newer attempt; retry failures or move them to dead-letter state. |
 
-具体数据例子：
+Concrete data types:
 
 ```go
 type UserCreated struct {
@@ -104,171 +115,188 @@ type UserCache struct {
 }
 ```
 
-进入 event 边界时：
+At the event boundary:
 
 ```text
-输入 typed event:
+typed event input:
 UserCreated{ID:"u_1001", Name:"Ada", Email:"ada@example.com"}
 
-经过 events.JSONCodec.Encode 后的 payload:
+payload after events.JSONCodec.Encode:
 {"id":"u_1001","name":"Ada","email":"ada@example.com"}
 
-经过 events.NewEnvelope 后的 envelope:
+envelope after events.NewEnvelope:
 ID: evt_9001
 Type: user.created
 AggregateID: u_1001
 SchemaVersion: 1
-Payload: 上面的 JSON bytes
+Payload: the JSON bytes above
 ```
 
-进入 delivery 边界时：
+At the delivery boundary:
 
 ```text
-输入:
+input:
 events.Envelope{ID:"evt_9001", Type:"user.created", AggregateID:"u_1001", ...}
 
-输出:
-delivery store record:
+output delivery-store record:
 id=evt_9001
 type=user.created
 aggregate_id=u_1001
 payload={"id":"u_1001","name":"Ada","email":"ada@example.com"}
 
-之后 Fetch 会创建或 claim 一条 delivery record:
+Fetch then creates or claims a delivery record:
 consumer=redis.user-cache
 event_id=evt_9001
 status=inflight
 ```
 
-进入 projector 边界时：
+At the projector boundary:
 
 ```text
-输入:
+input:
 delivery.Record{
   Consumer: "redis.user-cache",
   Status: inflight,
   Envelope: evt_9001/user.created/u_1001
 }
 
-正在做的事:
+work:
 Decode Envelope.Payload -> UserCreated
 Map UserCreated -> UserCache
 Call cache.Set(ctx, "u_1001", UserCache{...}, 30m)
 
-输出:
-Redis 写请求；如果失败，则 Runner 会用当前 attempt 调用 FailAttempt。
+output:
+Redis write request; on failure, Runner calls FailAttempt for this attempt.
 ```
 
-进入 Redis adapter 边界时：
+At the Redis adapter boundary:
 
 ```text
-CacheView.Set 的输入:
+CacheView.Set input:
 key = "u_1001"
 value = UserCache{ID:"u_1001", Name:"Ada", Email:"ada@example.com"}
 ttl = 30m
 
-cache.go 做的事:
+cache.go:
 json.Marshal(value)
 
-client.go 做的 key 处理:
+client.go key construction:
 KeyPrefix "kpro:" + cache prefix "users:" + key "u_1001"
 
-输出 Redis 命令:
+Redis command:
 SET kpro:users:u_1001 {"id":"u_1001","name":"Ada","email":"ada@example.com"} EX 1800
 ```
 
-成功之后：
+On success:
 
 ```text
-Runner 调用 delivery.AttemptStore.AckAttempt(ctx, "redis.user-cache", "evt_9001", attempt)
+Runner calls delivery.AttemptStore.AckAttempt(
+  ctx, "redis.user-cache", "evt_9001", attempt,
+)
 delivery status = delivered
 ```
 
-如果 Redis 不可用或 JSON marshal 失败：
+If Redis is unavailable or JSON marshaling fails:
 
 ```text
-CacheView.Set 返回 error
-Runner 调用 delivery.AttemptStore.FailAttempt(ctx, "redis.user-cache", "evt_9001", attempt, err)
-status = failed, available_at = now + RetryDelay；下一次 claim 时 attempts += 1
-超过 MaxAttempts 后 status = dead
+CacheView.Set returns an error
+Runner calls delivery.AttemptStore.FailAttempt(
+  ctx, "redis.user-cache", "evt_9001", attempt, err,
+)
+status = failed, available_at = now + RetryDelay
+the next claim increments attempts
+status = dead after MaxAttempts
 ```
 
-内置 `Runner` 在调用 projector 前会先续租，并在长时间处理期间持续续租。
-如果 lease 已被其他 worker reclaim，续租或 fenced settlement 会返回
-`delivery.ErrLeaseLost`，旧 worker 不会覆盖新 attempt 的状态。直接使用
-`Fetch` 的调用方也应使用 `AckAttempt`/`FailAttempt`；`GORMStore.Ack`/`Fail`
-只保留首次投递的兼容语义。
+The built-in `Runner` renews a lease before calling a projector and continues
+renewing during long processing. If another worker has reclaimed the lease,
+renewal or fenced settlement returns `delivery.ErrLeaseLost`, so the stale
+worker cannot overwrite the newer attempt. Direct `Fetch` callers should also
+use `AckAttempt` and `FailAttempt`. `GORMStore.Ack` and `GORMStore.Fail` only
+retain their compatibility semantics for the first delivery attempt.
 
-## Redis Cache 读取流程
+## Redis Cache Read Flow
 
-目的：让读请求在可以接受“读模型可能稍微滞后”的场景下优先读取 Redis，从而减少 source-of-truth 的查询压力。
+Eligible reads may prefer a Redis view when a small amount of projection lag is
+acceptable. The business service decides whether a miss may fall back to the
+source of truth, whether a Redis error should degrade gracefully, and whether a
+query requires strong consistency.
 
-这个流程解决的是“高频读取怎么更快、更便宜”的问题。是否允许 cache miss 回源、Redis 错误时是否降级、返回的数据是否必须强一致，都由业务 service 决定。
-
-| 步骤 | 文件 | 调用 | 输入 | 输出 | 负责什么 |
+| Step | File | Call | Input | Output | Responsibility |
 | --- | --- | --- | --- | --- | --- |
-| 1 | module handler | `GetUser(id)` 请求入口 | user id `u_1001` | query DTO | 解码路由或查询参数。 |
-| 2 | module service | cache-first query | `u_1001` | cached view 或 miss | 决定这个查询是否可以优先信任 Redis。 |
-| 3 | `database/common/readmodels/views.go` | `Cache[T]` interface | `Get(ctx, key)` contract | typed value、hit flag、error | 需要抽象时，让 service 不直接依赖 Redis 实现。 |
-| 4 | `database/redis/cache.go` | `CacheView.Get(ctx, key)` | 逻辑 key `u_1001` | `UserCache`、`true/false`、error | 解析 key，调用 Redis `GET`，反序列化 JSON。 |
-| 5 | `database/redis/client.go` | `Client.key(key, prefix)` | 逻辑 key 和 prefix | 最终 Redis key | 应用 `kpro:users:` prefix。 |
-| 6 | go-redis / Redis | `GET kpro:users:u_1001` | 最终 key | bytes、redis.Nil 或 error | 从 Redis 读取。 |
-| 7 | `database/redis/cache.go` | `json.Unmarshal` | bytes | typed `UserCache` | 把 Redis JSON bytes 转成 Go value。 |
-| 8 | module service | return or fallback | hit/miss 结果 | response DTO 或 source query | 命中则返回；未命中可查 GORM SQL 并回填缓存。 |
+| 1 | Module handler | `GetUser(id)` entry point | User ID `u_1001` | Query DTO | Decode a path or query parameter. |
+| 2 | Module service | Cache-first query | `u_1001` | Cached view or miss | Decide whether this query may trust Redis first. |
+| 3 | `database/common/readmodels/views.go` | `Cache[T]` interface | `Get(ctx, key)` contract | Typed value, hit flag, error | Keep the service independent of Redis when an abstraction is useful. |
+| 4 | `database/redis/cache.go` | `CacheView.Get(ctx, key)` | Logical key `u_1001` | `UserCache`, hit flag, error | Build the key, call Redis `GET`, and decode JSON. |
+| 5 | `database/redis/client.go` | `Client.key(key, prefix)` | Logical key and prefix | Final Redis key | Apply the `kpro:users:` prefix. |
+| 6 | go-redis / Redis | `GET kpro:users:u_1001` | Final key | Bytes, `redis.Nil`, or error | Read from Redis. |
+| 7 | `database/redis/cache.go` | `json.Unmarshal` | Bytes | Typed `UserCache` | Decode the stored JSON. |
+| 8 | Module service | Return or fall back | Hit or miss result | Response DTO or source query | Return a hit; optionally query SQL and refill the cache on a miss. |
 
-读取结果分三类：
+The three outcomes are distinct:
 
 ```text
-命中:
+hit:
 CacheView.Get -> UserCache{ID:"u_1001", Name:"Ada", Email:"ada@example.com"}, true, nil
 
-未命中:
-Redis 返回 redis.Nil
+miss:
+Redis returns redis.Nil
 CacheView.Get -> zero UserCache, false, nil
 
-Redis 或网络错误:
+Redis or network failure:
 CacheView.Get -> zero UserCache, false, err
 ```
 
-## 其他 Redis 能力流程
+## Other Redis Capabilities
 
-目的：把 Redis 常用能力按语义拆开，避免业务代码直接散落 `SETNX`、`XADD`、`ZADD` 这类底层命令。这样每种能力都有明确文件、明确输入输出、明确错误语义。
+The adapter groups common Redis behavior by semantics so application code does
+not scatter raw `SETNX`, `XADD`, and `ZADD` calls. This is intentionally not a
+generic Redis CRUD layer.
 
-这部分不是为了把 Redis 包装成通用 CRUD。Redis 的价值在于 cache、lock、stream、zset 这些不同数据结构，所以这里按能力拆分。
-
-| 能力 | 文件 | 主要调用 | 数据形态 | 典型用途 |
+| Capability | File | Main calls | Data shape | Typical use |
 | --- | --- | --- | --- | --- |
-| Cache | `database/redis/cache.go` | `Get`, `Set`, `Delete`, `SetNX`, `Exists` | typed value 序列化成 JSON | 读模型缓存。 |
-| Lock | `database/redis/lock.go` | `Acquire`, `Release`, `Refresh` | key、随机 token、TTL | 短生命周期分布式锁。 |
-| Stream | `database/redis/stream.go` | `Add`, `Read`, `CreateGroup`, `ReadGroup`, `Ack` | stream message `map[string]any` | Redis Streams 队列或事件中继。 |
-| ZSet | `database/redis/zset.go` | `Add`, `Increment`, `Score`, `Range`, `RevRange`, `Remove` | member string 加 score | 排行榜、优先级视图、排名查询。 |
-| Lifecycle | `database/redis/client.go` | `Ping`, `Health`, `Close` | resource health state | 启动检查和关闭流程。 |
+| Cache | `database/redis/cache.go` | `Get`, `Set`, `Delete`, `SetNX`, `Exists` | Typed values encoded as JSON | Read-model cache |
+| Lock | `database/redis/lock.go` | `Acquire`, `Release`, `Refresh` | Key, random ownership token, TTL | Short-lived distributed coordination |
+| Stream | `database/redis/stream.go` | `Add`, `Read`, `CreateGroup`, `ReadGroup`, `Ack` | Stream message as `map[string]any` | Redis Streams queue or event relay |
+| Sorted set | `database/redis/zset.go` | `Add`, `Increment`, `Score`, `Range`, `RevRange`, `Remove` | String member and score | Leaderboards, priority views, and ranking |
+| Lifecycle | `database/redis/client.go` | `Ping`, `Health`, `Close` | Resource health state | Startup validation and shutdown |
 
-### Lock 的正确边界
+### Lock Correctness Boundary
 
-`Lock` 是一个单次获取对象。第一次 `Acquire` 成功后，即使随后已经
-`Release` 或 TTL 已过期，也不能用同一个对象再次获取；下一次 lease 必须通过
-`NewLock` 或 `Client.Lock` 创建新对象。获取失败时可以在同一个对象上按业务的
-有界退避策略重试。`Release` 和 `Refresh` 使用随机 ownership token 的 Lua
-compare-and-delete/expire，旧对象因此不能释放或续期后来持有者的 lease。
+A `Lock` is a single-acquisition object. Once `Acquire` succeeds, that object
+cannot acquire another lease, even after `Release` or TTL expiry. Create the
+next lease with `NewLock` or `Client.Lock`. A failed acquisition may be retried
+on the same object with an application-owned bounded backoff policy.
+`Release` and `Refresh` use Lua compare-and-delete/expire with a random
+ownership token, so an old object cannot release or extend a later owner's
+lease.
 
-这个 token 不是 fencing token，当前实现也不是多节点 quorum/Redlock 算法。
-进程暂停、网络分区或处理时间超过 TTL 时，旧持有者可能在 lease 过期后继续执行，
-同时新持有者已经开始工作。因此它只适合允许短暂重复执行、且操作幂等或可补偿的
-短期协调。对支付、库存扣减、外部不可逆写入等要求严格互斥的路径，应在真正被保护
-的存储上使用单调 fencing version、事务/唯一约束或该存储原生的并发控制；不能只靠
-Redis TTL lock 保证正确性。TTL、续期频率、失败重试和进程暂停场景都需要在目标
-Redis 拓扑上验证。
+The ownership token is not a fencing token, and this implementation is not a
+multi-node quorum or Redlock algorithm. After a process pause, network
+partition, or operation that exceeds the TTL, an old owner may continue while
+a new owner has already acquired the lease. Use it only for short coordination
+where brief duplicate execution is acceptable and operations are idempotent or
+compensatable.
 
-`Acquire` 的传输错误还可能表示结果未知：`SET NX` 已到达 Redis，但回复在返回
-客户端前丢失。此时不能把错误当作“锁肯定不存在”，也不应立即让另一个 owner
-执行非幂等工作；应先核对受保护状态，或至少等待本次配置的 TTL 到期后再恢复。
+For payments, inventory decrements, and other irreversible writes that require
+strict exclusion, use a monotonic fencing version, transaction or unique
+constraint, or concurrency control native to the protected source of truth.
+Redis TTL locks alone cannot establish that guarantee. Validate TTL, renewal,
+retry, and process-pause behavior against the target Redis topology.
 
-## 最小模块侧 Projector 示例
+A transport error from `Acquire` may also mean that the result is unknown:
+`SET NX` might have reached Redis before its response was lost. Do not treat
+the error as proof that no lease exists or immediately let another owner
+perform non-idempotent work. Reconcile the protected state or, at minimum, wait
+for the configured TTL to expire before recovery.
 
-目的：说明业务模块如何把通用 `events.Envelope` 转成自己需要的 Redis 数据结构。`database/redis` 只提供 Redis 能力，真正理解 `user.created` 代表什么、应该写哪个 key、TTL 多久的是业务模块 projector。
+## Minimal Module Projector
 
-这段代码是模块侧代码，应该放在拥有这个读模型的业务模块附近，而不是放进 `database/redis`。
+The business module translates a generic `events.Envelope` into its own Redis
+shape. `database/redis` supplies Redis capabilities; the projector understands
+what `user.created` means, which key to write, and which TTL is appropriate.
+Keep this code beside the module that owns the read model, not in
+`database/redis`.
 
 ```go
 type UserCacheProjector struct {
@@ -291,13 +319,14 @@ func (p UserCacheProjector) Handle(ctx context.Context, envelope events.Envelope
 }
 ```
 
-装配形态：
+Application assembly:
 
 ```go
-redisClient, _ := redisstore.Open(ctx, redisstore.Config{Addr: "127.0.0.1:6379", KeyPrefix: "kpro:"})
+redisClient, _ := redisstore.Open(ctx, redisstore.Config{
+	Addr:      "127.0.0.1:6379",
+	KeyPrefix: "kpro:",
+})
 userCache := redisstore.Cache[UserCache](redisClient, "users:")
 userProjector := UserCacheProjector{cache: userCache}
 runner := projector.NewRunner(deliveryStore, userProjector)
 ```
-
-

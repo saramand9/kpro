@@ -26,9 +26,10 @@ func RegisterRoutes(ctx context.Context, app *server.Server, database *gormstore
 
 	httpEndpoint := httpx.New(httpx.Config{Addr: config.HTTPAddr})
 	app.MountRunner(httpEndpoint)
-	if err := RegisterHTTPModules(httpEndpoint, NewGORMStores(database)); err != nil {
+	stores := NewGORMStores(database)
+	if err := RegisterHTTPModules(httpEndpoint, stores); err != nil {
 		return err
 	}
-	MountOptionalProtocolModules(app, config)
+	MountOptionalProtocolModules(app, config, stores)
 	return nil
 }

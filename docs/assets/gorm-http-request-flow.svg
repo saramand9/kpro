@@ -31,77 +31,77 @@
   </defs>
 
   <rect class="bg" width="1880" height="1360"/>
-  <text x="48" y="54" class="title">POST /users 到 GORM 入库流程</text>
-  <text x="48" y="84" class="subtitle">每个节点都标出输入、当前层做什么、输出。示例使用 users 模块；projects 模块同理。</text>
+  <text x="48" y="54" class="title">POST /users to GORM Write Flow</text>
+  <text x="48" y="84" class="subtitle">Each node identifies its input, work, and output. The users module is shown; projects follows the same structure.</text>
 
   <rect x="44" y="118" width="1792" height="252" class="box"/>
-  <text x="70" y="152" class="section">0. 启动装配阶段：请求到来前已经完成</text>
+  <text x="70" y="152" class="section">0. Startup assembly: completed before requests arrive</text>
 
   <rect x="78" y="184" width="330" height="136" class="box startup"/>
   <text x="102" y="210" class="label">main.go</text>
   <text x="102" y="230" class="file">examples/gorm-http/server/main.go</text>
-  <text x="102" y="256" class="small"><tspan class="input">输入：</tspan> gormstore.Config</text>
+  <text x="102" y="256" class="small"><tspan class="input">Input:</tspan> gormstore.Config</text>
   <text x="102" y="278" class="tiny">Dialector, pool config, name</text>
-  <text x="102" y="300" class="small"><tspan class="work">处理：</tspan> gormstore.Open + app.Manage</text>
-  <text x="102" y="322" class="small"><tspan class="output">输出：</tspan> *gormstore.Database</text>
+  <text x="102" y="300" class="small"><tspan class="work">Work:</tspan> gormstore.Open + app.Manage</text>
+  <text x="102" y="322" class="small"><tspan class="output">Output:</tspan> *gormstore.Database</text>
 
   <rect x="458" y="184" width="330" height="136" class="box startup"/>
   <text x="482" y="210" class="label">database.go</text>
   <text x="482" y="230" class="file">database/gorm/database.go</text>
-  <text x="482" y="256" class="small"><tspan class="input">输入：</tspan> Dialector 或已有 *gorm.DB</text>
-  <text x="482" y="278" class="small"><tspan class="work">处理：</tspan> gorm.Open, pool, Ping</text>
-  <text x="482" y="300" class="small"><tspan class="output">输出：</tspan> 可被健康检查的 Database</text>
-  <text x="482" y="322" class="tiny">只包装生命周期，不做 CRUD</text>
+  <text x="482" y="256" class="small"><tspan class="input">Input:</tspan> Dialector or existing *gorm.DB</text>
+  <text x="482" y="278" class="small"><tspan class="work">Work:</tspan> gorm.Open, pool, Ping</text>
+  <text x="482" y="300" class="small"><tspan class="output">Output:</tspan> health-checkable Database</text>
+  <text x="482" y="322" class="tiny">Lifecycle wrapper only; no CRUD</text>
 
   <rect x="838" y="184" width="330" height="136" class="box startup"/>
   <text x="862" y="210" class="label">schema.go + model.go</text>
   <text x="862" y="230" class="file">app/schema.go, users/model.go</text>
-  <text x="862" y="256" class="small"><tspan class="input">输入：</tspan> *gormstore.Database</text>
-  <text x="862" y="278" class="small"><tspan class="work">处理：</tspan> versioned SQL migrations</text>
-  <text x="862" y="300" class="small"><tspan class="output">输出：</tspan> users 表结构就绪</text>
+  <text x="862" y="256" class="small"><tspan class="input">Input:</tspan> *gormstore.Database</text>
+  <text x="862" y="278" class="small"><tspan class="work">Work:</tspan> versioned SQL migrations</text>
+  <text x="862" y="300" class="small"><tspan class="output">Output:</tspan> users schema ready</text>
 
   <rect x="1218" y="184" width="330" height="136" class="box startup"/>
   <text x="1242" y="210" class="label">stores.go + modules.go</text>
   <text x="1242" y="230" class="file">app/stores.go, app/modules.go</text>
-  <text x="1242" y="256" class="small"><tspan class="input">输入：</tspan> *gormstore.Database</text>
-  <text x="1242" y="278" class="small"><tspan class="work">处理：</tspan> NewGORM -> NewWithStore</text>
-  <text x="1242" y="300" class="small"><tspan class="output">输出：</tspan> handler 持有 service</text>
-  <text x="1242" y="322" class="tiny">store 内部保存 native *gorm.DB</text>
+  <text x="1242" y="256" class="small"><tspan class="input">Input:</tspan> *gormstore.Database</text>
+  <text x="1242" y="278" class="small"><tspan class="work">Work:</tspan> NewGORM -> NewWithStore</text>
+  <text x="1242" y="300" class="small"><tspan class="output">Output:</tspan> handler owns service</text>
+  <text x="1242" y="322" class="tiny">Store retains native *gorm.DB</text>
 
   <path class="dash" d="M408 252 H458"/>
   <path class="dash" d="M788 252 H838"/>
   <path class="dash" d="M1168 252 H1218"/>
 
   <rect x="44" y="416" width="1792" height="858" class="box"/>
-  <text x="70" y="450" class="section">1. 请求运行阶段：一次 POST /users 入库</text>
+  <text x="70" y="450" class="section">1. Request path: one POST /users write</text>
 
   <rect x="78" y="490" width="340" height="140" class="box http"/>
   <text x="102" y="518" class="label">HTTP Client</text>
-  <text x="102" y="544" class="small"><tspan class="input">输入：</tspan> 用户提交请求</text>
+  <text x="102" y="544" class="small"><tspan class="input">Input:</tspan> submitted request</text>
   <text x="102" y="566" class="tiny">POST /users</text>
   <text x="102" y="588" class="tiny">{"name":"Ada","age":37}</text>
-  <text x="102" y="612" class="small"><tspan class="output">输出：</tspan> 原始 HTTP request</text>
+  <text x="102" y="612" class="small"><tspan class="output">Output:</tspan> raw HTTP request</text>
 
   <rect x="488" y="490" width="340" height="140" class="box http"/>
   <text x="512" y="518" class="label">HTTP Endpoint / Router</text>
   <text x="512" y="538" class="file">transport/httpx + server</text>
-  <text x="512" y="564" class="small"><tspan class="input">输入：</tspan> 原始 HTTP request</text>
-  <text x="512" y="586" class="small"><tspan class="work">处理：</tspan> 匹配 POST /users</text>
-  <text x="512" y="608" class="small"><tspan class="output">输出：</tspan> *httpx.Context 调用 handler</text>
+  <text x="512" y="564" class="small"><tspan class="input">Input:</tspan> raw HTTP request</text>
+  <text x="512" y="586" class="small"><tspan class="work">Work:</tspan> match POST /users</text>
+  <text x="512" y="608" class="small"><tspan class="output">Output:</tspan> *httpx.Context invokes handler</text>
 
   <rect x="898" y="490" width="340" height="140" class="box http"/>
   <text x="922" y="518" class="label">users HTTP handler</text>
   <text x="922" y="538" class="file">internal/modules/users/handler/http.go</text>
-  <text x="922" y="564" class="small"><tspan class="input">输入：</tspan> *httpx.Context</text>
-  <text x="922" y="586" class="small"><tspan class="work">处理：</tspan> JSONBody -> CreateRequest</text>
-  <text x="922" y="608" class="small"><tspan class="output">输出：</tspan> CreateInput{Name, Age}</text>
+  <text x="922" y="564" class="small"><tspan class="input">Input:</tspan> *httpx.Context</text>
+  <text x="922" y="586" class="small"><tspan class="work">Work:</tspan> JSONBody -> CreateRequest</text>
+  <text x="922" y="608" class="small"><tspan class="output">Output:</tspan> CreateInput{Name, Age}</text>
 
   <rect x="1308" y="490" width="340" height="140" class="box module"/>
   <text x="1332" y="518" class="label">users Service</text>
   <text x="1332" y="538" class="file">internal/modules/users/service/service.go</text>
-  <text x="1332" y="564" class="small"><tspan class="input">输入：</tspan> CreateInput{Name:"Ada", Age:37}</text>
-  <text x="1332" y="586" class="small"><tspan class="work">处理：</tspan> Trim + validate + build model</text>
-  <text x="1332" y="608" class="small"><tspan class="output">输出：</tspan> users.User{Name, Age}</text>
+  <text x="1332" y="564" class="small"><tspan class="input">Input:</tspan> CreateInput{Name:"Ada", Age:37}</text>
+  <text x="1332" y="586" class="small"><tspan class="work">Work:</tspan> trim + validate + build model</text>
+  <text x="1332" y="608" class="small"><tspan class="output">Output:</tspan> users.User{Name, Age}</text>
 
   <path class="line" d="M418 560 H488"/>
   <path class="line" d="M828 560 H898"/>
@@ -110,30 +110,30 @@
   <rect x="1308" y="716" width="340" height="140" class="box module"/>
   <text x="1332" y="744" class="label">UserStore Port</text>
   <text x="1332" y="764" class="file">internal/modules/users/service/port.go</text>
-  <text x="1332" y="790" class="small"><tspan class="input">输入：</tspan> users.User</text>
-  <text x="1332" y="812" class="small"><tspan class="work">处理：</tspan> 调用 Create(ctx, user) 接口</text>
-  <text x="1332" y="834" class="small"><tspan class="output">输出：</tspan> 进入具体 store 实现</text>
+  <text x="1332" y="790" class="small"><tspan class="input">Input:</tspan> users.User</text>
+  <text x="1332" y="812" class="small"><tspan class="work">Work:</tspan> call Create(ctx, user) port</text>
+  <text x="1332" y="834" class="small"><tspan class="output">Output:</tspan> concrete store invocation</text>
 
   <rect x="898" y="716" width="340" height="140" class="box gorm"/>
   <text x="922" y="744" class="label">users GORM store</text>
   <text x="922" y="764" class="file">internal/modules/users/store/store.go</text>
-  <text x="922" y="790" class="small"><tspan class="input">输入：</tspan> ctx + users.User{Name, Age}</text>
-  <text x="922" y="812" class="small"><tspan class="work">处理：</tspan> db.WithContext(ctx).Create(&amp;user)</text>
-  <text x="922" y="834" class="small"><tspan class="output">输出：</tspan> user.ID / CreatedAt 被填充</text>
+  <text x="922" y="790" class="small"><tspan class="input">Input:</tspan> ctx + users.User{Name, Age}</text>
+  <text x="922" y="812" class="small"><tspan class="work">Work:</tspan> db.WithContext(ctx).Create(&amp;user)</text>
+  <text x="922" y="834" class="small"><tspan class="output">Output:</tspan> user.ID / CreatedAt populated</text>
 
   <rect x="488" y="716" width="340" height="140" class="box gorm"/>
   <text x="512" y="744" class="label">Native GORM</text>
   <text x="512" y="764" class="file">gorm.io/gorm</text>
-  <text x="512" y="790" class="small"><tspan class="input">输入：</tspan> users.User + gorm tags</text>
-  <text x="512" y="812" class="small"><tspan class="work">处理：</tspan> 生成并执行 INSERT SQL</text>
-  <text x="512" y="834" class="small"><tspan class="output">输出：</tspan> SQL result / generated fields</text>
+  <text x="512" y="790" class="small"><tspan class="input">Input:</tspan> users.User + GORM tags</text>
+  <text x="512" y="812" class="small"><tspan class="work">Work:</tspan> generate and execute INSERT SQL</text>
+  <text x="512" y="834" class="small"><tspan class="output">Output:</tspan> SQL result / generated fields</text>
 
   <rect x="78" y="716" width="340" height="140" class="box db"/>
   <text x="102" y="744" class="label">Database</text>
   <text x="102" y="764" class="file">MySQL / SQLite / Postgres</text>
-  <text x="102" y="790" class="small"><tspan class="input">输入：</tspan> INSERT INTO users ...</text>
-  <text x="102" y="812" class="small"><tspan class="work">处理：</tspan> 写入表，生成自增 ID/时间</text>
-  <text x="102" y="834" class="small"><tspan class="output">输出：</tspan> users row 已持久化</text>
+  <text x="102" y="790" class="small"><tspan class="input">Input:</tspan> INSERT INTO users ...</text>
+  <text x="102" y="812" class="small"><tspan class="work">Work:</tspan> store row; generate ID/time</text>
+  <text x="102" y="834" class="small"><tspan class="output">Output:</tspan> users row persisted</text>
 
   <path class="line" d="M1478 630 V716"/>
   <path class="line" d="M1308 786 H1238"/>
@@ -143,29 +143,29 @@
   <rect x="78" y="942" width="340" height="140" class="box db"/>
   <text x="102" y="970" class="label">Read Back Row</text>
   <text x="102" y="990" class="file">users/store.go Find</text>
-  <text x="102" y="1016" class="small"><tspan class="input">输入：</tspan> inserted user.ID</text>
-  <text x="102" y="1038" class="small"><tspan class="work">处理：</tspan> First(&amp;user, id)</text>
-  <text x="102" y="1060" class="small"><tspan class="output">输出：</tspan> 完整 persisted User</text>
+  <text x="102" y="1016" class="small"><tspan class="input">Input:</tspan> inserted user.ID</text>
+  <text x="102" y="1038" class="small"><tspan class="work">Work:</tspan> First(&amp;user, id)</text>
+  <text x="102" y="1060" class="small"><tspan class="output">Output:</tspan> complete persisted User</text>
 
   <rect x="488" y="942" width="340" height="140" class="box module"/>
   <text x="512" y="970" class="label">Return Through Service</text>
   <text x="512" y="990" class="file">service.Create -> handler</text>
-  <text x="512" y="1016" class="small"><tspan class="input">输入：</tspan> persisted User</text>
-  <text x="512" y="1038" class="small"><tspan class="work">处理：</tspan> 不再改数据，向上返回</text>
-  <text x="512" y="1060" class="small"><tspan class="output">输出：</tspan> handler 收到 created</text>
+  <text x="512" y="1016" class="small"><tspan class="input">Input:</tspan> persisted User</text>
+  <text x="512" y="1038" class="small"><tspan class="work">Work:</tspan> return without further mutation</text>
+  <text x="512" y="1060" class="small"><tspan class="output">Output:</tspan> handler receives created value</text>
 
   <rect x="898" y="942" width="340" height="140" class="box response"/>
   <text x="922" y="970" class="label">HTTP Response</text>
   <text x="922" y="990" class="file">handler/http.go</text>
-  <text x="922" y="1016" class="small"><tspan class="input">输入：</tspan> created User</text>
-  <text x="922" y="1038" class="small"><tspan class="work">处理：</tspan> ctx.JSON(201, created)</text>
-  <text x="922" y="1060" class="small"><tspan class="output">输出：</tspan> HTTP 201 + JSON body</text>
+  <text x="922" y="1016" class="small"><tspan class="input">Input:</tspan> created User</text>
+  <text x="922" y="1038" class="small"><tspan class="work">Work:</tspan> ctx.JSON(201, created)</text>
+  <text x="922" y="1060" class="small"><tspan class="output">Output:</tspan> HTTP 201 + JSON body</text>
 
   <rect x="1308" y="942" width="340" height="140" class="box response"/>
   <text x="1332" y="970" class="label">Client Receives</text>
-  <text x="1332" y="1016" class="small"><tspan class="input">输入：</tspan> HTTP response</text>
-  <text x="1332" y="1038" class="small"><tspan class="work">处理：</tspan> 客户端解析响应</text>
-  <text x="1332" y="1060" class="small"><tspan class="output">输出：</tspan> User{id,name,age,created_at}</text>
+  <text x="1332" y="1016" class="small"><tspan class="input">Input:</tspan> HTTP response</text>
+  <text x="1332" y="1038" class="small"><tspan class="work">Work:</tspan> client decodes response</text>
+  <text x="1332" y="1060" class="small"><tspan class="output">Output:</tspan> User{id,name,age,created_at}</text>
 
   <path class="line" d="M248 856 V942"/>
   <path class="line" d="M418 1012 H488"/>
@@ -173,6 +173,6 @@
   <path class="line" d="M1238 1012 H1308"/>
 
   <rect x="78" y="1160" width="1570" height="72" class="note"/>
-  <text x="104" y="1190" class="label">关键边界</text>
-  <text x="104" y="1218" class="small">database/gorm 只在启动和装配时提供 *gorm.DB 生命周期能力；请求中的入库行为发生在 internal/modules/users/store/store.go，直接调用原生 GORM。</text>
+  <text x="104" y="1190" class="label">Key boundary</text>
+  <text x="104" y="1218" class="small">database/gorm provides *gorm.DB lifecycle at startup; request writes occur in internal/modules/users/store/store.go through native GORM.</text>
 </svg>
