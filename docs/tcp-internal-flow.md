@@ -1,36 +1,42 @@
-# TCP 内部流程
+# TCP Internal Flow
 
-本文以 TCP 作为入口，说明当前 KPro app server 的核心流程。TCP 是理解整个工程的最佳切入点，因为它完整经过了这条消息链路：
+TCP is the clearest entry point for understanding the KPro application server
+because it exercises the complete Message path:
 
 ```text
-连接 -> 流式协议解码 -> core.Message -> core.Context
-  -> router 调度 -> core.Invocation -> core.Middleware -> 业务 handler
-  -> 响应 Message -> 协议编码 -> 写回客户端
+connection -> stream protocol decoding -> core.Message -> core.Context
+  -> router scheduling -> core.Invocation -> core.Middleware -> business handler
+  -> response Message -> protocol encoding -> client write
 ```
 
-UDP 和 WebSocket 的网络输入形式不同，但它们复用同一套 `core.Message`、`core.Context`、`core.Router`、`core.Invocation` middleware 和 handler 模型。因此理解 TCP 后，再看 UDP/WebSocket，主要差异就在 transport 层。
+UDP and WebSocket receive different network units, but they reuse the same
+`core.Message`, `core.Context`, `core.Router`, `core.Invocation` middleware,
+and handler model. After understanding TCP, the main differences are therefore
+inside each transport.
 
-## 流程图
+## Diagram
 
 ![KPro TCP internal flow](assets/kpro-tcp-flow.svg)
 
-该图直接使用可缩放的 [SVG 文件](assets/kpro-tcp-flow.svg)。
+The diagram is available directly as a scalable
+[SVG asset](assets/kpro-tcp-flow.svg).
 
-## 关键文件
+## Key Files
 
-| 模块 | 文件 | 职责 |
+| Area | Files | Responsibility |
 | --- | --- | --- |
-| 组装层 | `server/server.go` | 挂载抽象 message transport，创建 endpoint router，启动 runner |
-| TCP transport | `transport/tcp/server.go`, `transport/tcp/batch_writer.go` | 监听、accept、创建 session、读循环、分段/批量写循环 |
-| 协议层 | `codec/kpro.go`, `codec/kpro_segmented.go` | KProV1 frame 的解码、连续编码和固定头部编码 |
-| 出站资源 | `transport/internal/outbound/`, `transport/internal/bufferpool/` | 有界队列/字节核算、批量 drain、传输层 payload 复用 |
-| 上下文 | `core/context.go` | 把 `Session + Message` 包装成 handler 可用的 context |
-| 路由调度 | `core/router.go` | 按 `Message.ID` 找 handler，快照 middleware，同步/异步调度，并在执行点构造 `core.Invocation` |
-| 会话抽象 | `core/session.go` | transport 无关的发送、关闭、连接标识接口 |
+| Assembly | `server/server.go` | Mount abstract message transports, create endpoint routers, and start runners. |
+| TCP transport | `transport/tcp/server.go`, `transport/tcp/batch_writer.go` | Listen, accept connections, create sessions, read messages, and perform segmented or batched writes. |
+| Protocol | `codec/kpro.go`, `codec/kpro_segmented.go` | Decode KProV1 frames, encode contiguous frames, and encode fixed headers. |
+| Outbound resources | `transport/internal/outbound/`, `transport/internal/bufferpool/` | Bound queued frames and bytes, drain batches, and reuse transport-owned payload storage. |
+| Context | `core/context.go` | Present `Session + Message` to a handler as a context. |
+| Routing | `core/router.go` | Find a handler by `Message.ID`, snapshot middleware, schedule sync or async work, and create `core.Invocation` at execution time. |
+| Session contract | `core/session.go` | Provide transport-neutral send, close, and connection identity operations. |
 
-## 启动阶段
+## Assembly and Startup
 
-业务通常从 `server.New()`、`tcp.New(...)` 和 `app.Mount(...)` 开始：
+Applications usually begin with `server.New()`, `tcp.New(...)`, and
+`app.Mount(...)`:
 
 ```go
 app := server.New()
@@ -41,7 +47,7 @@ tcpEndpoint.HandleSync(100, func(ctx core.Context) error {
 err := app.ListenAndServe()
 ```
 
-启动前的组装流程是：
+Before network traffic starts, assembly follows this path:
 
 ```text
 server.New()
@@ -53,77 +59,82 @@ server.New()
 ```
 
 `server` only knows the shared `transport.MessageServer` contract. The
-application imports TCP explicitly, so applications that do not use TCP do not
-inherit that implementation as a compile dependency.
+application imports TCP explicitly, so an application that does not use TCP
+does not inherit it as a compile dependency.
 
-这一步还没有网络流量。endpoint 主要持有两个对象：
+The endpoint primarily owns two values at this stage:
 
-- `transport/tcp.Server`：负责监听 socket、管理 TCP session。
-- `core.Router`：负责消息路由、middleware、同步/异步调度队列。
+- `transport/tcp.Server` listens on the socket and manages TCP sessions.
+- `core.Router` owns message routes, middleware, and sync or async scheduling
+  queues.
 
-调用 `app.ListenAndServe()` 后：
+After `app.ListenAndServe()`:
 
 ```text
 server.Server.ListenAndServe()
-  -> 每个已挂载 runner 各启动一个 goroutine
+  -> start one goroutine for each mounted runner
   -> Endpoint.ListenAndServe(ctx)
   -> tcp.Server.ListenAndServe(ctx, endpoint.router.Dispatch)
 ```
 
-这里有一个关键点：TCP transport 不直接知道业务路由。它只接收一个 `core.Handler`。在标准 endpoint 中，这个 handler 就是 `router.Dispatch`。
+The TCP transport does not know the business routes. It receives one
+`core.Handler`; on a standard endpoint that handler is `router.Dispatch`.
 
-## TCP 连接阶段
+## TCP Connection Lifecycle
 
-`transport/tcp.Server.ListenAndServe` 运行 accept 循环：
+`transport/tcp.Server.ListenAndServe` runs the accept loop:
 
 ```text
 net.Listen("tcp", addr)
   -> ln.Accept()
-  -> 创建 tcp.session
+  -> create tcp.session
   -> session.start(router.Dispatch)
 ```
 
-每个 TCP 连接都会变成一个 `tcp.session`，内部包含：
+Each connection becomes a `tcp.session` containing:
 
-- `id`：连接/session ID。
-- `raw`：底层 `net.Conn`。
-- `sendQueue`：有界响应队列，元素是已经编码好的响应 frame。
-- `done`：关闭信号。
+- `id`: the connection or session ID;
+- `raw`: the underlying `net.Conn`;
+- `sendQueue`: a bounded queue of encoded outbound frames;
+- `done`: the close signal.
 
-session 会启动两个 goroutine：
+The session starts two goroutines:
 
 ```text
 session.readLoop(handler)
 session.writeLoop()
 ```
 
-因此每个 TCP 连接都有自己的 reader 和 writer。不同连接之间天然可以并行；是否串行，主要看 router 调度层如何处理，而不是 TCP accept 层统一排队。
+Every connection therefore has its own reader and writer. Separate connections
+can run concurrently. Per-connection ordering is determined by Router
+scheduling, not by a single global TCP accept queue.
 
-## 读取与协议解码
+## Reading and Protocol Decoding
 
-读侧核心在 `transport/tcp/server.go`：
+The read path lives in `transport/tcp/server.go`:
 
 ```text
 session.readLoop
-  -> 设置 read deadline
+  -> apply the read deadline when required
   -> Codec.Read(rawConn, MaxFrameSize)
-  -> 得到 core.Message
-  -> heartbeat 特判
+  -> obtain core.Message
+  -> handle heartbeat directly
   -> core.AcquireContext(session, msg)
   -> handler(ctx)
 ```
 
-默认协议是 `codec.KProV1Codec.Read`。它从 TCP 字节流中读取一个完整 frame：
+The default `codec.KProV1Codec.Read` reads one complete frame from the TCP
+stream:
 
 ```text
-读取 20 字节 header
-  -> 校验 magic/version
-  -> 解析 flags、msg id、seq、body length
-读取 body bytes
-  -> 返回 codec.ReadResult{Message, Bytes}
+read the 20-byte header
+  -> validate magic and version
+  -> parse flags, message ID, sequence, and body length
+read the body bytes
+  -> return codec.ReadResult{Message, Bytes}
 ```
 
-KProV1 header 格式：
+The KProV1 header is:
 
 ```text
 uint16 magic      0x4b50
@@ -135,142 +146,149 @@ uint32 body length
 bytes  body
 ```
 
-TCP 是流协议，不保留应用层消息边界。一次应用消息可能被拆成多次网络读取，也可能多条消息被合并到一次网络读取中。因此 TCP 这里使用 `codec.StreamCodec`，由 `Codec.Read` 负责恢复一个完整 KProV1 frame。
+TCP is a byte stream and does not preserve application message boundaries. One
+frame may arrive across several reads, or several frames may be available in
+one read. The `codec.StreamCodec` contract makes `Codec.Read` responsible for
+recovering exactly one complete KProV1 frame.
 
-## Message 转 Context
+## Message to Context
 
-协议解码后，真正把消息变成上下文的是这一步：
+After decoding, the transport turns the message into a context:
 
 ```go
 msg := result.Message
 _ = handler(core.AcquireContext(s, msg))
 ```
 
-这里的 `s` 是当前 `tcp.session`。`AcquireContext` 从内部对象池借用一个
-`core.BaseContext`，填入当前 session 和 message；router 在任务执行或拒绝后
-把它清空并归还对象池，以降低每条消息的临时分配：
+Here `s` is the current `tcp.session`. `AcquireContext` borrows a
+`core.BaseContext` from an internal pool and assigns the session and message.
+The Router clears and returns it to the pool after execution or rejection,
+reducing temporary allocation per message:
 
 ```go
 func AcquireContext(session Session, message Message) *BaseContext {
 	ctx := baseContextPool.Get().(*BaseContext)
-	// reset session, message and handler-local values
+	// reset session, message, and handler-local values
 	return ctx
 }
 ```
 
-借用的 context 只在当前 handler 调用期间有效。后台 goroutine 若需要保留
-message 或 context values，必须先调用 `core.CloneContext(ctx)`；clone 会复制
-message data、headers、meta 容器和 handler-local values。
+A borrowed context is valid only for the current handler invocation. A
+background goroutine that must retain the message or context values must first
+call `core.CloneContext(ctx)`. The clone copies message data, headers, metadata
+containers, and handler-local values.
 
-因此 context 不是新的协议对象，它只是把当前连接和当前消息组合起来：
+The context is not another protocol object. It combines the active connection
+with its decoded message:
 
 ```text
 Context
-  session: 当前 TCP session
-  message: 解码后的 core.Message
-  values:  handler 内部可选的 key/value 存储
+  session: current TCP session
+  message: decoded core.Message
+  values:  optional handler-local key/value storage
 ```
 
-这是 transport 世界进入业务世界的边界。
+This is the boundary between transport I/O and application logic.
 
-## Router 调度阶段
+## Router Scheduling
 
-TCP 传入的 handler 在 endpoint 中实际是 `router.Dispatch(ctx)`。
-
-Dispatch 的核心流程：
+The endpoint passes `router.Dispatch(ctx)` as the TCP handler. Dispatch follows
+this path:
 
 ```text
 ctx.Message()
-  -> 按 Message.ID 查找 route
-  -> 没有 route：ctx.Error(ErrNoHandler)
-  -> 找到 route：读取预编译的 middleware handler
-  -> 创建 dispatchTask{ctx, invocationHandler, sessionExecutor}
-  -> sync route：进入当前 session 的串行队列
-  -> async route：进入全局 async worker 队列
-  -> execute task：构造 NewMessageInvocation
-  -> core.Middleware 链
-  -> 业务 handler
+  -> find a route by Message.ID
+  -> no route: ctx.Error(ErrNoHandler)
+  -> route found: load the precompiled middleware handler
+  -> create dispatchTask{ctx, invocationHandler, sessionExecutor}
+  -> sync route: enqueue on this session's serial executor
+  -> async route: enqueue on the global async worker queue
+  -> execute task: construct NewMessageInvocation
+  -> core.Middleware chain
+  -> business handler
 ```
 
-middleware 链在 route 注册或 `Use` 配置变化时构建，不在每次 dispatch 时
-重复组合。构建在 router 锁外完成，因此 middleware 构造器可以安全地回调
-router 配置 API；构造出的 handler 会被并发复用，其内部状态需要并发安全。
+Middleware chains are built when a route is registered or `Use` changes the
+configuration, not for every dispatch. Chain construction runs outside the
+Router lock, so a middleware constructor may safely call Router configuration
+APIs. The resulting handler is reused concurrently and must keep its own state
+concurrency-safe.
 
-### 同步 route
+### Synchronous Routes
 
-`HandleSync` 会把 task 放入当前连接对应的 `sessionExecutor`。
-
-对于同一个 TCP 连接：
+`HandleSync` enqueues the task on the current connection's `sessionExecutor`.
+For one TCP connection:
 
 ```text
 request A -> request B -> request C
 ```
 
-同步执行顺序是：
+execution remains ordered:
 
 ```text
 handler(A) -> handler(B) -> handler(C)
 ```
 
-也就是说，sync 保证单连接内的处理顺序。不同 TCP 连接有不同的 `sessionExecutor`，仍然可以并行。
+Sync routes therefore preserve handler order within one connection. Different
+connections have different session executors and can still run in parallel.
 
-### 异步 route
+### Asynchronous Routes
 
-`HandleAsync` 会把 task 放入 router 的全局 async worker 队列。
-
-对于同一个 TCP 连接：
+`HandleAsync` places the task on the Router's global async worker queue. For
+one connection:
 
 ```text
 request A -> request B
 ```
 
-服务端读取和 dispatch 的顺序仍然是 A 再 B，但响应完成顺序可能是：
+The server still reads and dispatches A before B, but completion may be:
 
 ```text
 response B -> response A
 ```
 
-只要 B 的 handler 先执行完，就会先返回。这是 async route 的预期语义。
+This out-of-order completion is the expected async-route contract.
 
-## 写回阶段
+## Outbound Write Path
 
-业务 handler 通过 context 发送响应：
+Business handlers respond through the context:
 
 ```go
 ctx.Reply(msgID, data)
 ctx.Error(text)
 ```
 
-`ctx.Reply` 会构造响应 `core.Message`，并调用当前 session：
+`ctx.Reply` creates a response `core.Message` and calls the active session:
 
 ```text
 ctx.Reply
   -> session.Send(core.Message{ID, Seq: request.Seq, Data})
   -> KProV1: inline header + transport-owned payload copy
-     其他 codec: Codec.Encode(response Message)
+     other codecs: Codec.Encode(response Message)
   -> sendQueue <- outbound frame
 ```
 
-真正写 socket 的是 TCP 写 goroutine：
+The TCP writer goroutine performs socket I/O:
 
 ```text
 session.writeLoop
-  -> 从 sendQueue 取第一帧，并非阻塞地 drain 有界 FIFO 前缀
-  -> 按 MaxWriteBatchFrames / MaxWriteBatchBytes 分批
-  -> 每批设置 write deadline
-  -> net.Buffers.WriteTo(rawConn) gather-write header/payload regions
+  -> take the first queued frame and non-blockingly drain a bounded FIFO prefix
+  -> split by MaxWriteBatchFrames / MaxWriteBatchBytes
+  -> apply the write deadline for each batch
+  -> net.Buffers.WriteTo(rawConn) gathers header and payload regions
 ```
 
-这个设计把业务 handler 和网络写入解耦。客户端读得慢时，只要
-`sendQueue` 还有帧数和字节容量，handler 不会直接卡在 socket write 上；
-如果容量耗尽，`session.Send` 会关闭 session 并返回
-`core.ErrSendQueueFull`。普通 `Session.Send` 在返回前仍会复制调用方 payload，
-所以调用方可以安全复用原 slice；显式所有权转移路径见
-[Performance Fast Paths](performance-fast-path.md)。
+This design decouples handlers from socket writes. A slow client does not block
+the handler while `sendQueue` still has frame and byte capacity. If capacity
+is exhausted, `session.Send` closes the session and returns
+`core.ErrSendQueueFull`. Ordinary `Session.Send` copies the caller's payload
+before returning, so the caller may safely reuse its slice. See
+[Performance Fast Paths](performance-fast-path.md) for explicit
+ownership-transfer APIs.
 
-## 示例：一次 Echo 请求的数据变化
+## Echo Request: Data Transformations
 
-假设客户端发送一条逻辑消息：
+Assume the client sends this logical message:
 
 ```text
 ID    = 100
@@ -279,21 +297,21 @@ Flags = 0
 Data  = "hello"
 ```
 
-### 1. 客户端编码 KProV1 frame
+### 1. The Client Encodes a KProV1 Frame
 
-发送前，消息会被编码成：
+The encoded values are:
 
 ```text
 magic       0x4b50
 version     1
 flags       0
-msg id      100
-seq         42
+message id  100
+sequence    42
 body length 5
 body        "hello"
 ```
 
-此时数据形态是 TCP 字节流：
+The data is now a TCP byte stream:
 
 ```text
 []byte{
@@ -302,21 +320,20 @@ body        "hello"
 }
 ```
 
-### 2. TCP readLoop 从 net.Conn 读取
+### 2. `readLoop` Reads from `net.Conn`
 
-TCP session 从 `net.Conn` 中读取字节。由于 TCP 是流，frame 可能一次读完整，也可能分几次读完。这一点对上层不可见。
-
-此时数据形态仍然是：
+The frame may arrive in one read or across several reads. That difference is
+not visible above the codec.
 
 ```text
 raw TCP bytes
 ```
 
-还没有 `core.Message`。
+No `core.Message` exists yet.
 
-### 3. Codec.Read 生成 core.Message
+### 3. `Codec.Read` Produces `core.Message`
 
-`codec.KProV1Codec.Read` 读取 header 和 body 后返回：
+After reading the header and body, `codec.KProV1Codec.Read` returns:
 
 ```go
 codec.ReadResult{
@@ -330,46 +347,41 @@ codec.ReadResult{
 }
 ```
 
-数据形态变化为：
+The shape changes at the protocol boundary:
 
 ```text
 raw bytes -> core.Message
 ```
 
-这是协议边界。
+### 4. TCP Creates `core.Context`
 
-### 4. TCP 创建 core.Context
-
-`readLoop` 调用：
+`readLoop` calls:
 
 ```go
 ctx := core.AcquireContext(session, msg)
 ```
 
-此时 handler 看到的是：
+The handler observes:
 
 ```text
 Context
-  Session()    -> 当前 TCP session
+  Session()    -> current TCP session
   Message()    -> {ID:100, Seq:42, Flags:0, Data:"hello"}
   Transport()  -> core.TransportTCP
-  ConnID()     -> session id
+  ConnID()     -> session ID
   RemoteAddr() -> client address
 ```
 
-数据形态变化为：
+The context boundary changes the shape to:
 
 ```text
 core.Message -> core.Context{session, message}
 ```
 
-这是上下文边界。
+### 5. Router Creates `dispatchTask`
 
-### 5. Router 创建 dispatchTask
-
-`router.Dispatch(ctx)` 根据 `Message.ID=100` 查找 route。
-
-假设注册的是同步 echo route：
+`router.Dispatch(ctx)` looks up the route for `Message.ID=100`. Assume a
+synchronous echo route:
 
 ```go
 endpoint.HandleSync(100, func(ctx core.Context) error {
@@ -378,50 +390,49 @@ endpoint.HandleSync(100, func(ctx core.Context) error {
 })
 ```
 
-Router 会创建：
+The Router creates:
 
 ```text
 dispatchTask
   ctx     -> Context{session, Message{ID:100, Seq:42, Data:"hello"}}
   handler -> wrapped echo handler
-  session -> 当前 TCP 连接对应的 sessionExecutor
+  session -> this connection's sessionExecutor
 ```
 
-数据形态变化为：
+The scheduling boundary changes the shape to:
 
 ```text
 core.Context -> dispatchTask
 ```
 
-这是调度边界。
+### 6. The Sync Executor Runs the Handler
 
-### 6. sync executor 执行业务 handler
-
-当前连接的 sync executor 取出 task 后，`Router.execute` 会先构造 `core.NewMessageInvocation`，再执行 `core.Middleware` 链，最后进入业务 handler。
-
-handler 内部通过：
+After the current session executor dequeues the task, `Router.execute` creates
+`core.NewMessageInvocation`, runs the `core.Middleware` chain, and invokes the
+business handler.
 
 ```go
 msg := ctx.Message()
 ```
 
-拿到：
+The handler receives:
 
 ```text
 ID=100, Seq=42, Data="hello"
 ```
 
-业务层不需要关心这个消息来自 TCP、UDP 还是 WebSocket；只有主动调用 `ctx.Transport()` 时才会感知 transport 类型。
+Business code does not need to know whether the message came from TCP, UDP, or
+WebSocket unless it explicitly calls `ctx.Transport()`.
 
-### 7. ctx.Reply 构造响应 Message
+### 7. `ctx.Reply` Creates the Response Message
 
-handler 调用：
+The handler calls:
 
 ```go
 ctx.Reply(100, []byte("hello"))
 ```
 
-`ctx.Reply` 会保留请求的 `Seq`：
+`ctx.Reply` preserves the request sequence:
 
 ```go
 core.Message{
@@ -431,17 +442,15 @@ core.Message{
 }
 ```
 
-数据形态变化为：
+The response boundary changes the shape to:
 
 ```text
 handler result -> response core.Message
 ```
 
-这是响应消息边界。
+### 8. `session.Send` Encodes and Enqueues the Frame
 
-### 8. session.Send 编码并进入 sendQueue
-
-`session.Send` 使用同一个 stream protocol 编码响应：
+`session.Send` uses the same stream protocol:
 
 ```text
 response core.Message
@@ -450,29 +459,30 @@ response core.Message
   -> sendQueue
 ```
 
-数据形态变化为：
+The outbound boundary changes the shape to:
 
 ```text
 response core.Message -> segmented outbound frame
 ```
 
-到这里 handler 已经结束。响应可能还在当前 session 的有界 `sendQueue` 中等待写出。
+The handler has now completed. The response may still be waiting in the
+session's bounded `sendQueue`.
 
-### 9. writeLoop 写回客户端
+### 9. `writeLoop` Writes to the Client
 
-写 goroutine 从 `sendQueue` 中取出一个有界批次，并保持 FIFO：
+The writer takes a bounded FIFO batch:
 
 ```text
 sendQueue -> net.Buffers{header, payload, ...}.WriteTo(net.Conn)
 ```
 
-客户端收到 KProV1 frame 后解码得到：
+After decoding the response, the client obtains:
 
 ```text
 ID=100, Seq=42, Data="hello"
 ```
 
-这个同步 echo 示例需要满足的核心不变量是：
+The synchronous echo path preserves these invariants:
 
 ```text
 client_sent frame == server_received frame
@@ -481,67 +491,74 @@ request Seq == response Seq == 42
 request Data == response Data == "hello"
 ```
 
-## 特殊路径
+## Special Paths
 
 ### Heartbeat
 
-Heartbeat 在 TCP `readLoop` 中直接处理，不进入 router：
+The TCP `readLoop` handles heartbeat messages without entering the Router:
 
 ```text
 MsgHeartbeat -> session.Send(MsgPong) -> continue
 ```
 
-因此 heartbeat 不经过 middleware，也不会进入业务 handler。
+Heartbeat traffic therefore does not run middleware or a business handler.
 
 ### No Handler
 
-如果 `router.Dispatch` 找不到 `Message.ID` 对应的 route，会返回框架错误响应：
+If `router.Dispatch` cannot find a route for `Message.ID`, it writes a
+framework error:
 
 ```text
 ID   = core.MsgError
-Seq  = 原请求 Seq
+Seq  = original request sequence
 Data = "no handler"
 ```
 
-此时请求已经被解码并包装成 context，但不会进入业务 handler。
+The request has been decoded and wrapped in a context, but no business handler
+runs.
 
-### Queue Full / Too Many In-Flight
+### Queue Full or Too Many In Flight
 
-如果调度时队列满，或者超过单 session 的 `MaxInflightPerSession` / 全局
-`MaxInflight`，router 会通过当前 context/session 发错误响应。对应的全局
-准入错误是 `core.ErrGlobalInflightLimit`：
+If a scheduling queue is full or a request exceeds
+`MaxInflightPerSession` or global `MaxInflight`, the Router sends an error
+through the current context and session. The global admission error is
+`core.ErrGlobalInflightLimit`:
 
 ```text
 ID   = core.MsgError
-Seq  = 原请求 Seq
-Data = 具体框架错误文本
+Seq  = original request sequence
+Data = specific framework error text
 ```
 
-错误响应仍然走正常写回链路：
+The error uses the normal outbound path:
 
 ```text
 ctx.Error -> session.Send -> outbound frame -> sendQueue -> batch writeLoop
 ```
 
-## 通过 TCP 看整个框架
+## Framework Responsibilities Seen Through TCP
 
-TCP 路径体现了当前工程的职责划分：
+The TCP path exposes the framework's ownership boundaries:
 
 ```text
-transport 负责 I/O、连接、session 生命周期
-protocol 负责 bytes <-> Message
-context 负责把当前连接和当前消息暴露给业务
-router 负责 route 查找、预编译 middleware、同步/异步调度，并在 handler 执行点创建 Invocation
-handler 负责业务逻辑
-session.Send 负责把响应交回 transport 写出
+transport    owns I/O, connections, and session lifecycle
+protocol     owns bytes <-> Message
+context      exposes the current connection and message to application code
+router       owns route lookup, precompiled middleware, sync/async scheduling,
+             and Invocation creation at handler execution
+handler      owns business behavior
+session.Send hands a response back to the transport for writing
 ```
 
-UDP 和 WebSocket 复用同一套核心模型：
+UDP and WebSocket reuse this core model:
 
-- UDP 把 TCP 字节流替换为 datagram，并用远端 `IP:port` 映射 virtual session；每个 virtual session 现在也有独立的 `sendQueue` 和 `writeLoop`。
-- WebSocket 把 TCP frame 边界替换为 WebSocket message，并支持 continuation frame 重组。
-- 两者最终都会进入 `core.Message -> core.Context -> router.Dispatch`。
+- UDP replaces the TCP byte stream with datagrams and maps remote `IP:port`
+  values to virtual sessions. Every virtual session has its own `sendQueue`
+  and `writeLoop`.
+- WebSocket replaces TCP framing with WebSocket messages and reassembles
+  continuation frames.
+- Both ultimately enter
+  `core.Message -> core.Context -> router.Dispatch`.
 
-因此 TCP 是最完整的内部流程样本，但不是一套独立的业务编程模型。
-
-
+TCP is therefore the most complete internal flow example, not a separate
+business programming model.

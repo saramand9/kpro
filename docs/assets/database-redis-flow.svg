@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1680" height="1240" viewBox="0 0 1680 1240" role="img" aria-labelledby="title desc">
-  <title id="title">KPro Redis 流程</title>
-  <desc id="desc">Redis 适配层详细流程，展示启动、event projector 写缓存、缓存读取，以及 Redis helper 能力对应的文件和数据边界。</desc>
+  <title id="title">KPro Redis Data Flow</title>
+  <desc id="desc">Redis adapter flow covering startup, event projection, cache reads, helper capabilities, files, and data boundaries.</desc>
   <defs>
     <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
       <path d="M2,2 L10,6 L2,10 Z" fill="#334155"/>
@@ -31,26 +31,26 @@
   </defs>
 
   <rect class="bg" width="1680" height="1240"/>
-  <text x="48" y="54" class="title">KPro Redis 流程</text>
-  <text x="48" y="82" class="subtitle">Redis 通常作为读模型、锁、Stream 或排序存储。事务数据仍然有明确 source-of-truth，projector 通过 database/redis helper 更新 Redis。</text>
+  <text x="48" y="54" class="title">KPro Redis Data Flow</text>
+  <text x="48" y="82" class="subtitle">Redis commonly serves read models, locks, streams, or rankings. Transactional data keeps an explicit source of truth; projectors update Redis through database/redis.</text>
 
   <rect x="44" y="112" width="760" height="270" class="group"/>
-  <text x="66" y="142" class="section">1. 启动：创建并验证 Redis 资源</text>
+  <text x="66" y="142" class="section">1. Startup: create and validate the Redis resource</text>
 
   <rect x="78" y="172" width="188" height="82" class="box startup"/>
-  <text x="100" y="200" class="label">应用装配</text>
-  <text x="100" y="222" class="small">输入：Config</text>
+  <text x="100" y="200" class="label">Application assembly</text>
+  <text x="100" y="222" class="small">Input: Config</text>
   <text x="100" y="244" class="tiny">Name, Addr, DB, KeyPrefix</text>
 
   <rect x="306" y="172" width="188" height="82" class="box startup"/>
   <text x="328" y="200" class="label">config.go</text>
   <text x="328" y="222" class="small">normalizeConfig</text>
-  <text x="328" y="244" class="tiny">输出：默认值或 error</text>
+  <text x="328" y="244" class="tiny">Output: defaults or error</text>
 
   <rect x="534" y="172" width="220" height="82" class="box startup"/>
   <text x="556" y="200" class="label">client.go</text>
   <text x="556" y="222" class="small">Open -> NewClient -> Ping</text>
-  <text x="556" y="244" class="tiny">输出：*redisstore.Client</text>
+  <text x="556" y="244" class="tiny">Output: *redisstore.Client</text>
 
   <rect x="250" y="286" width="270" height="70" class="box external"/>
   <text x="272" y="314" class="label">database/common/lifecycle.Resource</text>
@@ -61,22 +61,22 @@
   <path class="line" d="M644 254 C620 286, 520 308, 520 320"/>
 
   <rect x="844" y="112" width="792" height="270" class="group"/>
-  <text x="866" y="142" class="section">2. 创建 Redis 能力 helper</text>
+  <text x="866" y="142" class="section">2. Create capability-specific Redis helpers</text>
 
   <rect x="882" y="174" width="172" height="78" class="box redis"/>
   <text x="904" y="202" class="label">client.go</text>
   <text x="904" y="224" class="small">Cache[T](client)</text>
-  <text x="904" y="244" class="tiny">输出：CacheView[T]</text>
+  <text x="904" y="244" class="tiny">Output: CacheView[T]</text>
 
   <rect x="1090" y="174" width="172" height="78" class="box redis"/>
   <text x="1112" y="202" class="label">client.go</text>
   <text x="1112" y="224" class="small">Lock(key, ttl)</text>
-  <text x="1112" y="244" class="tiny">输出：Lock</text>
+  <text x="1112" y="244" class="tiny">Output: Lock</text>
 
   <rect x="1298" y="174" width="172" height="78" class="box redis"/>
   <text x="1320" y="202" class="label">client.go</text>
   <text x="1320" y="224" class="small">Stream(key)</text>
-  <text x="1320" y="244" class="tiny">输出：Stream</text>
+  <text x="1320" y="244" class="tiny">Output: Stream</text>
 
   <rect x="1090" y="284" width="172" height="72" class="box redis"/>
   <text x="1112" y="312" class="label">client.go</text>
@@ -88,40 +88,40 @@
   <path class="dash" d="M754 213 H1298"/>
 
   <rect x="44" y="420" width="1592" height="442" class="group"/>
-  <text x="66" y="450" class="section">3. 典型写入：source 写入产生 event，projector 写 Redis cache</text>
+  <text x="66" y="450" class="section">3. Typical write: source commit emits an event; projector updates Redis</text>
 
   <rect x="78" y="486" width="176" height="84" class="box domain"/>
   <text x="100" y="514" class="label">Handler</text>
-  <text x="100" y="536" class="small">输入：CreateUser</text>
-  <text x="100" y="558" class="tiny">输出：command DTO</text>
+  <text x="100" y="536" class="small">Input: CreateUser</text>
+  <text x="100" y="558" class="tiny">Output: command DTO</text>
 
   <rect x="294" y="486" width="176" height="84" class="box domain"/>
   <text x="316" y="514" class="label">Service</text>
-  <text x="316" y="536" class="small">校验业务命令</text>
-  <text x="316" y="558" class="tiny">输出：model + event</text>
+  <text x="316" y="536" class="small">Validate business command</text>
+  <text x="316" y="558" class="tiny">Output: model + event</text>
 
   <rect x="510" y="486" width="188" height="84" class="box source"/>
   <text x="532" y="514" class="label">GORM SQL</text>
-  <text x="532" y="536" class="small">source-of-truth 写入</text>
-  <text x="532" y="558" class="tiny">输出：事务行已提交</text>
+  <text x="532" y="536" class="small">Source-of-truth write</text>
+  <text x="532" y="558" class="tiny">Output: committed rows</text>
 
   <rect x="738" y="486" width="188" height="84" class="box event"/>
   <text x="760" y="514" class="label">events/*.go</text>
   <text x="760" y="536" class="small">Encode + NewEnvelope</text>
-  <text x="760" y="558" class="tiny">输出：events.Envelope</text>
+  <text x="760" y="558" class="tiny">Output: events.Envelope</text>
 
   <rect x="966" y="486" width="188" height="84" class="box event"/>
   <text x="988" y="514" class="label">app delivery store</text>
   <text x="988" y="536" class="small">Append</text>
-  <text x="988" y="558" class="tiny">输出：durable event record</text>
+  <text x="988" y="558" class="tiny">Output: durable event record</text>
 
   <rect x="1208" y="486" width="188" height="84" class="box event"/>
   <text x="1230" y="514" class="label">projector/runner.go</text>
   <text x="1230" y="536" class="small">RunOnce -> Fetch</text>
-  <text x="1230" y="558" class="tiny">输出：delivery.Record</text>
+  <text x="1230" y="558" class="tiny">Output: delivery.Record</text>
 
   <rect x="1428" y="486" width="164" height="84" class="box domain"/>
-  <text x="1450" y="514" class="label">模块 projector</text>
+  <text x="1450" y="514" class="label">Module projector</text>
   <text x="1450" y="536" class="small">Handle(envelope)</text>
   <text x="1450" y="558" class="tiny">event -> cache</text>
 
@@ -133,19 +133,19 @@
   <path class="line" d="M1396 528 H1428"/>
 
   <rect x="338" y="626" width="238" height="88" class="box event"/>
-  <text x="360" y="654" class="label">event 边界数据</text>
+  <text x="360" y="654" class="label">Event boundary data</text>
   <text x="360" y="676" class="small">UserCreated -> JSON</text>
   <text x="360" y="698" class="tiny">Envelope{evt_9001,user.created,u_1001}</text>
 
   <rect x="646" y="626" width="238" height="88" class="box event"/>
-  <text x="668" y="654" class="label">delivery 边界数据</text>
+  <text x="668" y="654" class="label">Delivery boundary data</text>
   <text x="668" y="676" class="small">durable event record</text>
   <text x="668" y="698" class="tiny">delivery: status=inflight</text>
 
   <rect x="954" y="626" width="238" height="88" class="box redis"/>
   <text x="976" y="654" class="label">cache.go</text>
   <text x="976" y="676" class="small">CacheView.Set</text>
-  <text x="976" y="698" class="tiny">输入：key + typed value + ttl</text>
+  <text x="976" y="698" class="tiny">Input: key + typed value + TTL</text>
 
   <rect x="1262" y="626" width="238" height="88" class="box redis"/>
   <text x="1284" y="654" class="label">client.go + go-redis</text>
@@ -158,23 +158,23 @@
   <path class="line" d="M1192 670 H1262"/>
 
   <rect x="1060" y="762" width="258" height="70" class="box event"/>
-  <text x="1082" y="790" class="label">runner 结果</text>
-  <text x="1082" y="812" class="small">成功：Ack；失败：Fail/retry/dead</text>
+  <text x="1082" y="790" class="label">Runner result</text>
+  <text x="1082" y="812" class="small">Success: Ack; failure: Fail/retry/dead</text>
 
   <path class="dash" d="M1381 714 C1360 758, 1318 780, 1318 797"/>
 
   <rect x="44" y="900" width="1052" height="250" class="group"/>
-  <text x="66" y="930" class="section">4. Cache 读取路径</text>
+  <text x="66" y="930" class="section">4. Cache read path</text>
 
   <rect x="78" y="972" width="170" height="82" class="box domain"/>
   <text x="100" y="1000" class="label">Handler</text>
   <text x="100" y="1022" class="small">GET /users/u_1001</text>
-  <text x="100" y="1044" class="tiny">输出：query DTO</text>
+  <text x="100" y="1044" class="tiny">Output: query DTO</text>
 
   <rect x="288" y="972" width="170" height="82" class="box domain"/>
   <text x="310" y="1000" class="label">Service</text>
   <text x="310" y="1022" class="small">cache-first query</text>
-  <text x="310" y="1044" class="tiny">miss 时回源查询</text>
+  <text x="310" y="1044" class="tiny">Query source on miss</text>
 
   <rect x="498" y="972" width="194" height="82" class="box read"/>
   <text x="520" y="1000" class="label">readmodels/views.go</text>
@@ -189,7 +189,7 @@
   <rect x="942" y="972" width="118" height="82" class="box external"/>
   <text x="964" y="1000" class="label">Redis</text>
   <text x="964" y="1022" class="small">GET key</text>
-  <text x="964" y="1044" class="tiny">bytes 或 nil</text>
+  <text x="964" y="1044" class="tiny">Bytes or nil</text>
 
   <path class="line" d="M248 1013 H288"/>
   <path class="line" d="M458 1013 H498"/>
@@ -198,7 +198,7 @@
   <path class="dash" d="M942 1044 C860 1112, 630 1118, 458 1048"/>
 
   <rect x="1138" y="900" width="498" height="250" class="group"/>
-  <text x="1160" y="930" class="section">5. 其他 Redis helper 路径</text>
+  <text x="1160" y="930" class="section">5. Other Redis helper paths</text>
 
   <rect x="1174" y="968" width="205" height="62" class="box redis"/>
   <text x="1196" y="994" class="label">lock.go</text>

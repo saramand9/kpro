@@ -36,15 +36,15 @@
   </defs>
 
   <rect class="bg" x="0" y="0" width="1900" height="1320" />
-  <text class="title" x="54" y="64">KPro TCP 调用流程与内部设计</text>
-  <text class="subtitle" x="54" y="96">基于 app server 路径：transport/tcp 负责连接与字节流，codec.KProV1 负责帧解析，core.Router 负责调度，core.Invocation + core.Middleware 在 handler 执行点运行。</text>
+  <text class="title" x="54" y="64">KPro TCP Call Flow and Internal Design</text>
+  <text class="subtitle" x="54" y="96">App-server path: transport/tcp owns connections and bytes; codec.KProV1 parses frames; core.Router schedules; Invocation and Middleware run at handler execution.</text>
 
   <rect x="40" y="126" width="1820" height="172" rx="14" fill="#f0e7d8" stroke="#dbc7a5" />
-  <text class="laneTitle" x="64" y="154">1. 用户 API 与 endpoint 装配</text>
+  <text class="laneTitle" x="64" y="154">1. Application API and endpoint assembly</text>
 
   <rect class="box setup" x="70" y="190" width="250" height="78" rx="8" />
   <text class="boxTitle" x="102" y="222">server.New(config)</text>
-  <text class="text" x="96" y="246">保存 RouterConfig</text>
+  <text class="text" x="96" y="246">Store RouterConfig</text>
 
   <rect class="box setup" x="380" y="190" width="270" height="78" rx="8" />
   <text class="boxTitle" x="430" y="222">tcp.New(cfg)</text>
@@ -68,7 +68,7 @@
   <path class="line" d="M1348 229 L1398 229" />
 
   <rect x="40" y="330" width="1820" height="318" rx="14" fill="#eaf4f0" stroke="#c3d9cf" />
-  <text class="laneTitle" x="64" y="358">2. TCP transport：监听、连接、session 与读写 goroutine</text>
+  <text class="laneTitle" x="64" y="358">2. TCP transport: listener, connection, session, and I/O goroutines</text>
 
   <rect class="box tcp" x="70" y="400" width="250" height="94" rx="8" />
   <text class="boxTitle" x="112" y="432">tcp.ListenAndServe</text>
@@ -77,16 +77,16 @@
 
   <rect class="box tcp" x="380" y="400" width="234" height="94" rx="8" />
   <text class="boxTitle" x="450" y="432">Accept</text>
-  <text class="text" x="412" y="456">检查 MaxConnections</text>
-  <text class="text" x="412" y="478">超限直接 raw.Close</text>
+  <text class="text" x="412" y="456">Check MaxConnections</text>
+  <text class="text" x="412" y="478">Over limit: raw.Close</text>
 
   <rect class="box tcp" x="674" y="400" width="292" height="94" rx="8" />
-  <text class="boxTitle" x="726" y="432">创建 tcp.session</text>
+  <text class="boxTitle" x="726" y="432">Create tcp.session</text>
   <text class="text" x="704" y="456">id / raw net.Conn</text>
   <text class="text" x="704" y="478">sendQueue / done / closeOnce</text>
 
   <rect class="box tcp" x="1026" y="400" width="290" height="94" rx="8" />
-  <text class="boxTitle" x="1090" y="432">注册 active session</text>
+  <text class="boxTitle" x="1090" y="432">Register active session</text>
   <text class="text" x="1056" y="456">active++</text>
   <text class="text" x="1056" y="478">sessions.Store(id, session)</text>
 
@@ -94,7 +94,7 @@
   <text class="boxTitle" x="1464" y="418">session.start</text>
   <text class="text" x="1410" y="444">go readLoop(handler)</text>
   <text class="text" x="1410" y="466">go writeLoop()</text>
-  <text class="small" x="1410" y="488">一个连接两个 transport goroutine</text>
+  <text class="small" x="1410" y="488">Two transport goroutines per connection</text>
 
   <path class="line" d="M320 447 L370 447" />
   <path class="line" d="M614 447 L664 447" />
@@ -102,40 +102,40 @@
   <path class="line" d="M1316 447 L1366 447" />
 
   <rect class="box note" x="70" y="548" width="520" height="62" rx="8" />
-  <text class="boxTitle" x="98" y="578">Close / Shutdown 边界</text>
+  <text class="boxTitle" x="98" y="578">Close / Shutdown boundary</text>
   <text class="text" x="278" y="578">Close: close(done), raw.Close, sessions.Delete, active--</text>
-  <text class="text" x="278" y="600">Shutdown: ln.Close + 关闭所有 session</text>
+  <text class="text" x="278" y="600">Shutdown: ln.Close + close all sessions</text>
 
   <rect class="box note" x="650" y="548" width="610" height="62" rx="8" />
-  <text class="boxTitle" x="678" y="578">默认资源边界</text>
+  <text class="boxTitle" x="678" y="578">Default resource bounds</text>
   <text class="text" x="820" y="578">MaxFrameSize=64KB, MaxConnections=10000, SendQueueSize=64</text>
   <text class="text" x="820" y="600">ReadTimeout=90s, WriteTimeout=5s</text>
 
   <rect x="40" y="682" width="1820" height="244" rx="14" fill="#fff7e4" stroke="#e0c77c" />
-  <text class="laneTitle" x="64" y="710">3. 入站读取与 KProV1 协议解码</text>
+  <text class="laneTitle" x="64" y="710">3. Inbound reads and KProV1 protocol decoding</text>
 
   <rect class="box tcp" x="70" y="762" width="250" height="92" rx="8" />
   <text class="boxTitle" x="132" y="794">readLoop</text>
   <text class="text" x="104" y="818">SetReadDeadline</text>
-  <text class="text" x="104" y="840">循环读取 TCP 字节流</text>
+  <text class="text" x="104" y="840">Read TCP byte stream</text>
 
   <rect class="box proto" x="380" y="750" width="330" height="116" rx="8" />
   <text class="boxTitle" x="474" y="782">Codec.Read</text>
   <text class="text" x="412" y="808">io.ReadFull 20-byte header</text>
-  <text class="text" x="412" y="830">校验 magic/version/body length</text>
-  <text class="text" x="412" y="852">再读取 body</text>
+  <text class="text" x="412" y="830">Validate magic/version/body length</text>
+  <text class="text" x="412" y="852">Then read body</text>
 
   <rect class="box proto" x="770" y="750" width="330" height="116" rx="8" />
   <text class="boxTitle" x="858" y="782">core.Message</text>
-  <text class="text" x="808" y="808">ID: msgID 路由键</text>
-  <text class="text" x="808" y="830">Seq: 请求/响应关联</text>
+  <text class="text" x="808" y="808">ID: msgID route key</text>
+  <text class="text" x="808" y="830">Seq: request/response correlation</text>
   <text class="text" x="808" y="852">Flags + Data</text>
 
   <rect class="box risk" x="1160" y="750" width="270" height="116" rx="8" />
   <text class="boxTitle" x="1232" y="782">Heartbeat</text>
   <text class="text" x="1192" y="808">MsgHeartbeat?</text>
-  <text class="text" x="1192" y="830">直接 Send MsgPong</text>
-  <text class="small" x="1192" y="852">不进入 Router</text>
+  <text class="text" x="1192" y="830">Send MsgPong directly</text>
+  <text class="small" x="1192" y="852">Bypass Router</text>
 
   <rect class="box router" x="1490" y="750" width="300" height="116" rx="8" />
   <text class="boxTitle" x="1564" y="782">AcquireContext</text>
@@ -150,24 +150,24 @@
   <path class="warn" d="M1295 866 C1295 930, 1680 930, 1680 1030" />
 
   <rect x="40" y="960" width="1820" height="258" rx="14" fill="#eef0ff" stroke="#c9cef8" />
-  <text class="laneTitle" x="64" y="988">4. Router 调度、Invocation、中间件执行与回写</text>
+  <text class="laneTitle" x="64" y="988">4. Router scheduling, Invocation, middleware, and response write</text>
 
   <rect class="box router" x="70" y="1032" width="244" height="118" rx="8" />
   <text class="boxTitle" x="120" y="1064">Router.Dispatch</text>
   <text class="text" x="98" y="1090">routes[msg.ID]</text>
-  <text class="text" x="98" y="1112">没有 handler -> ctx.Error</text>
+  <text class="text" x="98" y="1112">No handler -> ctx.Error</text>
   <text class="small" x="98" y="1134">snapshot middlewares</text>
 
   <rect class="box router" x="374" y="1032" width="260" height="118" rx="8" />
   <text class="boxTitle" x="430" y="1064">dispatchTask</text>
   <text class="text" x="410" y="1090">ctx + handler</text>
   <text class="text" x="410" y="1112">middlewares snapshot</text>
-  <text class="small" x="410" y="1134">进入 sync / async 调度</text>
+  <text class="small" x="410" y="1134">Enter sync / async scheduler</text>
 
   <rect class="box router" x="694" y="1008" width="300" height="100" rx="8" />
-  <text class="boxTitle" x="764" y="1040">HandleSync 默认</text>
+  <text class="boxTitle" x="764" y="1040">HandleSync default</text>
   <text class="text" x="728" y="1066">sessionExecutor.queue</text>
-  <text class="text" x="728" y="1088">串行保序 + inflight limit</text>
+  <text class="text" x="728" y="1088">Serial order + in-flight limit</text>
 
   <rect class="box router" x="694" y="1130" width="300" height="70" rx="8" />
   <text class="boxTitle" x="766" y="1160">HandleAsync</text>
@@ -177,10 +177,10 @@
   <text class="boxTitle" x="1110" y="1064">core.Invocation</text>
   <text class="text" x="1088" y="1090">NewMessageInvocation</text>
   <text class="text" x="1088" y="1112">core.Middleware chain</text>
-  <text class="small" x="1088" y="1134">execute 时、handler 前</text>
+  <text class="small" x="1088" y="1134">At execute, before handler</text>
 
   <rect class="box app" x="1410" y="1032" width="270" height="118" rx="8" />
-  <text class="boxTitle" x="1472" y="1064">业务 Handler</text>
+  <text class="boxTitle" x="1472" y="1064">Business handler</text>
   <text class="text" x="1440" y="1090">ctx.Message()</text>
   <text class="text" x="1440" y="1112">ctx.Reply(id, data)</text>
   <text class="small" x="1440" y="1134">panic / error -> ctx.Error</text>
@@ -202,7 +202,7 @@
 
   <rect class="box tcp" x="810" y="1240" width="300" height="58" rx="8" />
   <text class="boxTitle" x="842" y="1276">sendQueue</text>
-  <text class="text" x="954" y="1276">满了 -> Close</text>
+  <text class="text" x="954" y="1276">Full -> Close</text>
 
   <rect class="box tcp" x="1170" y="1240" width="300" height="58" rx="8" />
   <text class="boxTitle" x="1202" y="1276">writeLoop</text>
@@ -219,10 +219,10 @@
   <path class="line" d="M1470 1269 L1520 1269" />
 
   <rect class="box note" x="1240" y="1010" width="324" height="48" rx="8" />
-  <text class="small" x="1260" y="1038">不同 TCP 连接：各自 sessionExecutor，可并行执行</text>
+  <text class="small" x="1260" y="1038">Different connections use separate session executors and run concurrently</text>
 
   <rect class="box note" x="1240" y="1164" width="324" height="48" rx="8" />
-  <text class="small" x="1260" y="1192">AsyncWorkers=1 + HandleAsync 可让该 endpoint 全局串行</text>
+  <text class="small" x="1260" y="1192">AsyncWorkers=1 + HandleAsync serializes this endpoint globally</text>
 </svg>
 
 
