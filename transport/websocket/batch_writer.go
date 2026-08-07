@@ -6,6 +6,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/saramand9/kpro/core"
 	"github.com/saramand9/kpro/transport/internal/outbound"
 	"github.com/saramand9/kpro/transport/proxyproto"
 )
@@ -48,7 +49,7 @@ func (w *sessionBatchWriter) writeAvailable(s *session, first *outbound.Item[wsF
 
 	for start := 0; start < writeCount; {
 		if s.closeRequested.Load() {
-			doneWebSocketItems(items[start:])
+			completeWebSocketItems(items[start:], core.ErrClosed)
 			return s.directCloseComplete.Load(), nil
 		}
 		end := start
@@ -72,12 +73,12 @@ func (w *sessionBatchWriter) writeAvailable(s *session, first *outbound.Item[wsF
 		s.writeMu.Lock()
 		if s.closeRequested.Load() {
 			s.writeMu.Unlock()
-			doneWebSocketItems(items[start:])
+			completeWebSocketItems(items[start:], core.ErrClosed)
 			return s.directCloseComplete.Load(), nil
 		}
 		if s.closing {
 			s.writeMu.Unlock()
-			doneWebSocketItems(items[start:])
+			completeWebSocketItems(items[start:], core.ErrClosed)
 			return true, nil
 		}
 		if closeAfterWrite && end == writeCount {
@@ -86,7 +87,7 @@ func (w *sessionBatchWriter) writeAvailable(s *session, first *outbound.Item[wsF
 		if s.server.config.WriteTimeout > 0 {
 			if err := s.raw.SetWriteDeadline(time.Now().Add(s.server.config.WriteTimeout)); err != nil {
 				s.writeMu.Unlock()
-				doneWebSocketItems(items[start:])
+				completeWebSocketItems(items[start:], err)
 				return false, err
 			}
 		}
@@ -96,11 +97,11 @@ func (w *sessionBatchWriter) writeAvailable(s *session, first *outbound.Item[wsF
 		written, err := proxyproto.WriteBuffers(&w.writev, s.raw)
 		s.writeMu.Unlock()
 		if err != nil {
-			doneWebSocketItems(items[start:])
+			completeWebSocketItems(items[start:], err)
 			return false, err
 		}
 		if written != batchBytes {
-			doneWebSocketItems(items[start:])
+			completeWebSocketItems(items[start:], io.ErrShortWrite)
 			return false, io.ErrShortWrite
 		}
 		for index := start; index < end; index++ {
@@ -109,7 +110,7 @@ func (w *sessionBatchWriter) writeAvailable(s *session, first *outbound.Item[wsF
 		start = end
 	}
 	if writeCount < len(items) {
-		doneWebSocketItems(items[writeCount:])
+		completeWebSocketItems(items[writeCount:], core.ErrClosed)
 	}
 	return closeAfterWrite, nil
 }
@@ -140,8 +141,8 @@ func webSocketFrameWireBytes(payloadBytes int) int64 {
 	return int64(headerBytes) + int64(payloadBytes)
 }
 
-func doneWebSocketItems(items []outbound.Item[wsFrame]) {
+func completeWebSocketItems(items []outbound.Item[wsFrame], err error) {
 	for index := range items {
-		items[index].Done()
+		items[index].Complete(err)
 	}
 }

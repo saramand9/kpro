@@ -12,6 +12,33 @@ upgrading between minor versions.
 
 ### Added
 
+- Message sessions can optionally expose post-admission transport results
+  through `core.SessionSendWithReceipt` and terminal per-session drain through
+  `core.SessionDrainOutbound`. TCP, KCP, QUIC, UDP, and WebSocket implement
+  both capabilities. `transport.OutboundDrainer` adds the corresponding
+  Endpoint phase after Router drain and before terminal transport shutdown.
+- `transport.OutboundSnapshotter` exposes low-cardinality, process-lifetime
+  aggregate queue, write-result, byte, saturation, waiter, and drain statistics
+  for the five built-in message transports. `prometheusx.OutboundCollector`
+  exports them with only stable endpoint and transport labels. Hot counters
+  are assigned to per-queue shards and aggregated only on snapshot collection
+  to avoid a single cross-session atomic contention point.
+- `transport/transporttest` provides a reusable live message-transport
+  contract suite covering one-shot lifecycle, readiness, descriptors, message
+  fields, session lifecycle and flow control, write receipts, quiesce/drain,
+  and outbound snapshots. TCP, KCP, QUIC, UDP, and WebSocket run the same suite
+  through protocol-native test peers.
+- Protocol conformance coverage now cross-checks all KProV1 decode paths at
+  every stream split boundary and under fuzzing. WebSocket coverage adds the
+  RFC 6455 accept-key vector, reserved-opcode and canonical-length rejection,
+  the 64-bit length high-bit rule, and bounded frame-parser fuzzing. SSE
+  coverage includes CR, LF, and CRLF data-line handling.
+- TCP resilience coverage now injects slow writes, gathered short writes,
+  partial progress with concrete errors, transport-write versus drain deadline
+  ordering, real half-close and RST, and bounded connection-fanout shutdown.
+  Environment-enabled tests exercise at least 1,000 simultaneous real
+  connections and configurable request/reply soak stability; a manual workflow
+  preserves verbose race, stress, and soak logs as build artifacts.
 - `transport/proxyproto` provides opt-in HAProxy PROXY protocol v1/v2 parsing
   with a mandatory trusted-proxy IP/CIDR allowlist, bounded header reads, pre-TLS listener
   wrapping, effective/direct address visibility, and connection-level reject
@@ -87,6 +114,10 @@ upgrading between minor versions.
 
 ### Changed
 
+- Built-in message transport shutdown now seals outbound admission, waits for
+  encoding reservations, queued writes, and writer-owned writes, and reports
+  drain errors before closing sessions or shared sockets. This is a complete
+  transport-write boundary, not peer acknowledgement or durable delivery.
 - TCP and WebSocket writers non-blockingly drain bounded FIFO batches and use
   `net.Buffers` gather submissions subject to `MaxWriteBatchFrames` and
   `MaxWriteBatchBytes`. TCP additionally bounds reusable idle payload storage
@@ -98,10 +129,10 @@ upgrading between minor versions.
   24 B/1 allocation per operation on the recorded baseline.
 - A mounted message Endpoint intercepts serve-context cancellation, optionally
   quiesces the transport, drains already accepted Router handlers while
-  sessions remain writable, and only then shuts down its transport. Custom
-  transports without `transport.Quiescer` retain the Router-drain-then-shutdown
-  fallback. This remains an at-most-once send boundary, not a peer-delivery
-  guarantee.
+  sessions remain writable, invokes optional outbound drain, and only then
+  shuts down its transport. Custom transports use the compatible lifecycle
+  phases they expose. This remains a transport-write boundary, not a
+  peer-delivery guarantee.
 - The unified `service` scaffold replaces the pre-release `http-api` profile.
   Generation now runs in a sibling staging directory, publishes only after all
   bindings succeed, and preflights the required protobuf tools for gRPC.
@@ -128,6 +159,9 @@ upgrading between minor versions.
 
 ### Fixed
 
+- SSE event serialization now treats CR, LF, and CRLF as line boundaries and
+  rejects line breaks in event names, preventing unprefixed or injected
+  event-stream fields.
 - Batched TCP/WebSocket writes reject silent short writes, release every
   drained item on failure, clear reusable vector references after completion,
   and prevent WebSocket data from being written after a close frame. Reused

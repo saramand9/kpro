@@ -15,9 +15,9 @@ type Server interface {
 }
 ```
 
-A message transport should also implement the optional two-phase shutdown
-capability when it can stop new application dispatch without immediately
-destroying established writer paths:
+A message transport should also implement the optional quiesce capability when
+it can stop new application dispatch without immediately destroying
+established writer paths:
 
 ```go
 type Quiescer interface {
@@ -25,13 +25,22 @@ type Quiescer interface {
 }
 ```
 
-For a mounted message Endpoint the order is `Quiesce`, Router drain, then
-terminal `Shutdown`. `Quiesce` must be idempotent, stop new session/message
-admission and handler dispatch, preserve existing outbound writers, and honor
-its context for any blocking transport work. TCP, KCP, QUIC, UDP, and
-WebSocket implement this capability. A component without it remains compatible
-but falls back to Router-drain-then-`Shutdown`; that fallback cannot guarantee
-that its receive loop stopped during drain.
+A queue-backed transport should also implement the optional write-drain phase:
+
+```go
+type OutboundDrainer interface {
+	DrainOutbound(context.Context) error
+}
+```
+
+For a mounted message Endpoint the order is `Quiesce`, Router drain,
+`DrainOutbound`, then terminal `Shutdown`. `Quiesce` must be idempotent, stop
+new session/message admission and handler dispatch, preserve existing outbound
+writers, and honor its context for blocking work. `DrainOutbound` must seal all
+current sessions against new sends before waiting for any one session, then
+wait for encoding reservations, queued writes, and writer-owned writes.
+TCP, KCP, QUIC, UDP, and WebSocket implement both capabilities. A component
+without either capability remains compatible but skips that phase.
 
 Do not assume quiesce always means closing the listener. KCP sessions share the
 listener's UDP socket, so its built-in implementation keeps the socket alive
@@ -90,6 +99,31 @@ current/max counts as `OutboundState.WaitingWriters` and
 is full and `core.ErrClosed` after close. Success is advisory and must not
 reserve capacity for the next `Send`. Another sender can consume capacity
 first, so the subsequent send result remains authoritative.
+
+When post-admission write status matters, a session can implement
+`core.WriteReceiptSender`:
+
+```go
+receipt, supported, err := core.SessionSendWithReceipt(session, message)
+if err != nil {
+	return err // Encoding, closed, or queue-admission failure.
+}
+if !supported {
+	return session.Send(message)
+}
+return receipt.Wait(ctx) // Full transport write result, not peer acknowledgement.
+```
+
+Complete an accepted receipt exactly once, after the protocol complete-write
+call returns. Propagate deadline and write errors and report silent short writes
+as `io.ErrShortWrite`. A terminal close that discards an accepted queued item
+must complete it with `core.ErrClosed`. Receipt success does not prove peer
+receipt, application handling, or durable delivery.
+
+A session may also implement `core.SessionOutboundDrainer`. Its drain method
+must atomically reject future sends before waiting and must honor context
+cancellation. Draining is terminal for that session; ordinary `Session.Close`
+can remain the explicit abort path.
 
 Message handlers obtain middleware-updated cancellation, deadlines, tracing,
 and values with `core.ContextOf(messageCtx)`. The helper reads the optional
@@ -159,6 +193,43 @@ contract. `transportkit` helpers do not provide a complete lifecycle—your
 component still owns listener publication, one-shot state, capacity counters,
 error policy, and idempotent shutdown.
 
+Expose process-lifetime, low-cardinality outbound telemetry through the
+optional `transport.OutboundSnapshotter` capability. Current gauges must cover
+active queue owners, reservations/queued/writer-owned writes and bytes,
+writable waiters, and saturated queues. Monotonic counters must retain accepted
+writes and bytes, terminal success/error/drop results, and bounded drain
+outcomes after individual sessions close. Do not include connection IDs, peer
+addresses, error text, message IDs, or tenant data. A successful write still
+means only that the complete transport write call returned successfully.
+
+Use the public `transport/transporttest` package as the minimum live contract
+for a custom message transport:
+
+```go
+func TestMessageTransportContract(t *testing.T) {
+	transporttest.RunMessageServerContract(t, transporttest.MessageContract{
+		New: func(t *testing.T) transporttest.MessageHarness {
+			return transporttest.MessageHarness{
+				Server:  newTestServer(t),
+				Connect: dialProtocolTestPeer(t),
+			}
+		},
+		Require: transporttest.MessageRequirements{
+			Descriptor: true,
+			Readiness:  true,
+		},
+	})
+}
+```
+
+`New` must return a fresh, never-started server for every subtest. The peer
+adapter sends and receives `core.Message` values using the real protocol and
+must honor context cancellation. The suite always checks the one-shot server
+lifecycle and message/session basics, tests each optional capability it finds,
+and fails when a capability marked in `Require` is absent. The five built-in
+message transports all run this same suite; transport-specific malformed-wire,
+capacity, failure-injection, and soak tests remain necessary in addition to it.
+
 The receive path should:
 
 1. accept or identify a peer and allocate a stable, collision-free session ID;
@@ -211,7 +282,9 @@ Atomically reserve both before calling the codec, cancel the reservation on
 encoding failure, reconcile it with the actual encoded size before publishing
 the write, and release queued items during close-time drain. A reservation
 whose encoder is still running and a writer-owned item must remain accounted
-until their matching encoder or writer completion path releases them. This
+until their matching encoder or writer completion path releases them. A
+graceful drain must include all three ownership states and return the first
+write failure after every waiter is released. This
 prevents a queue of many small writes and a few large writes from defeating
 each other's limit. The private
 `transport/internal/outbound` implementation is not an extension API; implement
@@ -220,11 +293,12 @@ equivalent ownership in the custom transport or an application-owned helper.
 The send and shutdown paths should also define explicit slow-consumer behavior,
 idempotent close, a context-aware bounded stop, and no goroutine left waiting
 forever on an unresponsive peer. Explicit `Endpoint.Shutdown(ctx)` uses that
-caller context for quiesce, Router drain, and terminal transport shutdown.
+caller context for quiesce, Router drain, outbound drain, and terminal
+transport shutdown.
 Context cancellation observed by `Endpoint.ListenAndServe` is intercepted
-until Router drain completes, so a transport must not depend solely on
+until Router and outbound drain complete, so a transport must not depend solely on
 receiving the original canceled context; its idempotent `Shutdown` must stop
-serving too. Quiesce or Router errors do not skip terminal shutdown. Message
+serving too. Quiesce, Router, or outbound errors do not skip terminal shutdown. Message
 sends are at-most-once: handler completion and queue admission do not promise
 that queued or in-flight replies reach the peer. Verify partial frames,
 malformed packets, duplicate quiesce/shutdown calls, remote disconnect,

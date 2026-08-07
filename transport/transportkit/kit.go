@@ -1,6 +1,7 @@
 // Package transportkit exposes the bounded validation and lifecycle helpers
 // used by KPro's built-in transports so third-party transports can follow the
-// same startup, cancellation, and stream-write contracts.
+// same startup, cancellation, and stream-write contracts. Use the sibling
+// transporttest package to verify the resulting live transport behavior.
 package transportkit
 
 import (

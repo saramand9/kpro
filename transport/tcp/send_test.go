@@ -3,6 +3,7 @@ package tcp
 import (
 	"context"
 	"errors"
+	"net"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -42,6 +43,108 @@ func TestSendAfterCloseNeverQueues(t *testing.T) {
 		if snapshot := session.sendQueue.Snapshot(); snapshot.PendingFrames != 0 || snapshot.PendingBytes != 0 {
 			t.Fatalf("attempt %d: outbound snapshot = %+v", attempt, snapshot)
 		}
+	}
+}
+
+func TestShutdownDrainsAcceptedWriteAndCompletesReceipt(t *testing.T) {
+	server := New(Config{SendQueueSize: 1, WriteTimeout: time.Second})
+	serverConn, peer := net.Pipe()
+	defer peer.Close()
+	atomic.StoreInt64(&server.active, 1)
+	session := &session{
+		id:        1,
+		server:    server,
+		raw:       serverConn,
+		sendQueue: newSessionOutboundQueue(server.config),
+		done:      make(chan struct{}),
+	}
+	server.sessions.Store(session.id, session)
+	go session.writeLoop()
+
+	want := core.Message{ID: 42, Seq: 7, Data: []byte("drain me")}
+	receipt, supported, err := core.SessionSendWithReceipt(session, want)
+	if err != nil || !supported || receipt == nil {
+		t.Fatalf("SessionSendWithReceipt() = (%p, %v, %v)", receipt, supported, err)
+	}
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- server.Shutdown(context.Background()) }()
+
+	select {
+	case <-receipt.Done():
+		t.Fatal("write receipt completed before the peer accepted bytes")
+	case err := <-shutdownDone:
+		t.Fatalf("Shutdown() returned before outbound write completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	result, err := server.config.Codec.Read(peer, server.config.MaxFrameSize)
+	if err != nil {
+		t.Fatalf("read drained frame: %v", err)
+	}
+	if result.Message.ID != want.ID || result.Message.Seq != want.Seq || string(result.Message.Data) != string(want.Data) {
+		t.Fatalf("drained message = %+v, want %+v", result.Message, want)
+	}
+	if err := receipt.Wait(context.Background()); err != nil {
+		t.Fatalf("write receipt error = %v", err)
+	}
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("Shutdown() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown() did not finish after peer accepted the write")
+	}
+}
+
+func TestServerOutboundSnapshotPersistsAfterSessionClose(t *testing.T) {
+	server := New(Config{SendQueueSize: 1, WriteTimeout: time.Second})
+	serverConn, peer := net.Pipe()
+	defer peer.Close()
+	atomic.StoreInt64(&server.active, 1)
+	session := &session{
+		id:        1,
+		server:    server,
+		raw:       serverConn,
+		sendQueue: newSessionOutboundQueue(server.config, &server.outboundStats),
+		done:      make(chan struct{}),
+	}
+	server.sessions.Store(session.id, session)
+	go session.writeLoop()
+
+	want := core.Message{ID: 43, Seq: 8, Data: []byte("observable")}
+	receipt, err := session.SendWithReceipt(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := server.config.Codec.Read(peer, server.config.MaxFrameSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Message.ID != want.ID || result.Message.Seq != want.Seq || string(result.Message.Data) != string(want.Data) {
+		t.Fatalf("received message = %+v, want %+v", result.Message, want)
+	}
+	if err := receipt.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := server.OutboundSnapshot()
+	if snapshot.Sessions != 1 || snapshot.PendingWrites != 0 || snapshot.PendingBytes != 0 ||
+		snapshot.AcceptedWrites != 1 || snapshot.SucceededWrites != 1 || snapshot.FailedWrites != 0 || snapshot.DroppedWrites != 0 {
+		t.Fatalf("live outbound snapshot = %+v", snapshot)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot = server.OutboundSnapshot()
+	if snapshot.Sessions != 0 || snapshot.AcceptedWrites != 1 || snapshot.SucceededWrites != 1 {
+		t.Fatalf("closed outbound snapshot = %+v", snapshot)
+	}
+	if err := server.DrainOutbound(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot = server.OutboundSnapshot()
+	if snapshot.DrainSucceeded != 1 || snapshot.DrainDeadline != 0 || snapshot.DrainCanceled != 0 || snapshot.DrainFailed != 0 {
+		t.Fatalf("drain outbound snapshot = %+v", snapshot)
 	}
 }
 

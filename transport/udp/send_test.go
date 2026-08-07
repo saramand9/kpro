@@ -18,6 +18,31 @@ type blockingPacketCodec struct {
 	release chan struct{}
 }
 
+func TestSendWithReceiptCompletesOnWriterResult(t *testing.T) {
+	server := newUDPOutboundTestServer(t, Config{SendQueueSize: 1})
+	session := newUDPTestPacketSession(server, "127.0.0.1:10000")
+	receipt, supported, err := core.SessionSendWithReceipt(session, core.Message{ID: 1, Data: []byte("udp")})
+	if err != nil || !supported || receipt == nil {
+		t.Fatalf("SessionSendWithReceipt() = (%p, %v, %v)", receipt, supported, err)
+	}
+	select {
+	case <-receipt.Done():
+		t.Fatal("receipt completed at queue admission")
+	default:
+	}
+	item := <-session.sendQueue.Items()
+	item.Done()
+	if err := receipt.Wait(context.Background()); err != nil {
+		t.Fatalf("receipt error = %v", err)
+	}
+	if supported, err := core.SessionDrainOutbound(nil, session); !supported || err != nil {
+		t.Fatalf("SessionDrainOutbound() = (%v, %v)", supported, err)
+	}
+	if receipt, err := session.SendWithReceipt(core.Message{}); receipt != nil || !errors.Is(err, core.ErrClosed) {
+		t.Fatalf("SendWithReceipt() after drain = (%p, %v)", receipt, err)
+	}
+}
+
 func (c *blockingPacketCodec) EncodePacket(msg core.Message) ([]byte, error) {
 	close(c.started)
 	<-c.release

@@ -1169,10 +1169,9 @@ func (e *Endpoint) ListenAndServe(ctx context.Context) error {
 	return errors.Join(serveErr, <-shutdownResult)
 }
 
-// Shutdown first quiesces transports that expose the optional capability, then
-// stops Router admission and drains accepted message work, and only then
-// closes the underlying transport. Keeping sessions and writers alive while
-// accepted handlers drain lets their final replies reach the send queue.
+// Shutdown first quiesces transports that expose the optional capability,
+// drains accepted Router work, drains accepted transport writes when
+// supported, and only then closes the underlying transport.
 func (e *Endpoint) Shutdown(ctx context.Context) error {
 	return e.shutdown(ctx, nil)
 }
@@ -1186,11 +1185,15 @@ func (e *Endpoint) shutdown(ctx context.Context, beforeTransport func()) error {
 		quiesceErr = quiescer.Quiesce(ctx)
 	}
 	routerErr := e.router.Shutdown(ctx)
+	var outboundErr error
+	if drainer, ok := e.transport.(transport.OutboundDrainer); ok {
+		outboundErr = drainer.DrainOutbound(ctx)
+	}
 	if beforeTransport != nil {
 		beforeTransport()
 	}
 	transportErr := e.transport.Shutdown(ctx)
-	return errors.Join(quiesceErr, routerErr, transportErr)
+	return errors.Join(quiesceErr, routerErr, outboundErr, transportErr)
 }
 
 func (e *Endpoint) dispatch(ctx core.Context) error {

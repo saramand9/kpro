@@ -113,12 +113,13 @@ type Server struct {
 	// shutdownTimeout bounds cancellation-triggered graceful shutdown.
 	shutdownTimeout time.Duration
 
-	lifecycleMu sync.Mutex
-	accepting   bool
-	started     bool
-	dispatch    *dispatchgate.Gate
-	upgrades    sync.WaitGroup
-	upgrading   sync.Map
+	lifecycleMu   sync.Mutex
+	accepting     bool
+	started       bool
+	dispatch      *dispatchgate.Gate
+	outboundStats outbound.Tracker
+	upgrades      sync.WaitGroup
+	upgrading     sync.Map
 
 	nextID    uint64
 	active    int64
@@ -271,14 +272,47 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	stopErr := s.stopAdmissionAndReads()
+	upgradeErr := waitGroupContext(ctx, &s.upgrades)
+	drainErr := s.DrainOutbound(ctx)
 	s.sessions.Range(func(_, value interface{}) bool {
 		if session, ok := value.(*session); ok {
 			_ = session.Close()
 		}
 		return true
 	})
-	upgradeErr := waitGroupContext(ctx, &s.upgrades)
-	return errors.Join(stopErr, upgradeErr)
+	return errors.Join(stopErr, upgradeErr, drainErr)
+}
+
+func (s *Server) DrainOutbound(ctx context.Context) (drainErr error) {
+	started := time.Now()
+	defer func() {
+		s.outboundStats.RecordDrain(time.Since(started), drainErr)
+	}()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	sessions := make([]*session, 0)
+	s.sessions.Range(func(_, value interface{}) bool {
+		if session, ok := value.(*session); ok {
+			sessions = append(sessions, session)
+		}
+		return true
+	})
+	for _, session := range sessions {
+		session.sendQueue.Seal()
+	}
+	for _, session := range sessions {
+		drainErr = errors.Join(drainErr, session.sendQueue.WaitDrained(ctx))
+	}
+	return drainErr
+}
+
+// OutboundSnapshot reports bounded aggregate write and drain statistics.
+func (s *Server) OutboundSnapshot() transportapi.OutboundSnapshot {
+	if s == nil {
+		return transportapi.OutboundSnapshot{}
+	}
+	return s.outboundStats.Snapshot()
 }
 
 func (s *Server) stopAdmissionAndReads() error {
@@ -416,7 +450,7 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request, handler core.Ha
 		server:    s,
 		raw:       conn,
 		reader:    rw.Reader,
-		sendQueue: newSessionOutboundQueue(s.config),
+		sendQueue: newSessionOutboundQueue(s.config, &s.outboundStats),
 		done:      make(chan struct{}),
 	}
 	if !s.registerSession(session, handler) {
@@ -495,7 +529,11 @@ type session struct {
 
 var _ core.OutboundStateProvider = (*session)(nil)
 var _ core.OutboundWritableWaiter = (*session)(nil)
+var _ core.WriteReceiptSender = (*session)(nil)
+var _ core.SessionOutboundDrainer = (*session)(nil)
 var _ transportapi.Quiescer = (*Server)(nil)
+var _ transportapi.OutboundDrainer = (*Server)(nil)
+var _ transportapi.OutboundSnapshotter = (*Server)(nil)
 
 func (s *session) ID() uint64 {
 	return s.id
@@ -514,6 +552,18 @@ func (s *session) Done() <-chan struct{} {
 }
 
 func (s *session) Send(msg core.Message) error {
+	return s.send(msg, nil)
+}
+
+func (s *session) SendWithReceipt(msg core.Message) (*core.WriteReceipt, error) {
+	receipt := core.NewWriteReceipt()
+	if err := s.send(msg, receipt); err != nil {
+		return nil, err
+	}
+	return receipt, nil
+}
+
+func (s *session) send(msg core.Message, completion outbound.Completion) error {
 	select {
 	case <-s.done:
 		return core.ErrClosed
@@ -528,7 +578,11 @@ func (s *session) Send(msg core.Message) error {
 	if err != nil {
 		return err
 	}
-	if err := reservation.Commit(wsFrame{opcode: opBinary, payload: packet}, int64(len(packet))); err != nil {
+	if err := reservation.CommitWithCompletion(
+		wsFrame{opcode: opBinary, payload: packet},
+		int64(len(packet)),
+		completion,
+	); err != nil {
 		return s.outboundError(err)
 	}
 	return nil
@@ -537,7 +591,7 @@ func (s *session) Send(msg core.Message) error {
 func (s *session) Close() error {
 	s.closeOnce.Do(func() {
 		if s.sendQueue != nil {
-			s.sendQueue.Close()
+			s.sendQueue.CloseWithError(core.ErrClosed)
 		}
 		close(s.done)
 		if s.raw != nil {
@@ -547,6 +601,14 @@ func (s *session) Close() error {
 		s.server.releaseConnectionSlot()
 	})
 	return nil
+}
+
+func (s *session) DrainOutbound(ctx context.Context) error {
+	if s == nil || s.sendQueue == nil {
+		return core.ErrClosed
+	}
+	s.sendQueue.Seal()
+	return s.sendQueue.WaitDrained(ctx)
 }
 
 func (s *session) OutboundState() core.OutboundState {
@@ -770,11 +832,15 @@ func (s *session) writeLoop() {
 	}
 }
 
-func newSessionOutboundQueue(config Config) *outbound.Queue[wsFrame] {
-	return outbound.New[wsFrame](outbound.Config{
+func newSessionOutboundQueue(config Config, trackers ...*outbound.Tracker) *outbound.Queue[wsFrame] {
+	var tracker *outbound.Tracker
+	if len(trackers) > 0 {
+		tracker = trackers[0]
+	}
+	return outbound.NewTracked[wsFrame](outbound.Config{
 		MaxFrames: config.SendQueueSize,
 		MaxBytes:  config.MaxPendingBytes,
-	})
+	}, tracker)
 }
 
 func (s *session) outboundError(err error) error {
@@ -823,24 +889,39 @@ func readFrame(r io.Reader, maxSize int) (wsFrame, error) {
 	if header[0]&0x70 != 0 {
 		return wsFrame{}, ErrBadFrame
 	}
+	switch opcode {
+	case opContinuation, opText, opBinary, opClose, opPing, opPong:
+	default:
+		return wsFrame{}, ErrBadFrame
+	}
 	masked := header[1]&0x80 != 0
 	if !masked {
 		return wsFrame{}, ErrBadFrame
 	}
-	length := uint64(header[1] & 0x7f)
-	switch length {
+	lengthCode := header[1] & 0x7f
+	length := uint64(lengthCode)
+	switch lengthCode {
 	case 126:
 		var ext [2]byte
 		if _, err := io.ReadFull(r, ext[:]); err != nil {
 			return wsFrame{}, err
 		}
 		length = uint64(binary.BigEndian.Uint16(ext[:]))
+		if length < 126 {
+			return wsFrame{}, ErrBadFrame
+		}
 	case 127:
 		var ext [8]byte
 		if _, err := io.ReadFull(r, ext[:]); err != nil {
 			return wsFrame{}, err
 		}
+		if ext[0]&0x80 != 0 {
+			return wsFrame{}, ErrBadFrame
+		}
 		length = binary.BigEndian.Uint64(ext[:])
+		if length <= 0xffff {
+			return wsFrame{}, ErrBadFrame
+		}
 	}
 	if opcode >= opClose && (!fin || length > 125) {
 		return wsFrame{}, ErrFragmentedControlFrame

@@ -2,11 +2,14 @@ package tcp
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net"
 	"testing"
 	"time"
+
+	"github.com/saramand9/kpro/core"
 )
 
 func TestSessionBatchWriterPreservesFrameOrder(t *testing.T) {
@@ -73,11 +76,12 @@ func TestSessionBatchWriterRejectsShortWriteWithoutError(t *testing.T) {
 		done:      make(chan struct{}),
 	}
 	frame := outboundFrame{payload: []byte("payload")}
+	receipt := core.NewWriteReceipt()
 	reservation, err := session.sendQueue.Reserve(frame.wireBytes())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := reservation.Commit(frame, frame.wireBytes()); err != nil {
+	if err := reservation.CommitWithCompletion(frame, frame.wireBytes(), receipt); err != nil {
 		t.Fatal(err)
 	}
 
@@ -85,6 +89,9 @@ func TestSessionBatchWriterRejectsShortWriteWithoutError(t *testing.T) {
 	first := <-session.sendQueue.Items()
 	if err := writer.writeAvailable(session, &first); !errors.Is(err, io.ErrShortWrite) {
 		t.Fatalf("writeAvailable() error = %v, want io.ErrShortWrite", err)
+	}
+	if err := receipt.Wait(context.Background()); !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("write receipt error = %v, want io.ErrShortWrite", err)
 	}
 	if snapshot := session.sendQueue.Snapshot(); snapshot.PendingFrames != 0 || snapshot.PendingBytes != 0 {
 		t.Fatalf("snapshot after short write = %+v", snapshot)

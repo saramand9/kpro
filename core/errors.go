@@ -131,6 +131,8 @@ var (
 	ErrAlreadyStarted = errors.New("component already started")
 	// ErrClosed reports that a session or transport is already closed.
 	ErrClosed = errors.New("component closed")
+	// ErrInvalidWriteReceipt reports an operation on a nil write receipt.
+	ErrInvalidWriteReceipt = errors.New("write receipt is nil")
 	// ErrNoHandler reports that no route was registered for a message id.
 	ErrNoHandler = errors.New("no handler registered")
 	// ErrNilHandler reports an attempt to register a nil message handler.

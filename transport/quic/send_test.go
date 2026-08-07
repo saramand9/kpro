@@ -39,6 +39,31 @@ func TestSendAfterCloseNeverQueues(t *testing.T) {
 	}
 }
 
+func TestSendWithReceiptCompletesOnWriterResult(t *testing.T) {
+	server := New(Config{SendQueueSize: 1})
+	session := &session{server: server, sendQueue: newSessionOutboundQueue(server.config), done: make(chan struct{})}
+	receipt, supported, err := core.SessionSendWithReceipt(session, core.Message{ID: 1, Data: []byte("quic")})
+	if err != nil || !supported || receipt == nil {
+		t.Fatalf("SessionSendWithReceipt() = (%p, %v, %v)", receipt, supported, err)
+	}
+	select {
+	case <-receipt.Done():
+		t.Fatal("receipt completed at queue admission")
+	default:
+	}
+	item := <-session.sendQueue.Items()
+	item.Done()
+	if err := receipt.Wait(context.Background()); err != nil {
+		t.Fatalf("receipt error = %v", err)
+	}
+	if supported, err := core.SessionDrainOutbound(nil, session); !supported || err != nil {
+		t.Fatalf("SessionDrainOutbound() = (%v, %v)", supported, err)
+	}
+	if receipt, err := session.SendWithReceipt(core.Message{}); receipt != nil || !errors.Is(err, core.ErrClosed) {
+		t.Fatalf("SendWithReceipt() after drain = (%p, %v)", receipt, err)
+	}
+}
+
 func TestSendCannotCommitAfterConcurrentClose(t *testing.T) {
 	blocking := &blockingStreamCodec{
 		StreamCodec: codec.KProV1(),

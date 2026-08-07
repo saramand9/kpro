@@ -23,20 +23,22 @@ Status terms used below:
 - [ ] **Configure and verify:** Make the process shutdown budget longer than the slowest accepted request, stream drain, and resource close path.
 - [ ] **Built in:** A Server-mounted message `Endpoint` first calls the
   optional `transport.Quiescer`, then stops Router admission and drains
-  accepted sync/async handlers, and finally invokes terminal transport
-  shutdown. Explicit `Endpoint.Shutdown(ctx)` passes the caller context to
-  all applicable phases; serve-context cancellation is intercepted until
-  Router drain completes. An earlier phase error does not skip terminal
-  shutdown, and errors are retained together.
+  accepted sync/async handlers, then calls optional
+  `transport.OutboundDrainer`, and finally invokes terminal transport shutdown.
+  Explicit `Endpoint.Shutdown(ctx)` passes the caller context to all applicable
+  phases; serve-context cancellation is intercepted until Router and outbound
+  drain complete. An earlier phase error does not skip terminal shutdown, and
+  errors are retained together.
 - [ ] **Built in:** TCP, KCP, QUIC, UDP, and WebSocket implement quiesce while
-  retaining existing outbound writers. KCP keeps its shared listener/session
-  UDP socket open, accepts and closes new raw sessions, and closes the listener
-  only in terminal shutdown. QUIC closes new connection admission but accepts
-  and cancels new streams on retained connections until terminal shutdown.
+  retaining existing outbound writers, and implement outbound drain before
+  terminal socket/session close. KCP keeps its shared listener/session UDP
+  socket open, accepts and closes new raw sessions, and closes the listener
+  only after drain. QUIC closes new connection admission but accepts and
+  cancels new streams on retained connections until drain finishes.
 - [ ] **Configure and verify:** Require a custom message transport to implement
-  `transport.Quiescer` when new reads/dispatch must stop before Router drain.
-  The compatible fallback skips that phase and cannot provide the same
-  transport-side cutover.
+  `transport.Quiescer` when new reads/dispatch must stop before Router drain,
+  and `transport.OutboundDrainer` when accepted transport writes must complete
+  before terminal close. Compatible fallbacks skip unsupported phases.
 - [ ] **Built in:** `Router.Shutdown` drains accepted sync/async work even
   when a session closes during graceful drain. `Router.Close` is an immediate
   best-effort sync-queue cancellation path that does not wait; accepted async
@@ -48,11 +50,12 @@ Status terms used below:
   until the shutdown deadline; deadline expiry force-closes remaining
   connections and is reported to the caller.
 - [ ] **Configure and verify:** Treat message-transport shutdown as a bounded
-  stop with at-most-once outbound replies, not a delivery barrier. Terminal
-  transport shutdown does not wait for queued or writer-owned bytes to flush,
-  and KPro currently has no separate outbound-drain phase. Add message IDs,
-  acknowledgements, bounded retry, and idempotency, or own an explicit
-  application-level drain where delivery must be recoverable.
+  transport-write barrier, not a peer-delivery barrier. Built-in outbound drain
+  waits for encoding reservations, queued writes, and writer-owned writes, but
+  success only proves that the protocol write call accepted the complete
+  frame/datagram. It does not prove peer receipt, application handling, or
+  durable delivery. Add message IDs, acknowledgements, bounded retry, and
+  idempotency where delivery must be recoverable.
 - [ ] **Built in:** SSE stream contexts cancel when endpoint shutdown begins;
   handlers must observe `Context.Done()` and return rather than detach work.
 - [ ] **Built in:** Serving and shutdown errors use `*server.ComponentError` to retain component name, lifecycle phase, and the original `errors.Is`/`errors.As` chain.
@@ -96,6 +99,16 @@ Status terms used below:
   context-cancelable advisory waiting. Built-in sessions bound waiters per
   session to `SendQueueSize` by default; a successful wait reserves no
   capacity for the next send.
+- [ ] **Built in:** `core.SessionSendWithReceipt` discovers optional transport
+  write completion. TCP, KCP, QUIC, UDP, and WebSocket complete accepted
+  receipts with success, the concrete write/deadline error, `io.ErrShortWrite`,
+  or `core.ErrClosed` when terminal close discards a queued write.
+- [ ] **Configure and verify:** Use a receipt only when the caller needs the
+  post-admission transport result; ordinary `Session.Send` remains the
+  allocation-free admission API. Bound receipt waits with a context. Call
+  `core.SessionDrainOutbound` only at a terminal session boundary because it
+  seals future sends; direct `Session.Close` intentionally aborts instead of
+  draining.
 - [ ] **Configure and verify:** Use `OutboundState.Writable` only as a
   telemetry or proactive-throttling hint. Always handle the subsequent
   `Send`/`Reply` result as authoritative, including
@@ -175,6 +188,11 @@ The repository CI requires live MySQL and PostgreSQL for its `dbintegration` sui
   server/Router lifecycle and admission snapshots, including current/global/
   per-session waiting capacity and distinct global/session wait-rejection
   counters, plus explicit eventing backlog/projector names.
+- [ ] **Built in:** TCP, KCP, QUIC, UDP, and WebSocket expose aggregate
+  `transport.OutboundSnapshot` gauges and process-lifetime counters.
+  `prometheusx.OutboundCollector` exports queue pressure, accepted and terminal
+  write/byte results, and drain outcomes/durations using stable endpoint,
+  transport, and bounded result labels only.
 - [ ] **Configure and verify:** Keep operation names bounded by registered routes/methods; never substitute raw URLs, peers, connection IDs, tenant IDs, or arbitrary metadata as metric labels.
 - [ ] **Built in:** `zapx` emits structured completion/error/panic/slow-call logs, and `otelx` starts server spans and extracts propagation with a supplied or global provider/propagator.
 - [ ] **External:** The application must configure, own, flush, and shut down its OpenTelemetry SDK, sampler, and exporter. KPro does not select or ship a production exporter configuration.
@@ -192,10 +210,22 @@ The repository CI requires live MySQL and PostgreSQL for its `dbintegration` sui
 - [ ] Use a supported Go 1.25 or 1.26 patch release; repository CI currently verifies Go 1.25.12 and 1.26.5.
 - [ ] Run `go mod verify` and `govulncheck ./...`; triage every reachable finding before release and retain the report. A clean call-graph scan is not a complete image or deployment scan.
 - [ ] Run unit, race, protocol integration, and database integration tests for the exact build.
+- [ ] **Built in:** TCP, KCP, QUIC, UDP, and WebSocket run the same public
+  `transport/transporttest` live contract for lifecycle/readiness, message
+  fields, session closure/flow control, receipts, quiesce/drain ordering, and
+  aggregate outbound statistics. Custom transports should run it with their
+  protocol-native test peer; it complements rather than replaces malformed
+  wire, overload, and failure-injection coverage.
 - [ ] Preserve the repository failure/concurrency cases for global and
   per-session Router waiter exhaustion, cancellation cleanup, quiesce-before-
   drain ordering, accepted sync work after session close, outbound waiter
   exhaustion, concurrent Send/close, and writer-owned accounting.
+- [ ] **Built in:** The TCP resilience matrix injects slow/short/partial-error
+  writes, write-versus-drain deadline ordering, half-close, RST cleanup, and a
+  128-connection shutdown fanout under ordinary and race tests. The manual
+  `Transport resilience` workflow additionally exercises 1,000 simultaneous
+  connections and a two-minute real-socket soak; see
+  [Transport Fault Injection And Soak Testing](transport-resilience-testing.md).
 - [ ] Preserve the deterministic near-`MaxInt64` outbound-queue test. The
   default high watermark is calculated as `MaxBytes - MaxBytes/5` to avoid the
   multiplication overflow of `MaxBytes*4/5`; this arithmetic test is not a
@@ -203,7 +233,10 @@ The repository CI requires live MySQL and PostgreSQL for its `dbintegration` sui
 - [ ] Generate `coverage.out`, inspect package-level gaps, and meet the repository's 55% aggregate framework floor without treating the percentage as proof of scenario coverage.
 - [ ] Run the repository `cmd/benchguard` command against `benchmark/budgets.json`; investigate rather than blindly widening a failed hot-path budget.
 - [ ] Treat repository performance budgets as regression thresholds for their CI workload, not as application latency or capacity objectives.
-- [ ] Run load, spike, soak, slow-client, reconnect, and graceful-drain scenarios at expected and overload traffic.
+- [ ] **Configure and verify:** Run load, spike, extended soak, slow-client,
+  reconnect, and graceful-drain scenarios with the application's actual TLS,
+  proxy, handler, payload, and overload traffic. Repository smoke tests do not
+  close this deployment-specific item.
 - [ ] Inject runner, network, database, projector, and telemetry failures; verify bounded recovery and actionable diagnostics.
 - [ ] Record CPU, memory, goroutines, connections, queues, database pools, latency percentiles, rejection rate, and drain time.
 - [ ] Pin a reviewed KPro commit or release and review its public API changes before upgrading; see [API Stability](api-stability.md).

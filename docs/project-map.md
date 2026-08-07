@@ -26,9 +26,9 @@ contract for application code.
 
 | Path | Primary role | Key files |
 | --- | --- | --- |
-| `core/` | Transport-neutral runtime primitives, message dispatch, and optional session capabilities. | `router.go`, `router_config.go`, `context.go`, `session_lifecycle.go`, `outbound_state.go`, `outbound_buffer.go`, `invocation.go`, `backpressure.go`, `lifecycle.go` |
+| `core/` | Transport-neutral runtime primitives, message dispatch, and optional session capabilities. | `router.go`, `router_config.go`, `context.go`, `session_lifecycle.go`, `outbound_state.go`, `outbound_completion.go`, `outbound_buffer.go`, `invocation.go`, `backpressure.go`, `lifecycle.go` |
 | `server/` | Dependency-neutral process owner for mounted transport contracts, middleware, readiness, component error provenance, and managed resources. | `server.go`, `mount.go`, `component_error.go`, `lifecycle.go` |
-| `transport/` | Shared transport contracts, optional quiesce/readiness capabilities, handler-error policy, public extension helpers, capability descriptors, validation, built-in protocol packages, trusted PROXY protocol parsing, and private dispatch/outbound controls. | `transport.go`, `handler_error.go`, `transportkit/`, `proxyproto/`, `capability.go`, `validation.go`, `internal/dispatchgate/`, `internal/outbound/` |
+| `transport/` | Shared transport contracts, optional quiesce/readiness/outbound-stat capabilities, handler-error policy, public extension and conformance helpers, capability descriptors, validation, built-in protocol packages, trusted PROXY protocol parsing, and private dispatch/outbound controls. | `transport.go`, `outbound.go`, `handler_error.go`, `transportkit/`, `transporttest/`, `proxyproto/`, `capability.go`, `validation.go`, `internal/dispatchgate/`, `internal/outbound/` |
 | `codec/` | Binary protocol implementation and optional segmented-frame contract for KPro message traffic. | `kpro.go`, `kpro_segmented.go`, `segmented.go`, `codec.go` |
 | `middleware/` | Reusable invocation middleware. | `recover.go`, `ratelimit.go`, `limit.go`, `metrics.go` |
 | `observability/` | Optional integrations for health, Prometheus, OTel, and Zap. | `healthx/`, `prometheusx/`, `otelx/`, `zapx/` |
@@ -81,22 +81,20 @@ Endpoint.Shutdown(ctx)
      while preserving established outbound writers
   -> Router stops new admission
   -> Router drains already accepted sync and async handlers within its bound
+  -> optional transport.OutboundDrainer seals sends and waits for accepted writes
   -> terminal message transport Shutdown(ctx)
 ```
 
-Each later phase is still attempted if quiesce or Router drain returns an
-error. TCP, KCP, QUIC, UDP, and WebSocket implement the optional first phase.
-A third-party transport without it skips directly to Router drain, so its read
-loop may remain active during that compatibility fallback. KCP cannot close
-its listener during quiesce because established sessions share that UDP socket;
-it accepts and closes new raw sessions and defers listener close to terminal
-shutdown. QUIC closes its connection listener but accepts and cancels new
-streams on retained connections until terminal shutdown.
+Each later phase is still attempted if quiesce, Router drain, or outbound drain
+returns an error. TCP, KCP, QUIC, UDP, and WebSocket implement both optional
+transport phases. A third-party transport skips capabilities it does not
+implement. KCP cannot close its listener during quiesce because established
+sessions share that UDP socket; QUIC retains physical connections until
+outbound drain finishes.
 
-Even a successful Router drain only means accepted handlers completed while
-sessions were available for their final send attempts. Message transports do
-not promise reply drain: outbound sends and replies are at-most-once, and
-shutdown does not confirm queued or in-flight delivery to the peer.
+A successful built-in outbound drain means every accepted transport write
+completed and every associated `core.WriteReceipt` has a result. It does not
+confirm peer receipt, application handling, or durable delivery.
 
 Message transport dispatch follows this path:
 
@@ -114,6 +112,7 @@ client bytes/datagram/frame
   -> codec encode
   -> reconcile actual encoded bytes and publish to the outbound queue
   -> transport write
+  -> optional core.WriteReceipt completion
 ```
 
 HTTP-style dispatch follows this path:
@@ -179,7 +178,9 @@ current/maximum waiting writers. They also expose the optional,
 context-cancelable `core.SessionWaitOutboundWritable` capability, bounded to
 `SendQueueSize` waiters per session by default. `Writable` and a successful
 wait are advisory and reserve no capacity; `Send` is the authoritative
-admission operation.
+admission operation. The built-ins also expose optional write receipts and
+terminal per-session drain through `core.SessionSendWithReceipt` and
+`core.SessionDrainOutbound`.
 
 HTTP-style endpoints require explicit timeout and body-size decisions. The
 production checklist records which limits are built in and which remain
@@ -191,9 +192,13 @@ Add a transport by implementing the common contracts in `transport/`, including
 descriptors, validation, and listener readiness. Reuse bounded public helpers
 from `transport/transportkit` rather than importing `transport/internal`.
 Custom sessions with outbound queues may implement the optional
-`core.OutboundStateProvider` and `core.OutboundWritableWaiter`; custom
-message transports may implement `transport.Quiescer`. The base
-`core.Session` and `transport.MessageServer` contracts remain unchanged.
+`core.OutboundStateProvider`, `core.OutboundWritableWaiter`,
+`core.WriteReceiptSender`, and `core.SessionOutboundDrainer`; custom message
+transports may implement `transport.Quiescer` and
+`transport.OutboundDrainer`, and expose low-cardinality aggregate statistics
+through `transport.OutboundSnapshotter`. Run the public
+`transport/transporttest` contract against a protocol-native peer. The base `core.Session` and
+`transport.MessageServer` contracts remain unchanged.
 Follow [extending-kpro.md](extending-kpro.md) and
 mirror existing package tests for lifecycle, capacity, closed-session sends,
 handler-error policy, readiness ordering, and cancellation.
@@ -217,10 +222,16 @@ should avoid depending directly on concrete storage types.
   posture.
 - [benchmark/budgets.json](../benchmark/budgets.json) defines hot-path
   regression budgets.
+- [transport-resilience-testing.md](transport-resilience-testing.md) defines
+  deterministic TCP fault injection, environment-enabled thousand-connection
+  shutdown, configurable soak semantics, and evidence limits.
 - [CHANGELOG.md](../CHANGELOG.md) records repository-level changes.
 - [.github/workflows/ci.yml](../.github/workflows/ci.yml) defines checksum,
   test, race, vulnerability, coverage, benchmark, database, Windows, and Go
   compatibility gates.
+- [.github/workflows/transport-resilience.yml](../.github/workflows/transport-resilience.yml)
+  provides the manual race/fault, 1,000-connection, and two-minute soak
+  evidence run.
 - [.github/workflows/release.yml](../.github/workflows/release.yml) and
   [.goreleaser.yml](../.goreleaser.yml) define tag-triggered artifacts,
   checksums, per-archive SBOM generation, verification, and publication.

@@ -15,8 +15,9 @@ server. The current implementation includes:
   bounded `BackpressureWait` callers, and graceful draining of accepted
   sync/async work;
 - transport capacity limits, count/byte bounded outbound writes, observable
-  high/low-watermark state, bounded advisory writable waiting, and optional
-  pre-drain quiesce gates;
+  high/low-watermark state, bounded advisory writable waiting, aggregate
+  write/drain snapshots, optional pre-drain quiesce gates, and one shared live
+  conformance suite for the five built-in message transports;
 - optional health, Prometheus, OTel, and Zap packages;
 - GORM-backed transactional delivery/outbox and projector controls;
 - unified service scaffolding, versioned local overlays, contract catalogs,
@@ -55,6 +56,9 @@ Use this route for a general project assessment:
 11. Use [netty-performance-baseline.md](netty-performance-baseline.md) for the
     current source-level gap analysis, concurrency terminology, and next
     performance priorities.
+12. Read [transport-resilience-testing.md](transport-resilience-testing.md)
+    before changing TCP close, deadline, write-completion, or soak-test
+    behavior.
 
 Use this route for code-level runtime analysis:
 
@@ -63,12 +67,16 @@ Use this route for code-level runtime analysis:
 3. `core/router.go`
 4. `core/invocation.go`
 5. `core/outbound_state.go`
-6. `transport/transport.go`
-7. `transport/capability.go`
-8. `transport/internal/dispatchgate/gate.go`
-9. `transport/internal/outbound/queue.go`
-10. `transport/validation.go`
-11. The specific transport package being changed.
+6. `core/outbound_completion.go`
+7. `transport/transport.go`
+8. `transport/outbound.go`
+9. `transport/capability.go`
+10. `transport/transporttest/message.go`
+11. `transport/internal/dispatchgate/gate.go`
+12. `transport/internal/outbound/queue.go`
+13. `transport/internal/outbound/tracker.go`
+14. `transport/validation.go`
+15. The specific transport package being changed.
 
 Use this route for eventing/data analysis:
 
@@ -86,15 +94,18 @@ Use this route for eventing/data analysis:
 | Server construction and lifecycle | `server/server.go`, `server/mount.go`, `server/lifecycle.go`, `server/lifecycle_test.go` |
 | Router admission and dispatch | `core/router.go`, `core/router_config.go`, `core/backpressure.go`, `core/router_backpressure_test.go` |
 | Middleware contract | `core/invocation.go`, `middleware/*.go`, `docs/invocation-middleware-design.md` |
-| Context/session lifecycle and outbound state | `core/context.go`, `core/session.go`, `core/session_lifecycle.go`, `core/outbound_state.go` |
-| Transport contracts and quiesce lifecycle | `transport/transport.go`, `transport/capability.go`, `transport/validation.go`, `server/server.go`, `server/endpoint_registration_test.go` |
+| Context/session lifecycle, outbound state, receipts, and drain | `core/context.go`, `core/session.go`, `core/session_lifecycle.go`, `core/outbound_state.go`, `core/outbound_completion.go` |
+| Transport contracts, quiesce, outbound drain, and aggregate statistics | `transport/transport.go`, `transport/outbound.go`, `transport/capability.go`, `transport/validation.go`, `server/server.go`, `server/endpoint_registration_test.go` |
+| Shared live message-transport contract | `transport/transporttest/`, `transport/{tcp,kcp,quic,udp,websocket}/contract*_test.go` |
 | Shared transport validation | `transport/internal/configcheck/` |
 | Shared cancellation helpers | `transport/internal/serveutil/` |
 | Shared message dispatch quiesce gate | `transport/internal/dispatchgate/` |
-| Shared outbound count/byte accounting | `transport/internal/outbound/` |
+| Shared outbound count/byte accounting and aggregate tracker | `transport/internal/outbound/` |
 | HTTP path | `transport/httpx/`, `transport/http3/` |
 | Message transports | `transport/tcp/`, `transport/kcp/`, `transport/quic/`, `transport/udp/`, `transport/websocket/` |
 | Streaming/native RPC | `transport/sse/`, `transport/grpcx/` |
+| Protocol conformance | `codec/kpro_test.go`, `transport/websocket/conformance_test.go`, `transport/sse/sse_test.go`, `docs/network-test-requirements.md` |
+| Transport fault injection and soak | `transport/tcp/fault_injection_test.go`, `transport/tcp/stress_test.go`, `.github/workflows/transport-resilience.yml`, `docs/transport-resilience-testing.md` |
 | Observability | `observability/healthx/`, `observability/prometheusx/`, `observability/otelx/`, `observability/zapx/` |
 | Event delivery | `eventing/delivery/`, `eventing/projector/` |
 | Scaffolding, template overlays, API catalogs, incremental additions, and code generation | `cmd/kpro/`, `cmd/kpro/scaffold_template.go`, `cmd/kpro/command_catalog.go`, `cmd/kpro/service_project.go`, `cmd/kpro/templates/profiles/service/`, `cmd/kpro/templates/service-project/`, `internal/codegen/`, `docs/code-generation.md` |
@@ -142,6 +153,16 @@ availability:
 go test -tags dbintegration ./database/gorm ./eventing/delivery
 ```
 
+Fast deterministic TCP resilience check:
+
+```sh
+go test -race -count=1 -timeout=3m ./transport/tcp -run '^TestTCPFault'
+```
+
+The 1,000-connection and configurable soak commands are opt-in; use
+[transport-resilience-testing.md](transport-resilience-testing.md) rather than
+adding them to every ordinary test run.
+
 ## Assessment Anchors
 
 When evaluating the project, separate these categories:
@@ -174,13 +195,24 @@ gate rules rather than replacing the score with an unversioned impression.
   16 per session (further capped by in-flight defaults). One dispatch consumes
   one ticket across all wait stages; snapshot/Prometheus rejection counters
   distinguish the two bounds.
-- TCP, KCP, QUIC, UDP, and WebSocket support optional pre-drain quiesce. A
-  custom message transport without `transport.Quiescer` keeps the compatible
-  Router-drain-then-shutdown path but not the same receive-side cutover.
+- TCP, KCP, QUIC, UDP, and WebSocket support optional pre-drain quiesce and
+  outbound transport-write drain. A custom message transport uses only the
+  optional lifecycle phases it implements.
 - Outbound writability state and `SessionWaitOutboundWritable` are advisory.
   Waiting is bounded per session and reserves no capacity for the next
   `Send`; hard-full behavior still differs between connection-oriented
   built-ins and UDP.
+- `SessionSendWithReceipt` reports the accepted transport write result, and
+  `SessionDrainOutbound` seals and drains one session. Neither is a peer
+  acknowledgement or durable-delivery guarantee; direct `Session.Close`
+  remains abortive.
+- KProV1 decoder conformance is cross-checked across stream, packet, and
+  buffered paths at every split boundary. WebSocket parser conformance covers
+  RFC 6455 handshake, opcode, length-canonicalization, and fuzz invariants.
+- The ordinary TCP suite includes deterministic write/close/deadline faults and
+  a 128-connection shutdown fanout. One-thousand-connection shutdown and
+  real-socket soak tests are explicit environment-enabled exercises; their
+  observations are evidence for the tested host, not a capacity promise.
 - Database adapters still require deployment-specific tests against the chosen
   engine, topology, TLS mode, and failure policy.
 

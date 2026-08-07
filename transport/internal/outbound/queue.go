@@ -46,14 +46,24 @@ type Snapshot struct {
 	HighWatermarkBytes int64
 }
 
+// Completion is notified exactly once when an admitted item finishes its
+// transport write or is discarded. It is intentionally structural so the
+// internal queue does not depend on core.
+type Completion interface {
+	Complete(error) bool
+}
+
 // Queue accounts reservations, queued frames, and the frame currently being
-// written. Capacity is released only when Item.Done is called.
+// written. Capacity is released only when Item.Complete or Item.Done is called.
 type Queue[T any] struct {
 	mu sync.Mutex
 
 	items              chan Item[T]
 	finalize           func(T)
+	tracker            *queueTracker
+	sealed             bool
 	closed             bool
+	drainErr           error
 	pendingFrames      int
 	pendingBytes       int64
 	aboveHighWatermark bool
@@ -62,6 +72,7 @@ type Queue[T any] struct {
 	lowWatermarkBytes  int64
 	highWatermarkBytes int64
 	writableChanged    chan struct{}
+	drainedChanged     chan struct{}
 	waitingWriters     int
 	maxWaiters         int
 }
@@ -75,40 +86,53 @@ type Reservation[T any] struct {
 	active         bool
 }
 
-// Item is one admitted value. A received item must not be copied, and Done must
-// be called after the write attempt whether the attempt succeeds or fails.
+// Item is one admitted value. A received item must not be copied. Call Done
+// after a successful write or Complete with the write error after failure.
 type Item[T any] struct {
 	Value T
 
-	queue  *Queue[T]
-	bytes  int64
-	active bool
+	queue      *Queue[T]
+	bytes      int64
+	active     bool
+	completion Completion
 }
 
 // New creates a bounded queue. Invalid internal configuration is a programmer
 // error and panics during transport construction.
 func New[T any](config Config) *Queue[T] {
-	return newQueue[T](config, nil)
+	return newQueue[T](config, nil, nil)
 }
 
 // NewWithFinalizer creates a bounded queue that invokes finalize exactly once
 // when an admitted item is completed or discarded by Close. The callback runs
 // after queue accounting is released and without holding the queue lock.
 func NewWithFinalizer[T any](config Config, finalize func(T)) *Queue[T] {
-	return newQueue(config, finalize)
+	return newQueue(config, nil, finalize)
 }
 
-func newQueue[T any](config Config, finalize func(T)) *Queue[T] {
+// NewTracked creates a queue that contributes to one transport-level tracker.
+func NewTracked[T any](config Config, tracker *Tracker) *Queue[T] {
+	return newQueue[T](config, tracker, nil)
+}
+
+// NewTrackedWithFinalizer combines transport-level tracking with finalization.
+func NewTrackedWithFinalizer[T any](config Config, tracker *Tracker, finalize func(T)) *Queue[T] {
+	return newQueue(config, tracker, finalize)
+}
+
+func newQueue[T any](config Config, tracker *Tracker, finalize func(T)) *Queue[T] {
 	config = normalizeConfig(config)
-	return &Queue[T]{
+	queue := &Queue[T]{
 		items:              make(chan Item[T], config.MaxFrames),
 		finalize:           finalize,
+		tracker:            tracker.openQueue(),
 		maxFrames:          config.MaxFrames,
 		maxBytes:           config.MaxBytes,
 		maxWaiters:         config.MaxWaiters,
 		lowWatermarkBytes:  config.LowWatermarkBytes,
 		highWatermarkBytes: config.HighWatermarkBytes,
 	}
+	return queue
 }
 
 // ByteLimit derives a saturating byte budget from the configured frame count
@@ -144,7 +168,7 @@ func (q *Queue[T]) Reserve(estimatedBytes int64) (Reservation[T], error) {
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if q.closed {
+	if q.sealed {
 		return Reservation[T]{}, ErrClosed
 	}
 	if q.pendingFrames >= q.maxFrames || exceeds(q.pendingBytes, estimatedBytes, q.maxBytes) {
@@ -152,6 +176,7 @@ func (q *Queue[T]) Reserve(estimatedBytes int64) (Reservation[T], error) {
 	}
 	q.pendingFrames++
 	q.pendingBytes += estimatedBytes
+	q.tracker.addPending(1, estimatedBytes)
 	q.updateWatermarkLocked()
 	return Reservation[T]{queue: q, estimatedBytes: estimatedBytes, active: true}, nil
 }
@@ -159,6 +184,12 @@ func (q *Queue[T]) Reserve(estimatedBytes int64) (Reservation[T], error) {
 // Commit reconciles the estimate against the encoded size and publishes the
 // item. It cannot succeed after Queue.Close has linearized.
 func (r *Reservation[T]) Commit(value T, actualBytes int64) error {
+	return r.CommitWithCompletion(value, actualBytes, nil)
+}
+
+// CommitWithCompletion reconciles the estimate, publishes the item, and
+// attaches a completion notification without changing the legacy Commit path.
+func (r *Reservation[T]) CommitWithCompletion(value T, actualBytes int64, completion Completion) error {
 	if r == nil || !r.active || r.queue == nil {
 		panic("outbound: commit of inactive reservation")
 	}
@@ -170,7 +201,7 @@ func (r *Reservation[T]) Commit(value T, actualBytes int64) error {
 	q := r.queue
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if q.closed {
+	if q.sealed {
 		q.releaseLocked(r.estimatedBytes)
 		r.active = false
 		return ErrClosed
@@ -182,11 +213,19 @@ func (r *Reservation[T]) Commit(value T, actualBytes int64) error {
 		return ErrFull
 	}
 	q.pendingBytes += delta
+	q.tracker.addPending(0, delta)
 	q.updateWatermarkLocked()
 	q.notifyWritableLocked()
-	item := Item[T]{Value: value, queue: q, bytes: actualBytes, active: true}
+	item := Item[T]{
+		Value:      value,
+		queue:      q,
+		bytes:      actualBytes,
+		active:     true,
+		completion: completion,
+	}
 	select {
 	case q.items <- item:
+		q.tracker.recordAccepted(actualBytes)
 		r.active = false
 		return nil
 	default:
@@ -230,6 +269,7 @@ func (q *Queue[T]) WaitWritable(ctx context.Context) error {
 		}
 		q.mu.Lock()
 		q.waitingWriters--
+		q.tracker.addWaiting(-1)
 		q.mu.Unlock()
 	}()
 
@@ -238,7 +278,7 @@ func (q *Queue[T]) WaitWritable(ctx context.Context) error {
 			return err
 		}
 		q.mu.Lock()
-		if q.closed {
+		if q.sealed {
 			q.mu.Unlock()
 			return ErrClosed
 		}
@@ -252,6 +292,7 @@ func (q *Queue[T]) WaitWritable(ctx context.Context) error {
 				return ErrTooManyWaiters
 			}
 			q.waitingWriters++
+			q.tracker.addWaiting(1)
 			registered = true
 		}
 		if q.writableChanged == nil {
@@ -268,8 +309,22 @@ func (q *Queue[T]) WaitWritable(ctx context.Context) error {
 	}
 }
 
-// Done releases the item's frame and exact encoded-byte capacity.
+// Done records a successful transport write and releases the item's capacity.
 func (i *Item[T]) Done() {
+	i.Complete(nil)
+}
+
+// Complete records the transport write result and releases the item's frame
+// and exact encoded-byte capacity. Only the first call has an effect.
+func (i *Item[T]) Complete(err error) {
+	outcome := writeSucceeded
+	if err != nil {
+		outcome = writeFailed
+	}
+	i.complete(err, outcome)
+}
+
+func (i *Item[T]) complete(err error, outcome writeOutcome) {
 	if i == nil || i.queue == nil {
 		return
 	}
@@ -277,31 +332,136 @@ func (i *Item[T]) Done() {
 	queue.mu.Lock()
 	released := false
 	var value T
+	var completion Completion
 	if i.active {
 		value = i.Value
-		queue.releaseLocked(i.bytes)
+		completion = i.completion
+		queue.recordDrainErrorLocked(err)
+		queue.tracker.recordWrite(outcome, i.bytes)
 		i.active = false
 		released = true
 	}
+	if released && completion == nil {
+		// Preserve the single-lock legacy completion path. Only callers that
+		// explicitly request a receipt pay for ordering its notification before
+		// the final drain signal.
+		queue.releaseLocked(i.bytes)
+		queue.mu.Unlock()
+		if queue.finalize != nil {
+			queue.finalize(value)
+		}
+		return
+	}
 	queue.mu.Unlock()
-	if released && queue.finalize != nil {
-		queue.finalize(value)
+	if !released {
+		return
+	}
+	var firstPanic any
+	if completion != nil {
+		func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					firstPanic = recovered
+				}
+			}()
+			completion.Complete(err)
+		}()
+	}
+	queue.mu.Lock()
+	queue.releaseLocked(i.bytes)
+	queue.mu.Unlock()
+	if queue.finalize != nil {
+		func() {
+			defer func() {
+				if recovered := recover(); recovered != nil && firstPanic == nil {
+					firstPanic = recovered
+				}
+			}()
+			queue.finalize(value)
+		}()
+	}
+	if firstPanic != nil {
+		panic(firstPanic)
+	}
+}
+
+// Seal rejects future reservations while preserving all accepted items for the
+// writer. It is the admission boundary used by graceful outbound drain.
+func (q *Queue[T]) Seal() {
+	if q == nil {
+		return
+	}
+	q.mu.Lock()
+	if !q.sealed {
+		q.sealed = true
+		q.notifyAllWaitersLocked()
+	}
+	q.mu.Unlock()
+}
+
+// WaitDrained waits for reservations, queued items, and writer-owned items to
+// complete. It returns the first transport write error recorded by the queue.
+func (q *Queue[T]) WaitDrained(ctx context.Context) error {
+	if q == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		q.mu.Lock()
+		if q.pendingFrames == 0 {
+			err := q.drainErr
+			q.mu.Unlock()
+			return err
+		}
+		if q.drainedChanged == nil {
+			q.drainedChanged = make(chan struct{})
+		}
+		changed := q.drainedChanged
+		q.mu.Unlock()
+
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			q.mu.Lock()
+			if q.pendingFrames == 0 {
+				err := q.drainErr
+				q.mu.Unlock()
+				return err
+			}
+			q.mu.Unlock()
+			return ctx.Err()
+		}
 	}
 }
 
 // Close rejects future reservations and releases every item still queued.
 // An item already owned by a writer remains pending until that writer calls
-// Done, so snapshots continue to reflect the true retained bytes.
+// Complete, so snapshots continue to reflect the true retained bytes.
 func (q *Queue[T]) Close() {
+	q.CloseWithError(ErrClosed)
+}
+
+// CloseWithError terminally closes the queue and completes queued items with
+// err. A nil error is normalized to ErrClosed because discarded writes cannot
+// be reported as successful.
+func (q *Queue[T]) CloseWithError(err error) {
 	if q == nil {
 		return
+	}
+	if err == nil {
+		err = ErrClosed
 	}
 	q.mu.Lock()
 	if q.closed {
 		q.mu.Unlock()
 		return
 	}
+	q.sealed = true
 	q.closed = true
+	q.setAboveHighWatermarkLocked(false)
+	q.tracker.closeQueue()
 	q.notifyAllWaitersLocked()
 	drained := make([]Item[T], 0, len(q.items))
 	for {
@@ -310,15 +470,15 @@ func (q *Queue[T]) Close() {
 			drained = append(drained, item)
 		default:
 			q.mu.Unlock()
-			doneAll(drained)
+			completeAll(drained, err, writeDropped)
 			return
 		}
 	}
 }
 
-// doneAll completes every item even if a user-supplied internal finalizer
+// completeAll completes every item even if a user-supplied internal callback
 // panics, then propagates the first panic after queue accounting is consistent.
-func doneAll[T any](items []Item[T]) {
+func completeAll[T any](items []Item[T], err error, outcome writeOutcome) {
 	var firstPanic any
 	for index := range items {
 		func(item *Item[T]) {
@@ -327,7 +487,7 @@ func doneAll[T any](items []Item[T]) {
 					firstPanic = recovered
 				}
 			}()
-			item.Done()
+			item.complete(err, outcome)
 		}(&items[index])
 	}
 	if firstPanic != nil {
@@ -340,7 +500,7 @@ func (q *Queue[T]) Snapshot() Snapshot {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return Snapshot{
-		Closed:             q.closed,
+		Closed:             q.sealed,
 		Writable:           q.writableLocked(),
 		AboveHighWatermark: q.aboveHighWatermark,
 		PendingFrames:      q.pendingFrames,
@@ -360,15 +520,26 @@ func (q *Queue[T]) releaseLocked(bytes int64) {
 	}
 	q.pendingFrames--
 	q.pendingBytes -= bytes
+	q.tracker.addPending(-1, -bytes)
 	q.updateWatermarkLocked()
 	q.notifyWritableLocked()
+	if q.pendingFrames == 0 && q.drainedChanged != nil {
+		close(q.drainedChanged)
+		q.drainedChanged = nil
+	}
 }
 
 func (q *Queue[T]) writableLocked() bool {
-	return !q.closed &&
+	return !q.sealed &&
 		!q.aboveHighWatermark &&
 		q.pendingFrames < q.maxFrames &&
 		q.pendingBytes < q.maxBytes
+}
+
+func (q *Queue[T]) recordDrainErrorLocked(err error) {
+	if err != nil && q.drainErr == nil {
+		q.drainErr = err
+	}
 }
 
 func (q *Queue[T]) notifyWritableLocked() {
@@ -388,14 +559,30 @@ func (q *Queue[T]) notifyAllWaitersLocked() {
 }
 
 func (q *Queue[T]) updateWatermarkLocked() {
+	if q.closed {
+		q.setAboveHighWatermarkLocked(false)
+		return
+	}
 	if q.aboveHighWatermark {
 		if q.pendingBytes <= q.lowWatermarkBytes {
-			q.aboveHighWatermark = false
+			q.setAboveHighWatermarkLocked(false)
 		}
 		return
 	}
 	if q.pendingBytes >= q.highWatermarkBytes {
-		q.aboveHighWatermark = true
+		q.setAboveHighWatermarkLocked(true)
+	}
+}
+
+func (q *Queue[T]) setAboveHighWatermarkLocked(above bool) {
+	if q.aboveHighWatermark == above {
+		return
+	}
+	q.aboveHighWatermark = above
+	if above {
+		q.tracker.addSaturated(1)
+	} else {
+		q.tracker.addSaturated(-1)
 	}
 }
 

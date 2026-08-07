@@ -273,10 +273,11 @@ the mounted runners complete their bounded stop sequence. If an adapter exposes
 only `Close()`, use a small application-owned wrapper that adds a context-aware
 shutdown contract.
 
-For message transports, shutdown is a bounded stop, not a reply-delivery
-barrier. Sessions and writer paths are closed, and outbound replies are
-at-most-once; shutdown does not confirm that queued or in-flight replies reached
-the peer.
+For built-in message transports, shutdown drains accepted handlers and
+transport writes before closing sessions. This remains a transport-write
+boundary, not a reply-delivery barrier: it does not confirm peer processing or
+durable delivery, so outbound replies remain at-most-once without an
+application acknowledgement protocol.
 
 Expose liveness and readiness separately. `healthx` executes named checks
 concurrently under a bounded request context and returns HTTP 503 when a check

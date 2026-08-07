@@ -46,6 +46,34 @@ func TestEndpointServeWritesHandlerErrorEvent(t *testing.T) {
 	}
 }
 
+func TestContextSendNormalizesAllEventStreamLineEndings(t *testing.T) {
+	endpoint := New(Config{}).Handle(func(ctx *Context) error {
+		return ctx.Send("update", []byte("cr\rcrlf\r\nlf\nlast"))
+	})
+
+	resp := executeSSERequest(endpoint)
+	want := "event: update\ndata: cr\ndata: crlf\ndata: lf\ndata: last\n\n"
+	if !strings.Contains(resp.Body.String(), want) {
+		t.Fatalf("body = %q, want to contain %q", resp.Body.String(), want)
+	}
+}
+
+func TestContextSendRejectsEventNameLineBreakInjection(t *testing.T) {
+	var sendErr error
+	endpoint := New(Config{}).Handle(func(ctx *Context) error {
+		sendErr = ctx.Send("update\ndata: injected", []byte("safe"))
+		return nil
+	})
+
+	resp := executeSSERequest(endpoint)
+	if !errors.Is(sendErr, ErrInvalidEventName) {
+		t.Fatalf("Send() error = %v, want %v", sendErr, ErrInvalidEventName)
+	}
+	if strings.Contains(resp.Body.String(), "injected") {
+		t.Fatalf("invalid event name reached wire: %q", resp.Body.String())
+	}
+}
+
 func TestNormalizeConfigDefaults(t *testing.T) {
 	config := normalizeConfig(Config{})
 

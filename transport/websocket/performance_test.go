@@ -21,7 +21,7 @@ func BenchmarkWebSocketSessionBatchWrite16x1KiB(b *testing.B) {
 	session := &session{
 		server:    server,
 		raw:       batchDiscardConn{},
-		sendQueue: newSessionOutboundQueue(server.config),
+		sendQueue: newSessionOutboundQueue(server.config, &server.outboundStats),
 		done:      make(chan struct{}),
 	}
 	frame := wsFrame{opcode: opBinary, payload: make([]byte, payloadSize)}

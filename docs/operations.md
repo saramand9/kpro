@@ -95,42 +95,42 @@ it force-closes tracked native connections and returns the joined error. It has
 no hijacked-connection exception because it does not expose `net/http` hijack.
 
 For a message transport mounted as `server.Endpoint`, endpoint shutdown has
-three ordered phases:
+four ordered phases:
 
 1. call `Quiesce(ctx)` when the transport implements the optional
    `transport.Quiescer`;
 2. call `Router.Shutdown(ctx)` to close Router admission and drain already
    accepted sync and async handlers;
-3. call the transport's terminal `Shutdown(ctx)`.
+3. call `DrainOutbound(ctx)` when the transport implements the optional
+   `transport.OutboundDrainer`;
+4. call the transport's terminal `Shutdown(ctx)`.
 
-TCP, KCP, QUIC, UDP, and WebSocket implement `transport.Quiescer`. Their
-quiesce phase stops new handler dispatch and message reads while preserving
-established sessions and their outbound writer paths, so accepted handlers can
-attempt a final reply during Router drain. Quiesce, Router-drain, and transport
-errors do not skip later phases and are joined for the caller. A third-party
-transport without `Quiescer` uses the compatibility fallback of Router drain
-followed by transport shutdown; that fallback cannot prevent the transport
-from continuing to read while the Router is draining, so implement the
-optional phase when a hard dispatch cutover is required.
+TCP, KCP, QUIC, UDP, and WebSocket implement both optional phases. Quiesce
+stops new handler dispatch and message reads while preserving established
+sessions and writer paths. Outbound drain then seals every current session
+before waiting for reservations, queued writes, and writer-owned writes.
+Errors do not skip later phases and are joined for the caller. A third-party
+transport uses the compatible subset of phases it implements.
 
 KCP has one protocol-specific boundary: established sessions share the
 listener's UDP socket. Its quiesce phase therefore keeps that listener open,
 continuously accepts and closes newly arriving raw KCP sessions, and blocks
 their registration/dispatch. The terminal shutdown phase closes the shared
-listener after accepted application work drains.
+listener after accepted application work and outbound writes drain.
 
 QUIC closes its top-level connection listener during quiesce but retains
 established connections and streams for outbound writes. For those connections
 it continues accepting and immediately canceling newly opened streams until
-terminal shutdown, without publishing them as sessions or dispatching a
+outbound drain completes, without publishing them as sessions or dispatching a
 handler.
 
 An explicit `Endpoint.Shutdown(ctx)` passes its context to all applicable
 phases. Cancellation of the context supplied to
 `Endpoint.ListenAndServe` is intercepted by the endpoint so it does not reach
-the transport before Router drain; that path uses the Router's configured
-`ShutdownTimeout` when applying its internal drain bound. Pass an explicit
-deadline to `Server.Shutdown` when the total process stop must be bounded.
+the transport before Router and outbound drain; that path uses the Router's
+configured `ShutdownTimeout` when applying its internal drain bound. Pass an
+explicit deadline to `Server.Shutdown` when the total process stop must be
+bounded.
 
 `Router.Shutdown` executes accepted per-session sync work as well as accepted
 async work, including sync tasks whose session closes during the graceful
@@ -141,16 +141,13 @@ accepted async queue work may still execute. Do not use `Close` as proof that
 no accepted handler started; use `Shutdown` when accepted work must be
 drained.
 
-That ordering is a bounded handler-drain mechanism, not a reply-delivery
-barrier. A handler completing, or even a successful `Send` placing its reply in
-the outbound queue, does not confirm that the queued or in-flight bytes reached
-the peer. The built-in terminal transport `Shutdown` closes sessions and
-outbound queues; it does not wait for queued or writer-owned items to flush to
-the network. KPro does not currently expose a separate outbound-drain phase.
-Message sends remain at-most-once. Applications that require evidence of
-network/application receipt should add message identifiers, idempotency,
-acknowledgements, and bounded retry, or own an explicit application-level
-outbound drain before calling terminal shutdown.
+That ordering is a bounded transport-write mechanism, not a reply-delivery
+barrier. A successful `Send` proves only queue admission. Built-in outbound
+drain and a successful `core.WriteReceipt` prove that the complete transport
+write call returned successfully; they do not prove peer receipt, application
+handling, or durable delivery. Message sends remain at-most-once. Applications
+that require delivery evidence should add message identifiers, idempotency,
+acknowledgements, and bounded retry.
 
 HTTP/3 has a different protocol-specific path: endpoint shutdown stops new
 work, sends GOAWAY, and waits for active requests/connections to finish until
@@ -518,6 +515,14 @@ Run at least five phases:
 
 Record throughput, latency percentiles, error/rejection category, CPU, heap, allocation rate, goroutines, connections/sessions, queue depth, in-flight work, database pool waits, and oldest event age. Repeat after changing any limit; tune one bottleneck at a time.
 
+KPro provides a deterministic TCP fault matrix plus environment-enabled
+1,000-connection shutdown and real-socket soak tests. Their exact commands,
+asserted cleanup semantics, memory/goroutine guards, and current smoke
+observation are recorded in
+[Transport Fault Injection And Soak Testing](transport-resilience-testing.md).
+Use that harness as a reproducible starting point, then substitute the target
+kernel, TLS/proxy path, handler latency, connection lifetime, and payload mix.
+
 ## Performance regression budgets
 
 Repository CI runs selected Router, HTTP handler, outbound-queue, in-memory
@@ -589,11 +594,22 @@ pending/max writes and bytes, current/max waiting writers, and
 high/low-watermark state. It is a point-in-time advisory signal; the following
 `Send` result remains authoritative.
 
+At transport scope, TCP, KCP, QUIC, UDP, and WebSocket implement
+`transport.OutboundSnapshotter`. Its snapshot aggregates current sessions,
+pending writes/bytes, waiting writers, saturated sessions, accepted and
+terminal write/byte counters, and drain outcomes/durations. Counters live for
+the server instance and remain after sessions close. Results are bounded to
+success, error, and close-time drop; drain results are bounded to success,
+deadline, cancellation, and other error. There are no peer, connection,
+message, error-text, or tenant dimensions.
+
 The optional observability packages add concrete integration points:
 
 - `prometheusx` registers invocation collectors with transport, stable
   operation, and result labels, plus bounded lifecycle/Router and explicit
-  backlog/projector collectors. Router waiting capacity appears in
+  backlog/projector collectors. `NewOutboundCollector` exports aggregate
+  transport queue/write/drain state with only stable `name` and `transport`
+  labels plus bounded `result` values. Router waiting capacity appears in
   `kpro_router_waiting_dispatches` with `kind="current"`,
   `kind="global_limit"`, or `kind="per_session_limit"` under the default
   namespace; `kpro_router_dispatch_total` adds the bounded outcomes
@@ -603,6 +619,24 @@ The optional observability packages add concrete integration points:
 - `otelx` creates server spans and extracts propagation using a supplied/global
   provider and propagator;
 - `healthx` evaluates named checks concurrently within a probe deadline.
+
+Register one outbound collector per message endpoint with a stable identity:
+
+```go
+collector, err := prometheusx.NewOutboundCollector(tcpServer,
+	prometheusx.RuntimeCollectorConfig{Name: "public", Component: "tcp"})
+if err != nil {
+	return err
+}
+registry.MustRegister(collector)
+```
+
+Useful alerts combine sustained `kpro_outbound_saturated_sessions` or growing
+`kpro_outbound_pending_bytes` with changes in
+`kpro_outbound_write_results_total{result="error"}` and
+`kpro_outbound_drains_total{result=~"deadline|error"}`. A single scrape is a
+snapshot, not evidence of sustained pressure, and a success result is not peer
+acknowledgement.
 
 An OTel SDK, sampler, exporter, collector/backend, provider flush/shutdown,
 Prometheus scraping, dashboards, alerts, log retention, and tracing storage are

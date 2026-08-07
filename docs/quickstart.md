@@ -207,7 +207,8 @@ Press `Ctrl+C`. Use the signal context as the lifetime passed to `Server.Start`.
 Cancellation starts the configured bounded stop. In this HTTP-only example,
 `net/http` attempts to drain accepted requests within the shutdown deadline;
 managed resources close only if runner stop succeeds. Message transports have
-at-most-once shutdown semantics and do not guarantee reply drain.
+at-most-once delivery semantics; built-ins drain accepted transport writes but
+cannot guarantee peer processing or durable delivery.
 
 The relevant lifecycle is:
 

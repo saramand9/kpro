@@ -9,6 +9,8 @@ import "context"
 // PendingWrites and PendingBytes include reservations being encoded, queued
 // writes, and a write currently owned by the transport writer.
 type OutboundState struct {
+	// Closed reports that outbound admission is sealed. A graceful drain can
+	// set Closed before the underlying connection itself is closed.
 	Closed             bool
 	Writable           bool
 	AboveHighWatermark bool
