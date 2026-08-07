@@ -183,3 +183,31 @@ BenchmarkSSE_Events
 Concurrent HTTP benchmarks run the same `POST /echo` workload with 16 and 64 workers.
 Fiber and gnet comparison benchmarks live in `benchmark/compare` so their dependencies do not enter the main kpro module.
 That module includes KPro-vs-Fiber HTTP echo and KPro-vs-gnet TCP echo comparisons.
+
+## External loopback diagnostics
+
+The commands below are correctness-validating local load generators. They are
+useful for repeatable implementation diagnostics but do not replace a separate
+load-generator host or a production workload test:
+
+```sh
+go run ./benchmark/cmd/websocket-echo-server -addr 127.0.0.1:18401
+go run ./benchmark/cmd/websocket-loadgen -addr 127.0.0.1:18401 -connections 64 -payload 1024 -inflight 16 -coalesce 16 -duration 8s
+
+go run ./benchmark/cmd/sse-push-server -addr 127.0.0.1:18501 -yield-every 0
+go run ./benchmark/cmd/sse-loadgen -addr 127.0.0.1:18501 -streams 64 -payload 1024 -duration 8s
+```
+
+The SSE producer accepts `-yield-every 32` for the cooperative fairness shape
+used by the 2026-08-07 comparison. Zero retains the maximum-throughput loop.
+SSE has no request inflight or request/response latency metric; the load
+generator reports aggregate events, payload throughput, inter-event gaps, and
+the slowest stream's event count relative to the per-stream mean.
+
+The matching Java fixtures are
+`benchmark/fixtures/netty/NettyWebSocketKProEchoServer.java` and
+`benchmark/fixtures/netty/NettySSEServer.java`. They compile against a reviewed
+Netty source build and intentionally keep Netty dependencies out of the Go
+module. Saved raw and summarized evidence lives under `benchmark/results/`;
+the interpretation and limitations are recorded in
+`docs/netty-performance-baseline.md`.
