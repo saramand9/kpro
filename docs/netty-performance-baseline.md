@@ -282,6 +282,97 @@ It lacks the independent generator host, long steady state, RSS/PSS evidence,
 confidence intervals, and 24-shape/72-offered-load coverage required by the
 formal acceptance contract.
 
+## 2026-08-07 WebSocket and SSE diagnostics
+
+The follow-up used validated external clients for RFC 6455 binary messages and
+HTTP/1.1 SSE streams. Server and client processes were pinned to separate
+eight-logical-CPU groups. Each measured process used a two-second warm-up and
+an eight-second fixed window. WebSocket and the initial SSE maximum-throughput
+shape ran in KPro-Netty-Netty-KPro order with fresh servers. Each saved cell
+contains two process samples; repeat throughput spread was at most 1.95% for
+WebSocket and 1.19% for SSE.
+
+Every completed WebSocket message validated its RFC 6455 framing and complete
+KProV1 sequence/payload. Every SSE event validated its event syntax, continuous
+per-stream hexadecimal sequence, and complete payload. The saved samples have
+zero validation errors and zero non-deadline client I/O errors. Deadline
+timeouts are one expected stream/window termination per client.
+
+The durable WebSocket evidence is the
+[raw process data](../benchmark/results/2026-08-07-kpro-netty-websocket-raw.csv)
+and [case summary](../benchmark/results/2026-08-07-kpro-netty-websocket-summary.csv).
+The values below are two-sample medians; for two observations this equals their
+arithmetic mean.
+
+| Case | KPro msg/s | Netty msg/s | Netty lead | p99 KPro/Netty |
+| --- | ---: | ---: | ---: | ---: |
+| W01: 1 conn, 64 B, inflight 1 | 22,312 | 24,275 | 8.8% | 0.532 / 0.549 ms |
+| W02: 64 conn, 64 B, inflight 1 | 285,283 | 290,364 | 1.8% | 1.504 / 1.503 ms |
+| W03: 64 conn, 1 KiB, inflight 1 | 168,984 | 190,506 | 12.7% | 2.201 / 1.503 ms |
+| W04: 64 conn, 16 KiB, inflight 1 | 22,846 | 24,506 | 7.3% | 27.637 / 3.902 ms |
+| W05: 64 conn, 64 B, inflight/coalesce 16 | 1,998,868 | 2,211,052 | 10.6% | 3.136 / 1.505 ms |
+| W06: 256 conn, 1 KiB, inflight/coalesce 16 | 340,876 | 346,997 | 1.8% | 124.068 / 14.764 ms |
+
+The Netty fixture decodes a binary WebSocket frame, validates the KProV1
+header, copies the payload into a pooled response buffer, and flushes on
+`channelReadComplete`. KPro preserves its normal packet-copy, session queue,
+backpressure accounting, and writer-goroutine path. W04 and W06 show a stable
+tail-latency issue rather than a uniform slowdown: KPro's median was lower in
+those cells, while p99 was materially higher.
+
+SSE is one-way server push, so there is no request inflight or request latency.
+The diagnostic instead records aggregate events/s, CPU seconds per million
+events, inter-event gaps, and `min stream events / mean stream events`. Netty
+has no dedicated SSE module; the fixture uses Netty's official HTTP codec with
+a chunked `text/event-stream` handler and flushes every event, matching KPro
+`Context.Send` semantics.
+
+The initial maximum-throughput shape allowed the idiomatic KPro handler to loop
+without voluntarily yielding. Netty retained a 32-event EventLoop quantum so
+multiple channels could progress. Aggregate throughput was within 2.8% in all
+six cells, but KPro's slowest stream received only 29-66% of mean stream
+progress in multi-stream cells. Netty measured 93-100%.
+
+| Case | KPro events/s | Netty events/s | KPro vs Netty | min/mean KPro/Netty |
+| --- | ---: | ---: | ---: | ---: |
+| S01: 1 stream, 64 B | 94,398 | 92,956 | +1.6% | 100.0 / 100.0% |
+| S02: 64 streams, 64 B | 415,180 | 413,816 | +0.3% | 58.1 / 99.6% |
+| S03: 64 streams, 1 KiB | 218,489 | 219,591 | -0.5% | 66.2 / 99.7% |
+| S04: 64 streams, 16 KiB | 24,358 | 25,037 | -2.7% | 62.0 / 99.4% |
+| S05: 256 streams, 64 B | 421,910 | 411,087 | +2.6% | 53.9 / 93.3% |
+| S06: 256 streams, 1 KiB | 224,558 | 220,363 | +1.9% | 29.0 / 99.4% |
+
+The cooperative comparison then made both producers yield after every 32
+events. KPro used `runtime.Gosched`; Netty resubmitted a task to its local
+EventLoop. Only KPro changed, so its two samples were rerun on the same pinned
+CPU groups and replace the earlier KPro rows; the unchanged Netty rows remain
+from the interleaved run. Throughput spread remained below 1.2%, but this is a
+diagnostic comparison rather than paired statistical evidence.
+
+| Case | KPro events/s | Netty events/s | Netty lead | p99.9 gap KPro/Netty | min/mean KPro/Netty |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| S01: 1 stream, 64 B | 77,868 | 92,956 | 19.4% | 0.63 / 0.60 ms | 100.0 / 100.0% |
+| S02: 64 streams, 64 B | 233,708 | 413,816 | 77.1% | 28.72 / 4.96 ms | 91.1 / 99.6% |
+| S03: 64 streams, 1 KiB | 155,773 | 219,591 | 41.0% | 78.92 / 9.02 ms | 79.1 / 99.7% |
+| S04: 64 streams, 16 KiB | 22,531 | 25,037 | 11.1% | 396.46 / 75.41 ms | 62.8 / 99.4% |
+| S05: 256 streams, 64 B | 233,910 | 411,087 | 75.8% | 128.13 / 20.59 ms | 78.6 / 93.3% |
+| S06: 256 streams, 1 KiB | 158,604 | 220,363 | 38.9% | 334.01 / 37.89 ms | 56.7 / 99.4% |
+
+The SSE evidence is split into maximum-throughput
+[raw data](../benchmark/results/2026-08-07-kpro-netty-sse-max-throughput-raw.csv)
+and [summary](../benchmark/results/2026-08-07-kpro-netty-sse-max-throughput-summary.csv),
+plus cooperative-quantum
+[raw data](../benchmark/results/2026-08-07-kpro-netty-sse-fair-quantum-raw.csv)
+and [summary](../benchmark/results/2026-08-07-kpro-netty-sse-fair-quantum-summary.csv).
+The result shows a scheduling trade-off, not that `runtime.Gosched` should be
+added to the transport hot path. A production fairness design needs a measured
+sharded broadcaster or another bounded scheduler rather than a per-stream
+unconditional yield.
+
+Both protocol comparisons remain short Windows loopback diagnostics. They do
+not provide confidence intervals, independent-host network evidence, RSS/PSS,
+slow-reader coverage, reconnect-storm behavior, or production certification.
+
 ## Largest current gap: scheduling and write-submission efficiency
 
 The normal KProV1 TCP receive path currently performs:
