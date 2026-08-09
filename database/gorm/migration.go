@@ -210,20 +210,25 @@ func withMigrationLock(ctx context.Context, db *gorm.DB, fn func(*gorm.DB) error
 		// normally return their connection to the pool after every statement, so
 		// the entire migration must be pinned to one connection.
 		return db.WithContext(contextOrBackground(ctx)).Connection(func(locked *gorm.DB) (err error) {
+			connPool := locked.Statement.ConnPool
+			pinned := locked.Session(&gorm.Session{NewDB: true})
+			pinned.Statement.ConnPool = connPool
 			lockCtx, lockCancel := context.WithTimeout(
 				contextOrBackground(ctx),
 				time.Duration(migrationLockTimeout)*time.Second,
 			)
 			defer lockCancel()
-			if err = acquireMigrationLock(lockCtx, locked); err != nil {
+			if err = acquireMigrationLock(lockCtx, pinned); err != nil {
 				return err
 			}
 			defer func() {
 				releaseCtx, cancel := context.WithTimeout(context.Background(), lockReleaseTimeout)
 				defer cancel()
-				err = errors.Join(err, releaseMigrationLock(locked.WithContext(releaseCtx)))
+				releaseDB := locked.Session(&gorm.Session{NewDB: true}).WithContext(releaseCtx)
+				releaseDB.Statement.ConnPool = connPool
+				err = errors.Join(err, releaseMigrationLock(releaseDB))
 			}()
-			return fn(locked)
+			return fn(pinned)
 		})
 	default:
 		return fn(db.WithContext(contextOrBackground(ctx)))
@@ -333,7 +338,7 @@ func applyResolvedMigration(db *gorm.DB, migration resolvedMigration) error {
 
 func findMigration(db *gorm.DB, version int64) (*schemaMigrationRow, error) {
 	var row schemaMigrationRow
-	err := db.Session(&gorm.Session{NewDB: true}).First(&row, "version = ?", version).Error
+	err := db.First(&row, "version = ?", version).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
