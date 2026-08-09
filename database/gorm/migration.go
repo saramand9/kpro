@@ -333,7 +333,7 @@ func applyResolvedMigration(db *gorm.DB, migration resolvedMigration) error {
 
 func findMigration(db *gorm.DB, version int64) (*schemaMigrationRow, error) {
 	var row schemaMigrationRow
-	err := db.First(&row, "version = ?", version).Error
+	err := db.Session(&gorm.Session{NewDB: true}).First(&row, "version = ?", version).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
