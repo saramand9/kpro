@@ -817,7 +817,14 @@ func (s *GORMStore) leaseNow(ctx context.Context, db *gorm.DB) (time.Time, error
 	if err := db.WithContext(contextOrBackground(ctx)).Raw(query).Scan(&micros).Error; err != nil {
 		return time.Time{}, fmt.Errorf("read %s delivery lease clock: %w", db.Dialector.Name(), err)
 	}
-	return time.UnixMicro(micros).UTC(), nil
+	now := time.UnixMicro(micros).UTC()
+	if db.Dialector.Name() == "mysql" {
+		// Migration columns use DATETIME(3). Keep comparisons at the same
+		// precision so MySQL rounding cannot make a newly pending row appear
+		// briefly unavailable.
+		now = now.Truncate(time.Millisecond)
+	}
+	return now, nil
 }
 
 func settleResult(result *gorm.DB, consumer, eventID string, attempt int) error {

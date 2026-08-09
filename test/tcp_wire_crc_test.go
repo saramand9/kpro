@@ -686,6 +686,7 @@ func runTCPWireCRCInterleavedScenario(
 		writeStrictWireMessage(t, conn, logs.clientSent, msg)
 		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		readStrictWireMessage(t, conn, logs.clientReceived)
+		time.Sleep(time.Millisecond)
 	}
 	return logs
 }

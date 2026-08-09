@@ -82,6 +82,7 @@ type preparedMutation struct {
 	backupHash  string
 	backupMode  fs.FileMode
 	backupInfo  fs.FileInfo
+	backupFile  *os.File
 	backupKnown bool
 	installed   bool
 	modeApplied bool
@@ -145,6 +146,7 @@ func commitFileTransaction(
 	if err != nil {
 		return FileTransactionResult{}, err
 	}
+	defer closeTransactionBackupFiles(prepared)
 	if !result.Changed() {
 		return result, nil
 	}
@@ -336,6 +338,7 @@ func commitFileTransaction(
 			)
 			continue
 		}
+		closeTransactionBackupFile(mutation)
 		removed, err := removeTransactionFile(mutation.backup, "", 0, ops)
 		if removed {
 			mutation.backup = ""
@@ -754,9 +757,25 @@ func verifyBackup(mutation *preparedMutation) error {
 		return fmt.Errorf("verify backup %q for %q: %w", mutation.backup, mutation.Path, err)
 	}
 	if exists {
+		mutation.backupInfo = info
+		if runtime.GOOS != "windows" {
+			backupFile, openErr := os.Open(mutation.backup)
+			if openErr != nil {
+				return fmt.Errorf("open backup %q for %q: %w", mutation.backup, mutation.Path, openErr)
+			}
+			heldInfo, statErr := backupFile.Stat()
+			if statErr != nil || !os.SameFile(info, heldInfo) {
+				_ = backupFile.Close()
+				if statErr != nil {
+					return fmt.Errorf("stat backup %q for %q: %w", mutation.backup, mutation.Path, statErr)
+				}
+				return fmt.Errorf("%w: backup %q for %q changed while it was opened", ErrTransactionConflict, mutation.backup, mutation.Path)
+			}
+			mutation.backupFile = backupFile
+			mutation.backupInfo = heldInfo
+		}
 		mutation.backupHash = hashBytes(content)
 		mutation.backupMode = mode.Perm()
-		mutation.backupInfo = info
 		mutation.backupKnown = true
 	}
 	if !exists || mutation.backupHash != mutation.Precondition.SHA256 ||
@@ -785,6 +804,15 @@ func verifyBackupContent(mutation *preparedMutation) error {
 		)
 	}
 	actualHash := hashBytes(content)
+	if mutation.backupFile != nil {
+		heldInfo, statErr := mutation.backupFile.Stat()
+		if statErr != nil || !os.SameFile(heldInfo, info) {
+			if statErr != nil {
+				return fmt.Errorf("stat held backup %q for %q: %w", mutation.backup, mutation.Path, statErr)
+			}
+			return fmt.Errorf("%w: backup %q for %q was replaced", ErrTransactionConflict, mutation.backup, mutation.Path)
+		}
+	}
 	if !mutation.backupKnown {
 		mutation.backupHash = actualHash
 		mutation.backupMode = mode.Perm()
@@ -802,6 +830,19 @@ func verifyBackupContent(mutation *preparedMutation) error {
 		)
 	}
 	return nil
+}
+
+func closeTransactionBackupFile(mutation *preparedMutation) {
+	if mutation.backupFile != nil {
+		_ = mutation.backupFile.Close()
+		mutation.backupFile = nil
+	}
+}
+
+func closeTransactionBackupFiles(mutations []*preparedMutation) {
+	for _, mutation := range mutations {
+		closeTransactionBackupFile(mutation)
+	}
 }
 
 func verifyRestoredTarget(mutation *preparedMutation) error {
@@ -1090,6 +1131,7 @@ func rollbackFileTransaction(
 				)
 				continue
 			}
+			closeTransactionBackupFile(mutation)
 			removed, err := removeTransactionFile(
 				mutation.backup,
 				mutation.target,
