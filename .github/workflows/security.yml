@@ -1,0 +1,97 @@
+name: Security
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  credentials:
+    name: Credential history
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out complete history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan Git history with Gitleaks
+        run: >-
+          docker run --rm
+          --volume "${GITHUB_WORKSPACE}:/repo:ro"
+          zricethezav/gitleaks@sha256:ebfeb6fd4f2c37fa371d3731ebfa662fdf80f93cd37d3b4771bb82263edff8d0
+          git /repo
+          --config /repo/.gitleaks.toml
+          --log-opts=--all
+          --redact=100
+          --no-banner
+
+  go-security:
+    name: Go security
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: 1.25.12
+          cache: true
+
+      - name: Verify root module checksums
+        run: go mod verify
+
+      - name: Scan root module with gosec
+        run: go run github.com/securego/gosec/v2/cmd/gosec@v2.22.5 -exclude-generated ./...
+
+      - name: Check root module for reachable vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
+      - name: Verify benchmark comparison module checksums
+        working-directory: benchmark/compare
+        run: go mod verify
+
+      - name: Scan benchmark comparison module with gosec
+        working-directory: benchmark/compare
+        run: go run github.com/securego/gosec/v2/cmd/gosec@v2.22.5 -exclude-generated ./...
+
+      - name: Check benchmark comparison module for reachable vulnerabilities
+        working-directory: benchmark/compare
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
+  codeql:
+    name: CodeQL
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4.36.0
+        with:
+          languages: go
+          build-mode: none
+
+      - name: Analyze with CodeQL
+        uses: github/codeql-action/analyze@v4.36.0

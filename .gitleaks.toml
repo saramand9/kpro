@@ -1,0 +1,14 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "RFC 6455 WebSocket handshake test nonces"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "line"
+paths = [
+  '''(?:^|/)transport/websocket/(?:conformance_test|contract_suite_test|proxy_protocol_test|server_test)\.go$''',
+]
+regexes = [
+  '''(?:Sec-WebSocket-Key|const key\s*=).*?(?:dGhlIHNhbXBsZSBub25jZQ==|MDEyMzQ1Njc4OWFiY2RlZg==)''',
+]
