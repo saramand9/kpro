@@ -230,7 +230,20 @@ func RunMessageServerContract(t *testing.T, contract MessageContract) {
 
 		got := sendServerMessage(t, running, observation.session, contract.Reply, contract)
 		contract.AssertMessage(t, got, contract.Reply)
-		after, _ := transport.ComponentOutboundSnapshot(running.harness.Server)
+		var after transport.OutboundSnapshot
+		deadline := time.Now().Add(contract.Timeout)
+		for {
+			after, _ = transport.ComponentOutboundSnapshot(running.harness.Server)
+			if after.AcceptedWrites >= before.AcceptedWrites+1 &&
+				after.SucceededWrites >= before.SucceededWrites+1 &&
+				after.PendingWrites == 0 && after.PendingBytes == 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
 		assertOutboundSnapshot(t, after)
 		if after.AcceptedWrites != before.AcceptedWrites+1 {
 			t.Fatalf("AcceptedWrites delta = %d, want 1", after.AcceptedWrites-before.AcceptedWrites)
