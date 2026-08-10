@@ -367,7 +367,24 @@ func TestTCPWireCRCTraceStrict1000(t *testing.T) {
 			AsyncQueueSize:        16,
 			MaxInflightPerSession: 16,
 		}, func(router *core.Router, _ *strictWireControl) {
-			router.HandleSync(msgStrictSmallSendQueue, echoStrictMessage)
+			router.HandleSync(msgStrictSmallSendQueue, func(ctx core.Context) error {
+				msg := ctx.Message()
+				receipt, supported, err := core.SessionSendWithReceipt(ctx.Session(), core.Message{
+					Flags: msg.Flags,
+					ID:    msg.ID,
+					Seq:   msg.Seq,
+					Data:  msg.Data,
+				})
+				if err != nil {
+					return err
+				}
+				if !supported || receipt == nil {
+					return fmt.Errorf("TCP session does not support write receipts")
+				}
+				waitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				return receipt.Wait(waitCtx)
+			})
 		}, messages, 1)
 
 		assertWireFramesEqual(t, logs.clientSent, logs.serverReceived)
