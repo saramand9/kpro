@@ -43,6 +43,8 @@ func TestTCPMultiClientRandomOrderStrict100K(t *testing.T) {
 func runTCPMultiClientRandomOrderStrict(t *testing.T, clients, messagesPerClient int, timeout time.Duration) {
 	t.Helper()
 	logs := newTCPOrderStressLogs(clients, messagesPerClient)
+	var serverHandlers sync.WaitGroup
+	serverHandlers.Add(clients * messagesPerClient)
 	addr := "127.0.0.1:" + freeTCPPort(t)
 	app := server.New(server.Config{
 		Name: "tcp-order-stress",
@@ -62,6 +64,7 @@ func runTCPMultiClientRandomOrderStrict(t *testing.T, clients, messagesPerClient
 		ReadTimeout:   2 * time.Minute,
 		WriteTimeout:  2 * time.Minute,
 	})).HandleSync(msgTCPOrderStress, func(ctx core.Context) error {
+		defer serverHandlers.Done()
 		clientID, token, err := decodeTCPOrderPayload(ctx.Message().Data)
 		if err != nil {
 			return err
@@ -128,6 +131,17 @@ func runTCPMultiClientRandomOrderStrict(t *testing.T, clients, messagesPerClient
 		if err != nil {
 			t.Fatal(err)
 		}
+	}
+
+	serverDone := make(chan struct{})
+	go func() {
+		serverHandlers.Wait()
+		close(serverDone)
+	}()
+	select {
+	case <-serverDone:
+	case <-time.After(time.Until(deadline)):
+		t.Fatalf("TCP order stress server handlers did not finish after %s", time.Since(started).Truncate(time.Second))
 	}
 
 	for clientID := 0; clientID < clients; clientID++ {
