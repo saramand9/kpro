@@ -32,6 +32,11 @@ telemetry backends, or workload-specific capacity promises.
 
 ## Fast Analysis Route
 
+At the start of every session, first read
+[Production v1 Roadmap](production-v1-roadmap.md) for the current phase, next
+task, acceptance gates, and evidence limits. It guides priorities without
+replacing the existing release or compatibility policies.
+
 Use this route for a general project assessment:
 
 1. Read [README.md](../README.md) for status, architecture, and supported
@@ -224,4 +229,6 @@ Curated benchmark evidence belongs in `benchmark/results/` only when its
 environment, source identity, method, validation status, and limitations are
 recorded in `benchmark/RESULTS.md`. Keep durable analysis in this document,
 [framework-quality-assessment.md](framework-quality-assessment.md),
-[project-map.md](project-map.md), or the relevant guide.
+[project-map.md](project-map.md), or the relevant guide. Maintain the current
+production-v1 phase and next task in
+[production-v1-roadmap.md](production-v1-roadmap.md).

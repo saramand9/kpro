@@ -12,6 +12,9 @@ upgrading between minor versions.
 
 ### Added
 
+- A production-v1 roadmap records staged acceptance gates, current evidence
+  limits, and the next implementation task. Repository agent instructions now
+  require reading that roadmap at the start of each new session.
 - Message sessions can optionally expose post-admission transport results
   through `core.SessionSendWithReceipt` and terminal per-session drain through
   `core.SessionDrainOutbound`. TCP, KCP, QUIC, UDP, and WebSocket implement

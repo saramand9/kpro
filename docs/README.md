@@ -2,6 +2,10 @@
 
 Start with the quickstart and golden path. The remaining guides separate implemented framework behavior from the application and infrastructure validation required for a production service.
 
+When resuming repository work, first read the
+[Production v1 Roadmap](production-v1-roadmap.md) for the current development
+phase, acceptance gates, evidence limits, and next task.
+
 ## Start here
 
 | Document | Purpose |

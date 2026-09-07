@@ -3,6 +3,11 @@
 Use this file as the first pass when reopening the repository for analysis or
 implementation work. It is an orientation aid, not a release contract.
 
+In every new session, read [docs/production-v1-roadmap.md](docs/production-v1-roadmap.md)
+immediately after this file, before planning analysis or implementation. Use its
+current phase, next task, and evidence limits to resume work; the user's current
+request determines the scope of execution.
+
 ## Project Snapshot
 
 KPro is a pre-1.0 Go multi-transport application framework. It assembles TCP,
@@ -21,19 +26,21 @@ the task explicitly changes that boundary.
 
 ## Fast Read Order
 
-1. [README.md](README.md) for status, supported transports, and the top-level
+1. [docs/production-v1-roadmap.md](docs/production-v1-roadmap.md) for the current
+   production-v1 objective, open acceptance gates, and next implementation task.
+2. [README.md](README.md) for status, supported transports, and the top-level
    architecture.
-2. [docs/analysis-index.md](docs/analysis-index.md) for the fastest analysis
+3. [docs/analysis-index.md](docs/analysis-index.md) for the fastest analysis
    route, important files, and current evidence.
-3. [docs/project-map.md](docs/project-map.md) for package ownership and runtime
+4. [docs/project-map.md](docs/project-map.md) for package ownership and runtime
    flow.
-4. [docs/dependency-boundaries.md](docs/dependency-boundaries.md) before changing
+5. [docs/dependency-boundaries.md](docs/dependency-boundaries.md) before changing
    server/transport imports or module boundaries.
-5. [docs/golden-path.md](docs/golden-path.md) for the recommended application
+6. [docs/golden-path.md](docs/golden-path.md) for the recommended application
    shape.
-6. [docs/production-readiness.md](docs/production-readiness.md) for production
+7. [docs/production-readiness.md](docs/production-readiness.md) for production
    boundaries and required external validation.
-7. [docs/performance-fast-path.md](docs/performance-fast-path.md) and
+8. [docs/performance-fast-path.md](docs/performance-fast-path.md) and
    [docs/netty-performance-baseline.md](docs/netty-performance-baseline.md)
    before changing TCP/WebSocket batching, buffer ownership, or performance
    claims.
