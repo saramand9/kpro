@@ -1,5 +1,7 @@
 # KPro
 
+English | [中文](README.zh-CN.md)
+
 KPro is a pre-1.0 Go application framework for building a multi-transport app
 server behind one application-level programming model.
 
@@ -13,6 +15,9 @@ server code assembles transports, middleware and routers
 ```
 
 ## Status
+
+Current `main` requires Go 1.26.9 or newer. The next minor release drops Go
+1.25 support to adopt security fixes in the toolchain and dependencies.
 
 Current implementation:
 
@@ -65,6 +70,7 @@ application or platform responsibilities.
 | Plan failure recovery and capacity | [Operations and Capacity Planning](docs/operations.md) |
 | Preserve client addresses behind an L4 load balancer | [HAProxy PROXY Protocol](docs/proxy-protocol.md) |
 | Understand compatibility expectations | [API Stability, Versioning, and Deprecation](docs/api-stability.md) |
+| Prepare an open-source release | [Open-source release checklist](docs/open-source-release.md) |
 | Add a transport, middleware, codec, or database adapter | [Extending KPro](docs/extending-kpro.md) |
 
 The current documentation tracks unreleased `main`. Create a starter service

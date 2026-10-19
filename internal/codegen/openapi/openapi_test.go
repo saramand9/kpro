@@ -239,7 +239,7 @@ func TestBuildPlanDeterministicAndCompiles(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	mod := "module example.com/generated\n\ngo 1.25.12\n\nrequire github.com/saramand9/kpro v0.0.0\n\nreplace github.com/saramand9/kpro => " + filepath.ToSlash(root) + "\n"
+	mod := "module example.com/generated\n\ngo 1.26.9\n\nrequire github.com/saramand9/kpro v0.0.0\n\nreplace github.com/saramand9/kpro => " + filepath.ToSlash(root) + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(mod), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -677,7 +677,7 @@ func TestGeneratedBindings(t *testing.T) {
 	if err := os.WriteFile(testPath, []byte(generatedTest), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	mod := "module example.com/generated\n\ngo 1.25.12\n\nrequire github.com/saramand9/kpro v0.0.0\n\nreplace github.com/saramand9/kpro => " + filepath.ToSlash(root) + "\n"
+	mod := "module example.com/generated\n\ngo 1.26.9\n\nrequire github.com/saramand9/kpro v0.0.0\n\nreplace github.com/saramand9/kpro => " + filepath.ToSlash(root) + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(mod), 0o644); err != nil {
 		t.Fatal(err)
 	}

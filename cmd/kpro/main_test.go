@@ -55,7 +55,7 @@ func TestNewCreatesParseableServiceWithoutOverwriting(t *testing.T) {
 	if !strings.Contains(string(goMod), "replace github.com/saramand9/kpro => ") {
 		t.Fatalf("generated go.mod has no reproducible local KPro source:\n%s", goMod)
 	}
-	if !strings.Contains(string(goMod), "go 1.25.12") {
+	if !strings.Contains(string(goMod), "go 1.26.9") {
 		t.Fatalf("generated go.mod has wrong Go baseline:\n%s", goMod)
 	}
 	if err := execute([]string{"new", target}, &output, &output); err == nil {

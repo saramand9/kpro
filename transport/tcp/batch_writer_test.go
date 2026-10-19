@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"testing"
@@ -46,6 +47,56 @@ func TestSessionBatchWriterPreservesFrameOrder(t *testing.T) {
 		t.Fatalf("snapshot after batch = %+v", snapshot)
 	}
 	assertTCPBatchWriterReleasedReferences(t, writer, len(frames))
+}
+
+func TestSessionBatchWriterHonorsFrameLimitUnderBacklog(t *testing.T) {
+	for _, limit := range []int{1, 2, DefaultMaxWriteBatchFrames} {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			config := New(Config{SendQueueSize: limit*2 + 1, MaxWriteBatchFrames: limit}).config
+			conn := &batchRecordingConn{}
+			s := &session{server: &Server{config: config}, raw: conn, sendQueue: newSessionOutboundQueue(config)}
+			total := limit*2 + 1
+			for i := 0; i < total; i++ {
+				frame := outboundFrame{payload: []byte{byte(i)}}
+				reservation, err := s.sendQueue.Reserve(frame.wireBytes())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := reservation.Commit(frame, frame.wireBytes()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writer := newSessionBatchWriter(config)
+			for written := 0; written < total; {
+				first := <-s.sendQueue.Items()
+				if err := writer.writeAvailable(s, &first); err != nil {
+					t.Fatal(err)
+				}
+				written += min(limit, total-written)
+				if got := len(conn.payload); got != written {
+					t.Fatalf("wrote %d frames, want %d", got, written)
+				}
+				if got := s.sendQueue.Snapshot().PendingFrames; got != total-written {
+					t.Fatalf("pending frames = %d, want %d", got, total-written)
+				}
+			}
+			for i, value := range conn.payload {
+				if value != byte(i) {
+					t.Fatalf("frame %d = %d", i, value)
+				}
+			}
+		})
+	}
+}
+
+type batchRecordingConn struct {
+	batchShortWriteConn
+	payload []byte
+}
+
+func (c *batchRecordingConn) Write(payload []byte) (int, error) {
+	c.payload = append(c.payload, payload...)
+	return len(payload), nil
 }
 
 func TestSessionBatchWriterReleasesEveryItemOnWriteError(t *testing.T) {
