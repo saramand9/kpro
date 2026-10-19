@@ -91,7 +91,7 @@ Install the published CLI from outside a KPro checkout to scaffold against
 the exact release without a local replacement:
 
 ```sh
-go install github.com/saramand9/kpro/cmd/kpro@v0.2.0
+go install github.com/saramand9/kpro/cmd/kpro@v0.2.1
 kpro new hello-kpro --module example.com/hello-kpro \
   --name hello-kpro --profile service --api http
 ```
@@ -100,6 +100,11 @@ The public release does not require `GOPRIVATE`. Private forks require their
 own VCS credentials and module-path configuration; `GOPRIVATE` does not
 authenticate Git access. See the [release validation record](docs/open-source-release.md)
 for the independent-directory install and HTTP smoke results.
+
+Upgrade from v0.2.0 to v0.2.1 for the raw HTTP response sniffing fix. Unspecified
+Context response types default to `application/octet-stream` with `nosniff`;
+applications explicitly serving HTML must escape untrusted input. See the
+[patch notes](.github/release-notes/v0.2.1.md).
 
 Current unified `service` projects can add gRPC later without rewriting the
 application entry point:

@@ -9,6 +9,9 @@ import (
 
 // Context is backed by net/http. Body caches the request body on first read so
 // handlers can call Body and CopyBody in either order.
+// Context responses default an unspecified Content-Type to application/octet-stream
+// and set X-Content-Type-Options: nosniff. Applications explicitly serving HTML
+// must escape untrusted input; response bytes are never rewritten.
 type Context struct {
 	w           http.ResponseWriter
 	r           *http.Request

@@ -29,7 +29,7 @@ SSE 和 gRPC，并提供可选 fasthttp 集成。协议实现和仓库测试不�
 需要 Go 1.26.9 或更新的兼容工具链。在 KPro checkout 之外执行：
 
 ```sh
-go install github.com/saramand9/kpro/cmd/kpro@v0.2.0
+go install github.com/saramand9/kpro/cmd/kpro@v0.2.1
 kpro new hello-kpro --module example.com/hello-kpro \
   --name hello-kpro --profile service --api http
 cd hello-kpro
@@ -39,8 +39,13 @@ go test ./...
 go run ./cmd/hello-kpro
 ```
 
-生成项目固定依赖 v0.2.0，无本地 `replace`。访问
+生成项目固定依赖 v0.2.1，无本地 `replace`。访问
 `http://127.0.0.1:8080/healthz` 检查就绪状态。公开模块不需要设置 `GOPRIVATE`。
+
+v0.2.1 修复原始 HTTP 响应的类型嗅探问题，请从 v0.2.0 升级。
+未指定的响应类型默认使用 `application/octet-stream` 和 `nosniff`；
+显式提供 HTML 的应用仍须转义不可信输入。详见
+[补丁说明](.github/release-notes/v0.2.1.md)。
 
 ## 从源码运行
 
