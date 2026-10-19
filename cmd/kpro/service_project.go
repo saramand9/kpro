@@ -86,7 +86,7 @@ var serviceAssemblyTemplates = []serviceAssemblyTemplate{
 }
 
 func loadServiceProjectConfig(filename string) (serviceProjectConfig, error) {
-	data, err := os.ReadFile(filename)
+	data, err := os.ReadFile(filename) // #nosec G304 -- Local CLI reads an operator-selected project or artifact path.
 	if err != nil {
 		return serviceProjectConfig{}, fmt.Errorf("read service project config: %w", err)
 	}

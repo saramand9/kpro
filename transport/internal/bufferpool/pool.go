@@ -149,7 +149,7 @@ func (p *Pool) classFor(size int) *sizeClass {
 	if classSize < size {
 		return nil
 	}
-	index := bits.TrailingZeros(uint(classSize)) - bits.TrailingZeros(uint(defaultMinClassSize))
+	index := bits.TrailingZeros(uint(classSize)) - bits.TrailingZeros(uint(defaultMinClassSize)) // #nosec G115 -- Positive power-of-two class sizes and the preceding bounds checks guarantee representability.
 	if index < 0 || index >= len(p.classes) {
 		return nil
 	}
@@ -167,5 +167,5 @@ func nextPowerOfTwo(value int) int {
 	if value >= highest {
 		return highest
 	}
-	return 1 << bits.Len(uint(value-1))
+	return 1 << bits.Len(uint(value-1)) // #nosec G115 -- Positive power-of-two class sizes and the preceding bounds checks guarantee representability.
 }

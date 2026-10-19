@@ -5,22 +5,30 @@ package main
 
 import (
 	"bytes"
-	"crypto/tls"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+
+	"github.com/saramand9/kpro/examples/internal/examplecert"
 )
 
 func main() {
 	base := flag.String("base", "https://127.0.0.1:8443", "server base url")
 	text := flag.String("text", "hello https", "echo payload")
+	caFile := flag.String("ca", "", "PEM CA file (default: system trust)")
+	insecure := flag.Bool("insecure", false, "skip TLS verification for local self-signed demos only")
 	flag.Parse()
+
+	tlsConfig, err := examplecert.Client(*caFile, *insecure)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	client := &http.Client{
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // example-only local certificate
+			TLSClientConfig: tlsConfig,
 		},
 	}
 	health, err := client.Get(*base + "/health")

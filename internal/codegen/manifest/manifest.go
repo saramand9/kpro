@@ -67,7 +67,7 @@ type Plugin struct {
 
 // Load reads, strictly decodes, normalizes, and validates a manifest.
 func Load(filename string) (Manifest, error) {
-	data, err := os.ReadFile(filename)
+	data, err := os.ReadFile(filename) // #nosec G304 -- Local CLI reads an operator-selected project or artifact path.
 	if err != nil {
 		return Manifest{}, fmt.Errorf("read codegen manifest: %w", err)
 	}

@@ -5,14 +5,29 @@ package codec
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"io"
 	"reflect"
+	"strconv"
 	"testing"
 
 	"github.com/saramand9/kpro/core"
 )
+
+func TestReadIntoRejectsUnrepresentableFrameOn32Bit(t *testing.T) {
+	if strconv.IntSize != 32 {
+		t.Skip("32-bit allocation boundary")
+	}
+	header := make([]byte, FrameHeaderSize)
+	binary.BigEndian.PutUint16(header[:2], FrameMagic)
+	header[2] = FrameVersion
+	binary.BigEndian.PutUint32(header[16:20], 1<<31-1)
+	if _, _, err := KProV1().ReadInto(bytes.NewReader(header), ^uint32(0), nil); !errors.Is(err, ErrFrameTooLarge) {
+		t.Fatalf("unrepresentable frame: %v", err)
+	}
+}
 
 func TestKProV1GoldenFrame(t *testing.T) {
 	want, err := hex.DecodeString("4b5001a501020304010203040506070800000003616263")

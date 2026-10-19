@@ -7,9 +7,12 @@ import (
 	"context"
 	"flag"
 	"log"
+	"math"
 
 	"github.com/saramand9/kpro/server"
 	"github.com/saramand9/kpro/transport/grpcx"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
@@ -26,6 +29,9 @@ func (GreeterService) SayGoodbye(_ context.Context, req *wrapperspb.StringValue)
 }
 
 func (GreeterService) GetNameLength(_ context.Context, req *wrapperspb.StringValue) (*wrapperspb.Int32Value, error) {
+	if len(req.Value) > math.MaxInt32 {
+		return nil, status.Error(codes.ResourceExhausted, "name length exceeds int32")
+	}
 	return wrapperspb.Int32(int32(len(req.Value))), nil
 }
 

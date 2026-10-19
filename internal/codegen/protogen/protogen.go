@@ -49,7 +49,7 @@ type Runner interface {
 type ExecRunner struct{}
 
 func (ExecRunner) Run(ctx context.Context, command Command) ([]byte, error) {
-	process := exec.CommandContext(ctx, command.Path, command.Args...)
+	process := exec.CommandContext(ctx, command.Path, command.Args...) // #nosec G204 -- Code generation deliberately executes a locally configured tool, without a shell; project configuration must be trusted.
 	process.Dir = command.Dir
 	return process.CombinedOutput()
 }
@@ -316,7 +316,7 @@ func collectGenerated(root, outputPackage string) ([]codegen.File, string, []reg
 			)
 		}
 
-		content, err := os.ReadFile(filename)
+		content, err := os.ReadFile(filename) // #nosec G304 -- Local CLI reads an operator-selected project or artifact path.
 		if err != nil {
 			return err
 		}

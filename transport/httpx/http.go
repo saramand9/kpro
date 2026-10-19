@@ -294,7 +294,7 @@ func (e *Endpoint) ListenAndServe(ctx context.Context) (serveErr error) {
 			e.rollbackStart()
 			return err
 		}
-		server.TLSConfig = &tls.Config{Certificates: []tls.Certificate{certificate}}
+		server.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{certificate}}
 	}
 	rawListener, err := net.Listen("tcp", e.config.Addr)
 	if err != nil {

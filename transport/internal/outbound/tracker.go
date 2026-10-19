@@ -102,7 +102,7 @@ func (t *queueTracker) addSaturated(delta int64) {
 }
 
 func (t *queueTracker) recordAccepted(bytes int64) {
-	if t == nil {
+	if t == nil || bytes < 0 {
 		return
 	}
 	t.acceptedWrites.Add(1)
@@ -110,7 +110,7 @@ func (t *queueTracker) recordAccepted(bytes int64) {
 }
 
 func (t *queueTracker) recordWrite(outcome writeOutcome, bytes int64) {
-	if t == nil {
+	if t == nil || bytes < 0 {
 		return
 	}
 	size := uint64(bytes)

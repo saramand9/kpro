@@ -44,11 +44,11 @@ KPro 以 pre-1.0 开发者版本开放试用。当前准备目标为 `v0.2.0` �
 
 ## GitHub 设置与发布
 
-- [ ] 核实仓库所有者、远程地址、默认分支及可见性。
-- [ ] 启用默认分支保护与实际存在的 CI 必需检查。
-- [ ] 启用私密漏洞报告，验证 `SECURITY.md` 的入口可用。
-- [ ] 设置简介、Topics、文档链接和基本 Issue 标签。
-- [ ] 确认安全维护范围；下一 minor 发布时同步更新 `SECURITY.md`。
+- [x] 核实仓库所有者、远程地址、默认分支及可见性。
+- [x] 启用默认分支保护与实际存在的 CI 必需检查。
+- [x] 启用私密漏洞报告，验证 `SECURITY.md` 的入口可用。
+- [x] 设置简介、Topics 和基本 Issue 标签；文档入口在 README。
+- [x] 确认安全维护范围；下一 minor 发布时同步更新 `SECURITY.md`。
 - [ ] 完成并复核 `v0.2.0` 发布说明，选定通过检查的提交。
 - [ ] 创建 annotated tag 并触发现有 release 工作流，验证归档、校验和及 SBOM。
 - [ ] 验证发布后的安装和示例，再发布介绍文章。
@@ -118,3 +118,30 @@ gRPC v1.83.1 修复 OOM，但仍受 GO-2026-6443 影响，因此采用 v1.83.2�
 真实外部数据库集成、Linux 运行测试、完整发布产物及干净提交 CI 仍需按发布清单验证。
 
 权属确认、GitHub 账号恢复及外部用户试用需要维护者参与。
+
+## 公开仓库后的远程验证
+
+2026-10-19 已核实公开仓库为 `saramand9/kpro`，默认分支为 `main`，
+本地 origin 为 `git@github.com:saramand9/kpro.git`。GitHub CLI 的旧凭据
+仍不可用，本次通过维护者已登录的 GitHub 网页核对设置。
+
+- `main` 要求 PR、分支保持最新、解决讨论和 8 个必需检查，规则覆盖管理员；
+  不强制单维护者获得他人审批，不允许强推或删除。
+- 必需检查为 `test`、`database-integration`、`windows-smoke`、
+  `go-compatibility (1.26.9)`、`go-compatibility (1.27.2)`、
+  `Credential history`、`Go security` 和 `CodeQL`。
+- 已设置英文简介及 golang、networking、tcp、websocket、grpc、quic、framework
+  Topics；已有 bug、documentation、good first issue、help wanted 等 12 个标签。
+- 已开启 Private vulnerability reporting，`SECURITY.md` 指向仓库安全报告入口。
+  安全维护覆盖最新已发布 minor；旧 minor 及已被替代的 patch 不承诺维护。
+- `6648bcb` 的 [CI](https://github.com/saramand9/kpro/actions/runs/39209476397)
+  通过 Linux 完整测试、race、vet、覆盖率、性能预算、真实 MySQL/PostgreSQL
+  集成、Windows 和两个 Go 版本检查。这是该提交的证据，不替代后续提交检查。
+- 同一提交的 [Security](https://github.com/saramand9/kpro/actions/runs/39209476380)
+  失败：旧 Gitleaks 镜像报告 6 项，gosec 报告 103 项，Go CodeQL 不支持
+  `build-mode: none`。本分支正在处理这些问题，尚未发布标签。
+- 本地固定 Gitleaks v8.30.1 对 fetch 后 245 个提交扫描通过，仍使用仅限指定
+  WebSocket 测试 nonce 的既有例外。CI 工具同步到该版本，等待远程复验。
+
+发布前须让修正后的 PR 通过所有检查，再选取合并提交创建 annotated tag。
+代表性负载性能对比和独立外部试用仍未完成；公开仓库与安全检查不代表生产级 v1。

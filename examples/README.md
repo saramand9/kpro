@@ -1,5 +1,10 @@
 # KPro examples
 
+TLS clients verify certificates using system trust by default. Use
+`-ca path/to/ca.pem` to trust a local CA. The commands below explicitly use
+`-insecure` for generated local self-signed demonstration certificates only;
+do not use that flag against real services.
+
 Each protocol example has a standalone server and client. These pairs isolate
 transport setup and wire behavior for learning and protocol checks; they omit
 some application and deployment concerns and are not production templates.
@@ -78,7 +83,7 @@ skips verification only for this local example.
 
 ```sh
 go run ./examples/quic/server -addr :8444
-go run ./examples/quic/client -addr 127.0.0.1:8444 -text "hello quic"
+go run ./examples/quic/client -insecure -addr 127.0.0.1:8444 -text "hello quic"
 ```
 
 ## UDP
@@ -119,7 +124,7 @@ The HTTPS server generates a local self-signed certificate at startup. The clien
 
 ```sh
 go run ./examples/https/server -addr :8443
-go run ./examples/https/client -base https://127.0.0.1:8443 -text "hello https"
+go run ./examples/https/client -insecure -base https://127.0.0.1:8443 -text "hello https"
 ```
 
 ## HTTP/2
@@ -128,7 +133,7 @@ The HTTP/2 example uses TLS and verifies that the client negotiated `HTTP/2.0`.
 
 ```sh
 go run ./examples/http2/server -addr :8442
-go run ./examples/http2/client -base https://127.0.0.1:8442 -text "hello http2"
+go run ./examples/http2/client -insecure -base https://127.0.0.1:8442 -text "hello http2"
 ```
 
 ## HTTP/3
@@ -140,7 +145,7 @@ can be replayed. Production endpoints should also set `MaxConnections`,
 
 ```sh
 go run ./examples/http3/server -addr :8443
-go run ./examples/http3/client -base https://127.0.0.1:8443 -text "hello http3"
+go run ./examples/http3/client -insecure -base https://127.0.0.1:8443 -text "hello http3"
 ```
 
 ## SSE
@@ -178,7 +183,7 @@ curl http://127.0.0.1:8080/users/active
 
 ```sh
 go run ./examples/https-modular/server -addr :8443
-go run ./examples/https/client -base https://127.0.0.1:8443 -text "hello modular https"
+go run ./examples/https/client -insecure -base https://127.0.0.1:8443 -text "hello modular https"
 ```
 
 ### TCP Modular
@@ -234,7 +239,7 @@ Enable HTTPS on the same HTTP route modules:
 
 ```sh
 go run ./examples/modular/server -https :8443
-go run ./examples/https/client -base https://127.0.0.1:8443 -text "hello modular https"
+go run ./examples/https/client -insecure -base https://127.0.0.1:8443 -text "hello modular https"
 ```
 
 ## Compile All Examples

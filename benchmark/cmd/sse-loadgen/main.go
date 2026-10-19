@@ -209,7 +209,7 @@ func runWorker(
 	defer workers.Done()
 	defer response.Body.Close()
 	reader := bufio.NewReaderSize(response.Body, 128*1024)
-	latencies := newReservoir(sampleBudget, uint64(streamID+1))
+	latencies := newReservoir(sampleBudget, uint64(streamID+1)) // #nosec G115 -- Load configuration validates nonnegative payload sizes and worker indices before use.
 	var expectedSequence uint64 = 1
 	var previous time.Time
 	ready.Done()
@@ -239,7 +239,7 @@ func runWorker(
 			break
 		}
 		result.completed++
-		result.bytes += uint64(config.payloadSize)
+		result.bytes += uint64(config.payloadSize) // #nosec G115 -- Load configuration validates nonnegative payload sizes and worker indices before use.
 		if !previous.IsZero() {
 			latencies.add(observedAt.Sub(previous).Nanoseconds())
 		}

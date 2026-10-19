@@ -60,7 +60,7 @@ func run(budgetPath, inputPath string, stdin io.Reader, output io.Writer) error 
 	reader := stdin
 	var input *os.File
 	if inputPath != "" {
-		input, err = os.Open(inputPath)
+		input, err = os.Open(inputPath) // #nosec G304 -- Local CLI reads an operator-selected project or artifact path.
 		if err != nil {
 			return fmt.Errorf("open input: %w", err)
 		}
@@ -139,7 +139,7 @@ func run(budgetPath, inputPath string, stdin io.Reader, output io.Writer) error 
 }
 
 func loadBudgets(path string) (budgetFile, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- Local CLI reads an operator-selected project or artifact path.
 	if err != nil {
 		return budgetFile{}, fmt.Errorf("read budget: %w", err)
 	}

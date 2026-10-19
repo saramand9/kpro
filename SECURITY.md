@@ -1,13 +1,14 @@
 # Security Policy
 
-KPro is currently pre-1.0. Security fixes are developed on `main` and released
-on the latest `v0.1.x` patch line when applicable. Older pre-release commits and
-superseded patch versions are not maintained as separate security lines.
+KPro is pre-1.0. Security fixes are developed on `main` and released on the
+latest published minor line when applicable. Once a new minor line is
+published, older minor lines and superseded patches are not maintained as
+separate security lines. Upgrade using the matching release notes.
 
 | Version | Supported |
 | --- | --- |
-| latest `v0.1.x` | yes |
-| older versions/commits | no |
+| latest patch of the latest published minor line | yes |
+| older minor lines, superseded patches, and unreviewed commits | no |
 
 ## Reporting a vulnerability
 
