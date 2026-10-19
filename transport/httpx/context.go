@@ -59,6 +59,15 @@ func (c *Context) WriteHeader(status int) {
 	if c.wroteHeader {
 		return
 	}
+	// Unspecified response types must not be inferred from untrusted bytes.
+	// Applications serving HTML must select that type and escape their input.
+	header := c.w.Header()
+	if header.Get("Content-Type") == "" {
+		header.Set("Content-Type", "application/octet-stream")
+	}
+	if header.Get("X-Content-Type-Options") != "nosniff" {
+		header.Set("X-Content-Type-Options", "nosniff")
+	}
 	c.wroteHeader = true
 	c.status = status
 	c.w.WriteHeader(status)
