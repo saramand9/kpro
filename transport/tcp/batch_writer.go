@@ -24,10 +24,6 @@ func newSessionBatchWriter(config Config) *sessionBatchWriter {
 
 func (w *sessionBatchWriter) writeAvailable(s *session, first *outbound.Item[outboundFrame]) error {
 	maxFrames := s.server.config.MaxWriteBatchFrames
-	snapshot := s.sendQueue.Snapshot()
-	if snapshot.PendingFrames >= maxFrames && maxFrames < s.server.config.SendQueueSize {
-		maxFrames = min(maxFrames*2, s.server.config.SendQueueSize)
-	}
 	items := s.sendQueue.DrainAvailableWait(
 		first,
 		w.items[:0],

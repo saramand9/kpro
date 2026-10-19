@@ -59,13 +59,16 @@ type Config struct {
 	// MaxPendingBytes caps bytes reserved for encoding, queued, or currently
 	// being written per session. Zero derives SendQueueSize * (MaxFrameSize + frame header).
 	MaxPendingBytes int64
-	// MaxWriteBatchFrames caps frames gathered by one non-blocking queue drain.
+	// MaxWriteBatchFrames is the hard cap on frames gathered by one queue drain,
+	// including its first frame. Non-positive values use the default; the cap
+	// is clipped to SendQueueSize and does not grow under backlog.
 	MaxWriteBatchFrames int
 	// MaxWriteBatchBytes caps bytes submitted by one gather-write call. A
 	// single oversized admitted frame is still written to ensure progress.
 	MaxWriteBatchBytes int64
-	// MaxWriteBatchDelay is the bounded coalescing window used when a writer
-	// observes only one queued frame. Non-positive values use the default.
+	// MaxWriteBatchDelay sets the coalescing poll budget when only the first
+	// frame is available: one non-blocking poll per microsecond, at least one.
+	// It does not guarantee elapsed wait time. Non-positive values use the default.
 	MaxWriteBatchDelay time.Duration
 	// MaxRetainedBufferBytes caps idle inbound and outbound payload memory
 	// across the server's sharded size-class pools. Queue and Router limits

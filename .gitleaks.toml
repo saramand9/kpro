@@ -2,13 +2,13 @@
 useDefault = true
 
 [[allowlists]]
-description = "RFC 6455 WebSocket handshake test nonces"
+description = "Fixed WebSocket handshake test nonces, including decoded 0123456789abcdef"
 targetRules = ["generic-api-key"]
 condition = "AND"
-regexTarget = "line"
+regexTarget = "secret"
 paths = [
   '''(?:^|/)transport/websocket/(?:conformance_test|contract_suite_test|proxy_protocol_test|server_test)\.go$''',
 ]
 regexes = [
-  '''(?:Sec-WebSocket-Key|const key\s*=).*?(?:dGhlIHNhbXBsZSBub25jZQ==|MDEyMzQ1Njc4OWFiY2RlZg==)''',
+  '''^(?:(?:dGhlIHNhbXBsZSBub25jZQ|MDEyMzQ1Njc4OWFiY2RlZg)={0,2}|0123456789abcdef)$''',
 ]

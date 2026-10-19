@@ -10,7 +10,20 @@ upgrading between minor versions.
 
 ## Unreleased
 
+### Fixed
+
+- Upgrade the minimum Go toolchain to 1.26.9 and update x/net, x/text, and
+  gRPC to address reachable vulnerability reports. Go 1.25 support is dropped
+  for the next minor release; new service templates use the same baseline.
+
+- TCP queue drains now honor `MaxWriteBatchFrames` as a hard limit under
+  backlog instead of implicitly doubling it. The performance guide documents
+  the current default, coalescing polling, and write-deadline refresh behavior.
+
 ### Added
+
+- Open-source release preparation checklist, a pull request template, and
+  draft migration notes for the next minor release, `v0.2.0`.
 
 - A production-v1 roadmap records staged acceptance gates, current evidence
   limits, and the next implementation task. Repository agent instructions now

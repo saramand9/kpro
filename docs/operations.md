@@ -553,8 +553,8 @@ threshold changes.
 
 ## Repository verification and release evidence
 
-Use a supported Go 1.25 or 1.26 patch release. The current CI matrix verifies
-Go 1.25.12 and 1.26.5, with 1.26.5 used for the complete suite. Before proposing
+Use Go 1.26.9 or a newer supported patch release. The CI matrix targets
+Go 1.26.9 and 1.27.2, with 1.26.9 used for the complete suite. Before proposing
 a release, reproduce the security and coverage gates:
 
 ```sh

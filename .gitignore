@@ -31,3 +31,7 @@ tmp/
 .env
 .env.*
 !.env.example
+
+# Repository-local private material and history-rewrite scratch data
+/BC4Key.txt
+/.codex-history-rewrite/

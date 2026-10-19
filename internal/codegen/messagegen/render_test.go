@@ -164,7 +164,7 @@ func TestGeneratedPackagesCompileAndExerciseBinding(t *testing.T) {
 	root := t.TempDir()
 	writePlan(t, root, plan)
 	repository := repositoryRoot(t)
-	goMod := "module example.com/orders\n\ngo 1.25.0\n\n" +
+	goMod := "module example.com/orders\n\ngo 1.26.9\n\n" +
 		"require github.com/saramand9/kpro v0.0.0\n\n" +
 		"replace github.com/saramand9/kpro => " + filepath.ToSlash(repository) + "\n"
 	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte(goMod), 0o644); err != nil {

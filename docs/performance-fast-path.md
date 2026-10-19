@@ -139,12 +139,18 @@ that one socket read always produces a full group.
 ### Bounded gather-write batching
 
 The single TCP writer for a session receives the first queued frame, then
-non-blockingly drains a FIFO prefix. Draining and submission are bounded by:
+drains a FIFO prefix, with a coalescing poll budget when no second frame is
+immediately available. Draining and submission are bounded by:
 
 | Setting | Default | Meaning |
 | --- | ---: | --- |
-| `MaxWriteBatchFrames` | 16 | Maximum frames taken by one queue drain; also clipped to `SendQueueSize`. |
+| `MaxWriteBatchFrames` | 32 | Hard maximum frames taken by one queue drain, including the first; clipped to `SendQueueSize`, without backlog expansion. |
 | `MaxWriteBatchBytes` | 256 KiB, capped by `MaxPendingBytes` | Maximum bytes in one logical gather submission. |
+| `MaxWriteBatchDelay` | 2 microseconds | Coalescing poll budget when only the first frame is available; non-positive values select the default. |
+
+The coalescing implementation performs a finite number of non-blocking polls
+(one per configured microsecond, at least one), rather than sleeping until a
+wall-clock deadline. This setting does not guarantee a particular elapsed delay.
 
 An already admitted frame larger than the byte setting is still written by
 itself so the writer always makes progress. A frame-count drain may be split
@@ -156,7 +162,11 @@ Depending on the concrete connection and platform, Go may use scatter/gather
 I/O or fall back to ordinary writes. The API therefore does not guarantee that
 one logical submission is exactly one system call.
 
-`WriteTimeout` applies to each gather submission. All drained queue items are
+Before a submission, the writer sets a deadline to now plus `WriteTimeout`
+when no deadline exists or at least half that timeout has passed since the
+last refresh. Submissions within that refresh window share the existing
+deadline; each submission does not receive a fresh full timeout. Non-positive
+configured values select the default timeout during normalization. All drained queue items are
 completed on success or write failure, returning their accounting and owned
 buffers. Reusable writer arrays are cleared after a batch so an idle session
 does not retain stale payload references outside the queue and pool budgets.

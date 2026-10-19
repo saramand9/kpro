@@ -91,7 +91,7 @@ func TestGeneratedHTTPClientRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	module := "module example.com/generated\n\ngo 1.25.12\n\nrequire github.com/saramand9/kpro v0.0.0\n\nreplace github.com/saramand9/kpro => " + filepath.ToSlash(repository) + "\n"
+	module := "module example.com/generated\n\ngo 1.26.9\n\nrequire github.com/saramand9/kpro v0.0.0\n\nreplace github.com/saramand9/kpro => " + filepath.ToSlash(repository) + "\n"
 	if err := os.WriteFile(filepath.Join(directory, "go.mod"), []byte(module), 0o644); err != nil {
 		t.Fatal(err)
 	}

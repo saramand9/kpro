@@ -10,7 +10,7 @@ without changing this startup shape.
 
 ## 1. Prerequisites
 
-- Go 1.25 or newer. Repository CI verifies Go 1.25.12 and 1.26.5.
+- Go 1.26.9 or newer. Repository CI targets Go 1.26.9 and 1.27.2.
 - A checkout of this repository when running the example directly or testing
   unreleased source.
 - Port `8080` available, or another port supplied with `-addr`.

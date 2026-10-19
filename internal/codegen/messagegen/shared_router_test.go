@@ -21,7 +21,7 @@ func TestGeneratedAdapterDispatchesEverySharedRouterTransport(t *testing.T) {
 
 	root := t.TempDir()
 	writePlan(t, root, plan)
-	goMod := "module example.com/shared\n\ngo 1.25.0\n\n" +
+	goMod := "module example.com/shared\n\ngo 1.26.9\n\n" +
 		"require github.com/saramand9/kpro v0.0.0\n\n" +
 		"replace github.com/saramand9/kpro => " +
 		filepath.ToSlash(repositoryRoot(t)) +

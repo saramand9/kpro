@@ -33,9 +33,9 @@ environment described in [Database Production](docs/database-production.md).
 For hot-path changes, run the budgeted microbenchmarks:
 
 ```sh
-go test ./core ./transport/httpx -run '^$' \
-  -bench 'Benchmark(RouterDispatchSync|EndpointServeHTTP)$' \
-  -benchmem -benchtime=250ms -count=1 > benchmark-current.txt
+go test -p 1 ./core ./transport/httpx ./transport/internal/outbound ./transport/internal/dispatchgate ./transport/tcp ./transport/websocket ./benchmark -run '^$' \
+  -bench 'Benchmark(RouterDispatchSync|EndpointServeHTTP|OutboundQueueRoundTrip|OutboundQueueDrainAvailable|GateBeginEnd|KProCodec|SessionSendContiguous|SessionSendSegmented|ReserveOutboundBufferCommit|TCPSessionBatchWrite16x1KiB|WebSocketSessionBatchWrite16x1KiB)$' \
+  -benchmem -benchtime=250ms -count=3 > benchmark-current.txt
 go run ./cmd/benchguard -budget benchmark/budgets.json -input benchmark-current.txt
 ```
 
