@@ -503,7 +503,7 @@ func inspectTransactionTarget(filename string) ([]byte, fs.FileMode, bool, error
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return nil, 0, false, fmt.Errorf("transaction target %q is not a regular file", filename)
 	}
-	content, err := os.ReadFile(filename)
+	content, err := os.ReadFile(filename) // #nosec G304 -- Transaction path is validated beneath the operator-selected project root; symlinks are rejected.
 	if err != nil {
 		return nil, 0, false, fmt.Errorf("read transaction target %q: %w", filename, err)
 	}
@@ -576,7 +576,7 @@ func createTransactionDirectories(root string, prepared []*preparedMutation) ([]
 				cleanupCreatedDirectories(created),
 			)
 		}
-		if err := os.Mkdir(directory, 0o755); err != nil {
+		if err := os.Mkdir(directory, 0o755); err != nil { // #nosec G301 -- Generated source directories intentionally allow read and traversal, without group or other write access.
 			return created, errors.Join(
 				fmt.Errorf("create transaction output directory %q: %w", directory, err),
 				cleanupCreatedDirectories(created),
@@ -661,20 +661,20 @@ func stageFileMutations(prepared []*preparedMutation) error {
 		// Unix. The transaction must be able to reopen this private inode O_RDWR
 		// after linking it into place, regardless of the caller's umask.
 		if err := temporary.Chmod(0o600); err != nil {
-			temporary.Close()
+			_ = temporary.Close() // Best-effort cleanup; preserve the original failure.
 			return fmt.Errorf("set private staged mode for %q: %w", mutation.Path, err)
 		}
 		if _, err := temporary.Write(mutation.Content); err != nil {
-			temporary.Close()
+			_ = temporary.Close() // Best-effort cleanup; preserve the original failure.
 			return fmt.Errorf("write staged file for %q: %w", mutation.Path, err)
 		}
 		if err := temporary.Sync(); err != nil {
-			temporary.Close()
+			_ = temporary.Close() // Best-effort cleanup; preserve the original failure.
 			return fmt.Errorf("sync staged file for %q: %w", mutation.Path, err)
 		}
 		info, err := temporary.Stat()
 		if err != nil {
-			temporary.Close()
+			_ = temporary.Close() // Best-effort cleanup; preserve the original failure.
 			return fmt.Errorf("inspect staged file for %q: %w", mutation.Path, err)
 		}
 		mutation.stageInfo = info
@@ -692,11 +692,11 @@ func openInstalledOutputHandle(mutation *preparedMutation) (*os.File, error) {
 	}
 	info, err := installed.Stat()
 	if err != nil {
-		installed.Close()
+		_ = installed.Close() // Best-effort cleanup; preserve the original failure.
 		return nil, fmt.Errorf("inspect installed file for %q: %w", mutation.Path, err)
 	}
 	if mutation.stageInfo == nil || !os.SameFile(mutation.stageInfo, info) {
-		installed.Close()
+		_ = installed.Close() // Best-effort cleanup; preserve the original failure.
 		return nil, fmt.Errorf("%w: installed file for %q changed", ErrTransactionConflict, mutation.Path)
 	}
 	return installed, nil

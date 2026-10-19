@@ -53,7 +53,7 @@ func (KProV1Codec) ReadInto(r io.Reader, maxBodySize uint32, scratch []byte) (Re
 	if err != nil {
 		return ReadResult{}, scratch, err
 	}
-	if length > maxBodySize {
+	if length > maxBodySize || uint64(length) > uint64(int(^uint(0)>>1)-FrameHeaderSize) {
 		return ReadResult{}, scratch, ErrFrameTooLarge
 	}
 	if length > 0 {
@@ -89,7 +89,7 @@ func (KProV1Codec) DecodeBuffered(input []byte, maxBodySize uint32) (ReadResult,
 	if totalBytes > uint64(len(input)) {
 		return ReadResult{}, false, nil
 	}
-	consumed := int(totalBytes)
+	consumed := int(totalBytes) // #nosec G115 -- totalBytes is bounded by len(input) immediately above, so it fits int.
 	if length > 0 {
 		msg.Data = input[FrameHeaderSize:consumed:consumed]
 	}
@@ -98,7 +98,7 @@ func (KProV1Codec) DecodeBuffered(input []byte, maxBodySize uint32) (ReadResult,
 
 // Encode serializes one message into a framed byte slice.
 func (KProV1Codec) Encode(msg core.Message) ([]byte, error) {
-	if uint64(len(msg.Data)) > uint64(^uint32(0)) {
+	if uint64(len(msg.Data)) > uint64(^uint32(0)) || len(msg.Data) > int(^uint(0)>>1)-FrameHeaderSize {
 		return nil, ErrFrameTooLarge
 	}
 	size := FrameHeaderSize + len(msg.Data)
@@ -108,7 +108,7 @@ func (KProV1Codec) Encode(msg core.Message) ([]byte, error) {
 	buf[3] = msg.Flags
 	binary.BigEndian.PutUint32(buf[4:8], msg.ID)
 	binary.BigEndian.PutUint64(buf[8:16], msg.Seq)
-	binary.BigEndian.PutUint32(buf[16:20], uint32(len(msg.Data)))
+	binary.BigEndian.PutUint32(buf[16:20], uint32(len(msg.Data))) // #nosec G115 -- Payload length is checked against MaxUint32 before encoding.
 	copy(buf[FrameHeaderSize:], msg.Data)
 	return buf, nil
 }
@@ -129,7 +129,7 @@ func (k KProV1Codec) DecodePacket(data []byte) (core.Message, error) {
 		return core.Message{}, ErrFrameTooLarge
 	}
 	available := len(data) - FrameHeaderSize
-	if uint64(length) > uint64(available) {
+	if uint64(length) > uint64(available) { // #nosec G115 -- The header-length guard makes available nonnegative.
 		if available == 0 {
 			return core.Message{}, io.EOF
 		}

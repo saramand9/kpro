@@ -216,7 +216,7 @@ func runWorker(
 	readBuffer := make([]byte, frameSize)
 	sentAt := make([]time.Time, config.inflight)
 	sentSequences := make([]uint64, config.inflight)
-	latencies := newReservoir(sampleBudget, uint64(index+1))
+	latencies := newReservoir(sampleBudget, uint64(index+1)) // #nosec G115 -- Load configuration validates nonnegative payload sizes and worker indices before use.
 	var sequence uint64
 
 	// All allocation and worker-local initialization happens before readiness,
@@ -246,8 +246,8 @@ func runWorker(
 			}
 			bytes := count * frameSize
 			written, err := writeFull(conn, writeBuffer[:bytes])
-			result.bytesWritten += uint64(written)
-			recordSent(result, slow, uint64(written/frameSize))
+			result.bytesWritten += uint64(written)              // #nosec G115 -- writeFull returns a nonnegative count bounded by the input slice.
+			recordSent(result, slow, uint64(written/frameSize)) // #nosec G115 -- writeFull returns a nonnegative count bounded by the input slice.
 			if err != nil {
 				recordIOFailure(result, slow, err)
 				result.samples = latencies.values
@@ -294,7 +294,7 @@ func encodeRequestFrame(frame []byte, sequence uint64, payloadSize int) {
 	frame[3] = 0
 	binary.BigEndian.PutUint32(frame[4:8], echoMessageID)
 	binary.BigEndian.PutUint64(frame[8:16], sequence)
-	binary.BigEndian.PutUint32(frame[16:20], uint32(payloadSize))
+	binary.BigEndian.PutUint32(frame[16:20], uint32(payloadSize)) // #nosec G115 -- Load configuration validates nonnegative payload sizes and worker indices before use.
 	for index := 0; index < payloadSize; index++ {
 		frame[headerSize+index] = expectedPayloadByte(sequence, index)
 	}
@@ -315,7 +315,7 @@ func validateResponseFrame(frame []byte, sequence uint64, payloadSize int) error
 		return fmt.Errorf("message id %d, want %d", binary.BigEndian.Uint32(frame[4:8]), echoMessageID)
 	case binary.BigEndian.Uint64(frame[8:16]) != sequence:
 		return fmt.Errorf("sequence %d, want %d", binary.BigEndian.Uint64(frame[8:16]), sequence)
-	case binary.BigEndian.Uint32(frame[16:20]) != uint32(payloadSize):
+	case binary.BigEndian.Uint32(frame[16:20]) != uint32(payloadSize): // #nosec G115 -- Load configuration validates nonnegative payload sizes and worker indices before use.
 		return fmt.Errorf("payload length %d, want %d", binary.BigEndian.Uint32(frame[16:20]), payloadSize)
 	}
 	for index, value := range frame[headerSize:] {
@@ -327,7 +327,7 @@ func validateResponseFrame(frame []byte, sequence uint64, payloadSize int) error
 }
 
 func expectedPayloadByte(sequence uint64, index int) byte {
-	shift := uint(index&7) * 8
+	shift := uint(index&7) * 8 // #nosec G115 -- Masking with 7 bounds this shift index to 0 through 7.
 	return byte(sequence>>shift) ^ byte(index*31+17)
 }
 
@@ -539,7 +539,11 @@ func slowConnectionCount(connections, percent int) int {
 	if connections <= 0 || percent <= 0 {
 		return 0
 	}
-	return int((uint64(connections)*uint64(percent) + 99) / 100)
+	if percent >= 100 {
+		return connections
+	}
+	// Split before multiplying so even MaxInt connections cannot overflow.
+	return connections/100*percent + (connections%100*percent+99)/100
 }
 
 func closeConnections(conns []net.Conn) {

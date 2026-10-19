@@ -27,13 +27,17 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: 1.26.9
+          cache: true
+
       - name: Scan Git history with Gitleaks
         run: >-
-          docker run --rm
-          --volume "${GITHUB_WORKSPACE}:/repo:ro"
-          zricethezav/gitleaks@sha256:ebfeb6fd4f2c37fa371d3731ebfa662fdf80f93cd37d3b4771bb82263edff8d0
-          git /repo
-          --config /repo/.gitleaks.toml
+          go run github.com/zricethezav/gitleaks/v8@v8.30.1
+          git .
+          --config .gitleaks.toml
           --log-opts=--all
           --redact=100
           --no-banner
@@ -79,6 +83,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      actions: read
       packages: read
       security-events: write
     steps:
@@ -87,11 +92,22 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: 1.26.9
+          cache: true
+
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4.36.0
         with:
           languages: go
-          build-mode: none
+          build-mode: manual
+
+      - name: Build root and comparison modules for CodeQL
+        run: |
+          go build ./...
+          go -C benchmark/compare test -run '^$' ./...
 
       - name: Analyze with CodeQL
         uses: github/codeql-action/analyze@v4.36.0

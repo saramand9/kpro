@@ -5,7 +5,8 @@ reviewed release, but it is not a v1 stability guarantee.
 
 ## Current maturity
 
-`v0.1.0` is the initial developer release. Treat the module as pre-1.0
+`v0.1.0` is the initial developer release; `v0.2.0` introduces the
+dependency-neutral mounting API and requires Go 1.26.9+. Treat the module as pre-1.0
 software:
 
 - pin an exact release (or a reviewed commit for unreleased fixes);
@@ -13,14 +14,14 @@ software:
 - expect exported APIs to change while the architecture is refined;
 - keep KPro-specific construction and adapter details at your application's platform boundary.
 
-Current `main` has removed the protocol-specific `server.Server` convenience
+`v0.2.0` removes the protocol-specific `server.Server` convenience
 methods in favor of explicit transport construction plus `Mount`,
-`MountNative`, or `MountRunner`. That source-incompatible change is intended for
-the next minor release, not a `v0.1.x` patch. Documentation on `main` describes
-the new API; documentation at the `v0.1.0` tag describes the released API.
+`MountNative`, or `MountRunner`. That source-incompatible change belongs to
+the minor release, not a `v0.1.x` patch. Documentation at each tag describes
+that version; `main` may include later unreleased changes.
 
 Use an exact version such as
-`go get github.com/saramand9/kpro@v0.1.0`; `@latest` is not the
+`go get github.com/saramand9/kpro@v0.2.0`; `@latest` is not the
 recommended reproducible path during v0. Follow documentation from the same
 tag or commit. The [Quick Start](quickstart.md) currently covers checkout-based
 development on `main` and calls out the `v0.1.0` API boundary explicitly.
@@ -37,7 +38,7 @@ A tag, release notes, and an upgrade note are the release contract. A branch nam
 
 The supported toolchain follows maintained Go release lines. The current
 repository baseline is Go 1.26.9+, and CI targets Go 1.26.9 and 1.27.2. The
-next minor release drops Go 1.25 to adopt security fixes in the Go toolchain
+v0.2.0 release drops Go 1.25 to adopt security fixes in the Go toolchain
 and dependencies. Dropping a supported Go line is a compatibility change and
 must be called out in release notes.
 

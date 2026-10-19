@@ -32,7 +32,7 @@ func NewLock() Lock { return Lock{Version: lockVersion, Files: make(map[string]L
 // ReadLock reads and validates a lock. A missing file is represented by a new
 // empty lock, making first use explicit but convenient.
 func ReadLock(filename string) (Lock, error) {
-	data, err := os.ReadFile(filename)
+	data, err := os.ReadFile(filename) // #nosec G304 -- Local CLI reads an operator-selected project or artifact path.
 	if os.IsNotExist(err) {
 		return NewLock(), nil
 	}

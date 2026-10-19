@@ -38,7 +38,7 @@ func SelfSignedServer() (*tls.Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &tls.Config{Certificates: []tls.Certificate{{
+	return &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{{
 		Certificate: [][]byte{der},
 		PrivateKey:  key,
 	}}}, nil

@@ -10,15 +10,24 @@ import (
 	"net/http"
 
 	qh3 "github.com/quic-go/quic-go/http3"
+	"github.com/saramand9/kpro/examples/internal/examplecert"
 )
 
 func main() {
 	base := flag.String("base", "https://127.0.0.1:8443", "server base url")
 	text := flag.String("text", "hello http3", "echo payload")
+	caFile := flag.String("ca", "", "PEM CA file (default: system trust)")
+	insecure := flag.Bool("insecure", false, "skip TLS verification for local self-signed demos only")
 	flag.Parse()
 
+	tlsConfig, err := examplecert.Client(*caFile, *insecure)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	tlsConfig.MinVersion = tls.VersionTLS13
 	roundTripper := &qh3.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // example-only local certificate
+		TLSClientConfig: tlsConfig,
 	}
 	defer roundTripper.Close()
 	client := &http.Client{Transport: roundTripper}

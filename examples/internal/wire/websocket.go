@@ -6,7 +6,7 @@ package wire
 import (
 	"bufio"
 	"crypto/rand"
-	"crypto/sha1"
+	"crypto/sha1" // #nosec G505 -- RFC 6455 mandates SHA-1 for the WebSocket handshake accept value.
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
@@ -161,6 +161,6 @@ func websocketKey() (string, error) {
 }
 
 func websocketAccept(key string) string {
-	sum := sha1.Sum([]byte(key + wsMagic))
+	sum := sha1.Sum([]byte(key + wsMagic)) // #nosec G401 -- RFC 6455 mandates SHA-1 here; this digest is not an authentication primitive.
 	return base64.StdEncoding.EncodeToString(sum[:])
 }

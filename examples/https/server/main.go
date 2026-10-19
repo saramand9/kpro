@@ -89,7 +89,7 @@ func selfSignedCert() (string, string, func(), error) {
 	}
 	certFile := filepath.Join(dir, "cert.pem")
 	keyFile := filepath.Join(dir, "key.pem")
-	certOut, err := os.Create(certFile)
+	certOut, err := os.Create(certFile) // #nosec G304 -- Example certificate files are created under an application-owned temporary directory.
 	if err != nil {
 		cleanup()
 		return "", "", nil, err
@@ -101,7 +101,7 @@ func selfSignedCert() (string, string, func(), error) {
 	}
 	_ = certOut.Close()
 
-	keyOut, err := os.OpenFile(keyFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	keyOut, err := os.OpenFile(keyFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600) // #nosec G304 -- Example certificate files are created under an application-owned temporary directory.
 	if err != nil {
 		cleanup()
 		return "", "", nil, err

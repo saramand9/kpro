@@ -555,7 +555,7 @@ func resolveKProReplace(configured string) (string, error) {
 }
 
 func validateKProRoot(path string) error {
-	data, err := os.ReadFile(filepath.Join(path, "go.mod"))
+	data, err := os.ReadFile(filepath.Join(path, "go.mod")) // #nosec G304 -- Local CLI reads an operator-selected project or artifact path.
 	if err != nil {
 		return fmt.Errorf("KPro checkout %q: read go.mod: %w", path, err)
 	}
@@ -631,7 +631,7 @@ func ensureMissingTarget(target string) error {
 
 func createScaffoldStage(target string) (string, error) {
 	parent := filepath.Dir(target)
-	if err := os.MkdirAll(parent, 0o755); err != nil {
+	if err := os.MkdirAll(parent, 0o755); err != nil { // #nosec G301 -- Generated source directories intentionally allow read and traversal, without group or other write access.
 		return "", fmt.Errorf("create scaffold parent: %w", err)
 	}
 	pattern := ".kpro-" + goIdentifier(filepath.Base(target)) + "-*"
@@ -643,7 +643,7 @@ func createScaffoldStage(target string) (string, error) {
 }
 
 func commitScaffoldStage(stage, target string) error {
-	if err := os.Chmod(stage, 0o755); err != nil {
+	if err := os.Chmod(stage, 0o755); err != nil { // #nosec G302 -- Published scaffold is a source directory requiring traversal, without group or other write access.
 		return fmt.Errorf("set published scaffold permissions: %w", err)
 	}
 	if current, err := os.Lstat(target); err == nil {
@@ -735,14 +735,14 @@ func writeScaffoldFiles(root string, files []codegen.File) error {
 			return fmt.Errorf("unsafe planned scaffold target %q: %w", candidate.Path, err)
 		}
 		path := filepath.Join(root, filepath.FromSlash(target))
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { // #nosec G301 -- Generated source directories intentionally allow read and traversal, without group or other write access.
 			return fmt.Errorf("create parent directory for %s: %w", target, err)
 		}
 		mode := candidate.Mode
 		if mode == 0 {
 			mode = 0o644
 		}
-		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode) // #nosec G304 -- Local CLI reads an operator-selected project or artifact path.
 		if err != nil {
 			return fmt.Errorf("create %s: %w", target, err)
 		}
