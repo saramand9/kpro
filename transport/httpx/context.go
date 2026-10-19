@@ -9,6 +9,9 @@ import (
 
 // Context is backed by net/http. Body caches the request body on first read so
 // handlers can call Body and CopyBody in either order.
+// Context responses default an unspecified Content-Type to application/octet-stream
+// and set X-Content-Type-Options: nosniff. Applications explicitly serving HTML
+// must escape untrusted input; response bytes are never rewritten.
 type Context struct {
 	w           http.ResponseWriter
 	r           *http.Request
@@ -58,6 +61,15 @@ func (c *Context) Header() http.Header {
 func (c *Context) WriteHeader(status int) {
 	if c.wroteHeader {
 		return
+	}
+	// Unspecified response types must not be inferred from untrusted bytes.
+	// Applications serving HTML must select that type and escape their input.
+	header := c.w.Header()
+	if header.Get("Content-Type") == "" {
+		header.Set("Content-Type", "application/octet-stream")
+	}
+	if header.Get("X-Content-Type-Options") != "nosniff" {
+		header.Set("X-Content-Type-Options", "nosniff")
 	}
 	c.wroteHeader = true
 	c.status = status
