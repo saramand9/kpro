@@ -32,7 +32,7 @@ func (GreeterService) GetNameLength(_ context.Context, req *wrapperspb.StringVal
 	if len(req.Value) > math.MaxInt32 {
 		return nil, status.Error(codes.ResourceExhausted, "name length exceeds int32")
 	}
-	return wrapperspb.Int32(int32(len(req.Value))), nil
+	return wrapperspb.Int32(int32(len(req.Value))), nil // #nosec G115 -- Nonnegative length is checked against MaxInt32 above.
 }
 
 func (GreeterService) EchoBytes(_ context.Context, req *wrapperspb.BytesValue) (*wrapperspb.BytesValue, error) {

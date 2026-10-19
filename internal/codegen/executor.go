@@ -269,7 +269,8 @@ func execute(plan Plan, options Options, transactionOps fileTransactionOps) (Res
 		})
 	}
 	if _, statErr := os.Stat(root); os.IsNotExist(statErr) {
-		if mkdirErr := os.MkdirAll(root, 0o755); mkdirErr != nil { // #nosec G301 -- Generated source directories intentionally allow read and traversal, without group or other write access.
+		// #nosec G301 -- Generated source directories intentionally allow read and traversal, without group or other write access.
+		if mkdirErr := os.MkdirAll(root, 0o755); mkdirErr != nil {
 			return Result{}, fmt.Errorf("create codegen root: %w", mkdirErr)
 		}
 	} else if statErr != nil {

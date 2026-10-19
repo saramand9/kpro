@@ -129,7 +129,8 @@ func (k KProV1Codec) DecodePacket(data []byte) (core.Message, error) {
 		return core.Message{}, ErrFrameTooLarge
 	}
 	available := len(data) - FrameHeaderSize
-	if uint64(length) > uint64(available) { // #nosec G115 -- The header-length guard makes available nonnegative.
+	// #nosec G115 -- The header-length guard makes available nonnegative.
+	if uint64(length) > uint64(available) {
 		if available == 0 {
 			return core.Message{}, io.EOF
 		}

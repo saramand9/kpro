@@ -556,7 +556,7 @@ func verifyZipArchive(archivePath, archiveName string, required map[string]struc
 			archiveName,
 			entry.Name,
 			entry.FileInfo().Mode().IsRegular(),
-			int64(entry.UncompressedSize64),
+			int64(entry.UncompressedSize64), // #nosec G115 -- The entry size is bounded to 512 MiB above before conversion.
 			required,
 			seen,
 		); err != nil {
@@ -574,6 +574,7 @@ func verifyZipArchive(archivePath, archiveName string, required map[string]struc
 		if closeErr != nil {
 			return fmt.Errorf("close archive %q entry %q: %w", archiveName, entry.Name, closeErr)
 		}
+		// #nosec G115 -- The entry size is bounded to 512 MiB above before conversion.
 		if written != int64(entry.UncompressedSize64) {
 			return fmt.Errorf(
 				"archive %q entry %q has size %d, read %d",
@@ -632,7 +633,8 @@ func verifyNativeVersion(dist string, archive artifact, tag, expectedCommit stri
 		return err
 	}
 	if archive.GoOS != "windows" {
-		if err := os.Chmod(binaryPath, 0o700); err != nil { // #nosec G302 -- Owner-only executable in a private temporary directory.
+		// #nosec G302 -- Owner-only executable in a private temporary directory.
+		if err := os.Chmod(binaryPath, 0o700); err != nil {
 			return fmt.Errorf("make release binary executable: %w", err)
 		}
 	}

@@ -473,7 +473,8 @@ func writeAddStageFile(root, name string, content []byte, mode fs.FileMode, excl
 		return err
 	}
 	target := filepath.Join(root, filepath.FromSlash(portable))
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil { // #nosec G301 -- Generated source directories intentionally allow read and traversal, without group or other write access.
+	// #nosec G301 -- Generated source directories intentionally allow read and traversal, without group or other write access.
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return fmt.Errorf("create parent for %q: %w", portable, err)
 	}
 	flags := os.O_WRONLY | os.O_CREATE | os.O_TRUNC

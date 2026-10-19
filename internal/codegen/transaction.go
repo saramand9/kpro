@@ -576,7 +576,8 @@ func createTransactionDirectories(root string, prepared []*preparedMutation) ([]
 				cleanupCreatedDirectories(created),
 			)
 		}
-		if err := os.Mkdir(directory, 0o755); err != nil { // #nosec G301 -- Generated source directories intentionally allow read and traversal, without group or other write access.
+		// #nosec G301 -- Generated source directories intentionally allow read and traversal, without group or other write access.
+		if err := os.Mkdir(directory, 0o755); err != nil {
 			return created, errors.Join(
 				fmt.Errorf("create transaction output directory %q: %w", directory, err),
 				cleanupCreatedDirectories(created),
