@@ -1,12 +1,40 @@
 package httpx
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+type emptyWriteProbe struct {
+	header   http.Header
+	writes   int
+	writeErr error
+}
+
+func (w *emptyWriteProbe) Header() http.Header { return w.header }
+func (*emptyWriteProbe) WriteHeader(int)       {}
+func (w *emptyWriteProbe) Write(body []byte) (int, error) {
+	w.writes++
+	return len(body), w.writeErr
+}
+
+func TestContextHeaderOnlyAndEmptyWriteResults(t *testing.T) {
+	wantErr := errors.New("writer rejected empty body")
+	writer := &emptyWriteProbe{header: make(http.Header), writeErr: wantErr}
+	ctx := &Context{w: writer}
+	ctx.WriteHeader(http.StatusAccepted)
+	ctx.WriteHeader(http.StatusInternalServerError)
+	if writer.writes != 0 || ctx.status != http.StatusAccepted {
+		t.Fatalf("header-only call wrote a body or changed status: writes=%d status=%d", writer.writes, ctx.status)
+	}
+	if n, err := ctx.Write(nil); n != 0 || !errors.Is(err, wantErr) || writer.writes != 1 {
+		t.Fatalf("empty Write result = (%d, %v), writes=%d", n, err, writer.writes)
+	}
+}
 
 func TestRawResponseDoesNotSniffRequestBodyAsHTML(t *testing.T) {
 	const payload = "<!DOCTYPE html><script>alert('reflected')</script>"

@@ -193,3 +193,11 @@ PR 新增告警列表为空，不代表完整默认分支无告警。`9eabc7a` �
 显式选择 HTML 的应用仍需转义不可信输入；框架不应改变原始响应字节来代替
 应用的 HTML 模板和转义策略。后续验收应同时核对工作流结果、PR 新增告警和
 默认分支完整告警列表，不能只以任务退出码推断扫描告警已清零。
+
+默认值修正后，真实 HTTP、HTTP3/SSE race 及既有 HTTP 基准预算通过，但
+默认分支仍报告同一对原始字节写入告警。核对告警版本的
+[CodeQL net/http 模型](https://github.com/github/codeql/blob/a7057b836bf29767461026718b14d20790b9085f/go/ql/lib/semmle/go/frameworks/stdlib/NetHttp.qll)
+可见其通过局部响应 writer 关联 Header 与 Write，无法识别这里跨 Context
+辅助方法提交的响应头。后续将头提交和原始字节写入集中到同一内部边界，
+保持 header-only、Write(nil)、返回错误、显式类型、文本和流式快路径的语义；
+不关闭查询，也不更改原始响应内容。完整默认分支复扫结论另行核对。
