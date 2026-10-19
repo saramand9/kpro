@@ -153,7 +153,7 @@ replacement. Before distributing the generated module, remove the local
 path. A versioned CLI install uses:
 
 ```sh
-go install github.com/saramand9/kpro/cmd/kpro@v0.2.0
+go install github.com/saramand9/kpro/cmd/kpro@v0.2.1
 ```
 
 The public v0.2.0 path has been verified through the official Go module proxy,
