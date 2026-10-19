@@ -1,8 +1,8 @@
 # KPro 开源发布准备
 
-KPro 以 pre-1.0 开发者版本开放试用。当前准备目标为 `v0.2.0` 候选版，
-原因是 `main` 包含相对 `v0.1.0` 不兼容的 API 变更。候选版本不表示已发布，
-也不表示生产级 v1 验收通过。
+KPro 以 pre-1.0 开发者版本开放试用。本页记录 `v0.2.0` 的发布准备与验证，
+该 minor 包含相对 `v0.1.0` 不兼容的 API 变更。公开标签和检查通过不表示
+生产级 v1 验收通过；发布产物状态见文末的 Release 工作流。
 
 ## 公开仓库之前
 
@@ -23,19 +23,19 @@ KPro 以 pre-1.0 开发者版本开放试用。当前准备目标为 `v0.2.0` �
 [安全工作流](../.github/workflows/security.yml) 和
 [API 发布清单](api-stability.md#release-checklist) 作为检查入口。
 
-- [ ] 全量测试、核心 race、TCP 确定性故障注入、vet、格式检查通过。
-- [ ] `go mod verify`、`go mod tidy -diff`、无本地 replace/exclude 检查通过。
-- [ ] 纯 Go 编译、漏洞检查、代码安全扫描、生成检查及性能预算通过。
-- [ ] 根模块与 `benchmark/compare` 分别验证。
-- [ ] Linux CI、支持的 Go 版本与真实数据库集成检查通过，并记录 CI 链接。
-- [ ] 路线图中的 TCP 批写契约修正具有回归证据；性能影响仍须按路线图验证。
-- [ ] 对未执行或失败项明确记录，不能使用历史通过结果替代。
+- [x] 全量测试、核心 race、TCP 确定性故障注入、vet、格式检查通过。
+- [x] `go mod verify`、`go mod tidy -diff`、无本地 replace/exclude 检查通过。
+- [x] 纯 Go 编译、漏洞检查、代码安全扫描、生成检查及性能预算通过。
+- [x] 根模块与 `benchmark/compare` 分别验证。
+- [x] Linux CI、支持的 Go 版本与真实数据库集成检查通过，并记录 CI 链接。
+- [x] 路线图中的 TCP 批写契约修正具有回归证据；性能影响仍须按路线图验证。
+- [x] 对未执行或失败项明确记录，不能使用历史通过结果替代。
 
 ## 外部用户入门
 
-- [ ] 用仓库外的新目录跑通 HTTP scaffold、生成检查、编译及实际请求。
-- [ ] 发布后在无本地 replace 的独立目录验证精确版本的 `go get` 和 CLI 安装。
-- [ ] README、快速入门、版本说明和模块版本一致。
+- [x] 用仓库外的新目录跑通 HTTP scaffold、生成检查、编译及实际请求。
+- [x] 公开标签后在无本地 replace 的独立目录验证精确版本的 `go get` 和 CLI 安装。
+- [x] README、快速入门、版本说明和模块版本一致。
 - [ ] 邀请外部开发者独立执行入门流程，修复阻碍使用的问题。
 
 源码模式生成的项目会引用本地 KPro；它只能验证当前 checkout。
@@ -49,8 +49,8 @@ KPro 以 pre-1.0 开发者版本开放试用。当前准备目标为 `v0.2.0` �
 - [x] 启用私密漏洞报告，验证 `SECURITY.md` 的入口可用。
 - [x] 设置简介、Topics 和基本 Issue 标签；文档入口在 README。
 - [x] 确认安全维护范围；下一 minor 发布时同步更新 `SECURITY.md`。
-- [ ] 完成并复核 `v0.2.0` 发布说明，选定通过检查的提交。
-- [ ] 创建 annotated tag 并触发现有 release 工作流，验证归档、校验和及 SBOM。
+- [x] 完成并复核 `v0.2.0` 发布说明，选定通过检查的提交。
+- [x] 创建 annotated tag 并触发现有 release 工作流，验证归档、校验和及 SBOM。
 - [ ] 验证发布后的安装和示例，再发布介绍文章。
 
 现有 release 工作流会在检查和产物验证后自动公开 Release；推送标签属于发布动作。
@@ -145,3 +145,51 @@ gRPC v1.83.1 修复 OOM，但仍受 GO-2026-6443 影响，因此采用 v1.83.2�
 
 发布前须让修正后的 PR 通过所有检查，再选取合并提交创建 annotated tag。
 代表性负载性能对比和独立外部试用仍未完成；公开仓库与安全检查不代表生产级 v1。
+
+## v0.2.0 标签与公开安装验证
+
+2026-10-19，[PR #56](https://github.com/saramand9/kpro/pull/56) 的 9 项检查
+全部通过后合并为 `9eabc7a6aa570a74c234d6975c0ef78e68af58d8`。
+合并提交的源码树与已验证的 `4df6ad8` 一致。
+
+- [PR CI](https://github.com/saramand9/kpro/actions/runs/39213823126)：完整测试、
+  race、vet、覆盖率、热路径预算、生成项目、数据库集成、Windows 和两个 Go 版本通过。
+- [PR Security](https://github.com/saramand9/kpro/actions/runs/39213823124)：
+  凭据历史、gosec、可达漏洞检查及 CodeQL 通过；PR 的代码扫描无 open 告警。
+  gosec 保留逐处审查的本地 CLI 路径/工具、受检转换及 RFC 6455 SHA-1 例外，
+  没有全局关闭规则。对照模块只有测试源码，默认 gosec 不扫描测试；其编译、vet
+  和漏洞检查另有 CI 覆盖，CodeQL 编译对照测试二进制而不运行基准。
+- Windows amd64、Go 1.26.9、CGO_ENABLED=0 的完整本地测试和 vet 通过；
+  新增 TLS 信任、解压限制回归和 Windows 386 codec 边界测试通过。
+- annotated tag `v0.2.0` 已推送，
+  [Release 工作流](https://github.com/saramand9/kpro/actions/runs/39215248246)
+  全部通过并公开 [v0.2.0](https://github.com/saramand9/kpro/releases/tag/v0.2.0)。
+  Linux、Windows、Darwin 的 amd64/arm64 共 6 个归档、SHA-256 校验和及 6 个
+  SBOM 通过发布工具检查；另外提供 GitHub 自动生成的两个源码归档。
+- 官方模块代理的 v0.2.0 元数据返回上述合并提交，公开路径为
+  `github.com/saramand9/kpro`。
+- 仓库外新目录执行 `go get github.com/saramand9/kpro@v0.2.0` 和
+  `go install github.com/saramand9/kpro/cmd/kpro@v0.2.0` 均通过。
+  `GOPROXY=https://proxy.golang.org,direct`、`GOSUMDB=sum.golang.org`，未禁用校验；
+  本机 Go 进程需沿用既有 Windows 系统代理才能连接这两个官方服务，未修改全局设置。
+- 已安装 CLI 创建独立 HTTP service，依赖精确 v0.2.0，无本地 replace。
+  tidy、依赖验证、全部包编译测试、`generate --check` 通过；实际 `/healthz`
+  返回 HTTP 200 和 `{"dependencies":"none","status":"ready"}`。
+- pkg.go.dev 当次尚未收录该版本，手动收录请求及额外的 GitHub Dependency graph /
+  Dependabot alerts 设置等待维护者单独授权；未把它们记为已完成。
+
+独立外部使用者试点和介绍文章的发布渠道仍需维护者提供。现有验证证明开发者版本
+可安装和运行；M0 的代表性业务负载对比及后续生产验收保持未完成。
+
+### 默认分支首次完整 CodeQL 的后续发现
+
+PR 新增告警列表为空，不代表完整默认分支无告警。`9eabc7a` 的首次默认分支
+扫描随后报告 [#1](https://github.com/saramand9/kpro/security/code-scanning/1) 和
+[#2](https://github.com/saramand9/kpro/security/code-scanning/2) 两条反射 XSS 告警。
+实际 HTTP 回归确认：`Write`、`Bytes`、`Stream`、`CopyBody` 未设置响应类型时，
+回显的 HTML 会被识别为 `text/html`。本次修正默认二进制响应类型并设置 nosniff，
+准备以 v0.2.1 安全补丁交付，不重写已公开的 v0.2.0 标签。
+
+显式选择 HTML 的应用仍需转义不可信输入；框架不应改变原始响应字节来代替
+应用的 HTML 模板和转义策略。后续验收应同时核对工作流结果、PR 新增告警和
+默认分支完整告警列表，不能只以任务退出码推断扫描告警已清零。

@@ -24,6 +24,24 @@ SSE 和 gRPC，并提供可选 fasthttp 集成。协议实现和仓库测试不�
 [API 稳定性政策](docs/api-stability.md)。生产级 v1 的验收进度见
 [路线图](docs/production-v1-roadmap.md)。
 
+## 使用发布版本
+
+需要 Go 1.26.9 或更新的兼容工具链。在 KPro checkout 之外执行：
+
+```sh
+go install github.com/saramand9/kpro/cmd/kpro@v0.2.0
+kpro new hello-kpro --module example.com/hello-kpro \
+  --name hello-kpro --profile service --api http
+cd hello-kpro
+go mod tidy
+kpro generate --check
+go test ./...
+go run ./cmd/hello-kpro
+```
+
+生成项目固定依赖 v0.2.0，无本地 `replace`。访问
+`http://127.0.0.1:8080/healthz` 检查就绪状态。公开模块不需要设置 `GOPRIVATE`。
+
 ## 从源码运行
 
 需要 Go 1.26.9 或更新的兼容工具链，以及可用的 8080 端口。

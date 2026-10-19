@@ -72,8 +72,9 @@ application or platform responsibilities.
 | Prepare an open-source release | [Open-source release checklist](docs/open-source-release.md) |
 | Add a transport, middleware, codec, or database adapter | [Extending KPro](docs/extending-kpro.md) |
 
-The current documentation tracks unreleased `main`. Create a starter service
-from this checkout:
+The documentation tracks its source revision; use the `v0.2.0` tag for that
+release, while `main` may include later work. Create a starter service from
+this checkout:
 
 ```sh
 go run ./cmd/kpro new ../hello-kpro --module example.com/hello-kpro \
@@ -86,18 +87,19 @@ scaffolding deliberately adds a local KPro `replace` to the generated
 application so it can build against the checkout. Remove that replacement and
 pin a reachable release before distributing the generated module.
 
-A versioned CLI install is valid only after the selected tag is available
-through the module's declared path:
+Install the published CLI from outside a KPro checkout to scaffold against
+the exact release without a local replacement:
 
 ```sh
-go install github.com/saramand9/kpro/cmd/kpro@vX.Y.Z
+go install github.com/saramand9/kpro/cmd/kpro@v0.2.0
+kpro new hello-kpro --module example.com/hello-kpro \
+  --name hello-kpro --profile service --api http
 ```
 
-For a private source, configure VCS credentials and `GOPRIVATE` for that module
-path. `GOPRIVATE` does not authenticate Git access. Until the declared path and
-tag are reachable, use `go run ./cmd/kpro` from a reviewed checkout or a
-verified release archive; a successful local checkout build does not prove the
-versioned install path.
+The public release does not require `GOPRIVATE`. Private forks require their
+own VCS credentials and module-path configuration; `GOPRIVATE` does not
+authenticate Git access. See the [release validation record](docs/open-source-release.md)
+for the independent-directory install and HTTP smoke results.
 
 Current unified `service` projects can add gRPC later without rewriting the
 application entry point:
