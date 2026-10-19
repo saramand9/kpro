@@ -59,26 +59,34 @@ func (c *Context) Header() http.Header {
 }
 
 func (c *Context) WriteHeader(status int) {
-	if c.wroteHeader {
-		return
-	}
-	// Unspecified response types must not be inferred from untrusted bytes.
-	// Applications serving HTML must select that type and escape their input.
-	header := c.w.Header()
-	if header.Get("Content-Type") == "" {
-		header.Set("Content-Type", "application/octet-stream")
-	}
-	if header.Get("X-Content-Type-Options") != "nosniff" {
-		header.Set("X-Content-Type-Options", "nosniff")
-	}
-	c.wroteHeader = true
-	c.status = status
-	c.w.WriteHeader(status)
+	// Header-only calls never invoke the underlying writer's Write method.
+	_, _ = c.writeResponse(status, nil, false)
 }
 
 func (c *Context) Write(body []byte) (int, error) {
+	return c.writeResponse(http.StatusOK, body, true)
+}
+
+// writeResponse keeps header policy and byte writes at one response boundary.
+// writeBody distinguishes Write(nil), which must forward its writer result,
+// from a header-only call. Text and streaming retain their native fast paths.
+func (c *Context) writeResponse(status int, body []byte, writeBody bool) (int, error) {
 	if !c.wroteHeader {
-		c.WriteHeader(http.StatusOK)
+		// Unspecified types must not be inferred from untrusted bytes. An
+		// application explicitly serving HTML must escape its input.
+		header := c.w.Header()
+		if header.Get("Content-Type") == "" {
+			header.Set("Content-Type", "application/octet-stream")
+		}
+		if header.Get("X-Content-Type-Options") != "nosniff" {
+			header.Set("X-Content-Type-Options", "nosniff")
+		}
+		c.wroteHeader = true
+		c.status = status
+		c.w.WriteHeader(status)
+	}
+	if !writeBody {
+		return 0, nil
 	}
 	return c.w.Write(body)
 }
@@ -158,11 +166,7 @@ func (c *Context) ContentLength() int {
 
 func (c *Context) Bytes(status int, contentType string, body []byte) error {
 	c.setContentType(contentType)
-	c.WriteHeader(status)
-	if len(body) == 0 {
-		return nil
-	}
-	_, err := c.w.Write(body)
+	_, err := c.writeResponse(status, body, len(body) > 0)
 	return err
 }
 
@@ -184,11 +188,7 @@ func (c *Context) CopyBody(status int, contentType string) error {
 		return err
 	}
 	c.setContentType(contentType)
-	c.WriteHeader(status)
-	if len(body) == 0 {
-		return nil
-	}
-	_, err = c.w.Write(body)
+	_, err = c.writeResponse(status, body, len(body) > 0)
 	return err
 }
 
@@ -205,8 +205,7 @@ func (c *Context) JSON(status int, value interface{}) error {
 		return err
 	}
 	c.setContentType("application/json; charset=utf-8")
-	c.WriteHeader(status)
-	_, err = c.w.Write(body)
+	_, err = c.writeResponse(status, body, true)
 	return err
 }
 
