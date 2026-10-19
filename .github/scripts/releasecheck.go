@@ -111,7 +111,7 @@ func verifyArtifacts(dist, tag, expectedCommit string) error {
 	if expectedCommit == "" {
 		return errors.New("release commit is empty")
 	}
-	data, err := os.ReadFile(filepath.Join(dist, "artifacts.json"))
+	data, err := os.ReadFile(filepath.Join(dist, "artifacts.json")) // #nosec G304 -- Local CLI reads an operator-selected project or artifact path.
 	if err != nil {
 		return fmt.Errorf("read artifact catalog: %w", err)
 	}
@@ -283,7 +283,7 @@ func verifyChecksums(
 	if err != nil {
 		return err
 	}
-	file, err := os.Open(checksumPath)
+	file, err := os.Open(checksumPath) // #nosec G304 -- Local CLI reads an operator-selected project or artifact path.
 	if err != nil {
 		return fmt.Errorf("open checksums: %w", err)
 	}
@@ -363,7 +363,7 @@ func verifySBOM(dist string, item artifact) error {
 	if err != nil {
 		return err
 	}
-	data, err := os.ReadFile(sbomPath)
+	data, err := os.ReadFile(sbomPath) // #nosec G304 -- Local CLI reads an operator-selected project or artifact path.
 	if err != nil {
 		return fmt.Errorf("read SBOM %q: %w", item.Name, err)
 	}
@@ -455,6 +455,9 @@ func validateArchiveEntry(
 	if size <= 0 {
 		return fmt.Errorf("archive %q entry %q is empty", archiveName, entryName)
 	}
+	if size > maxArchiveEntryBytes {
+		return fmt.Errorf("archive %q entry %q exceeds size limit", archiveName, entryName)
+	}
 	seen[entryName] = struct{}{}
 	return nil
 }
@@ -473,8 +476,28 @@ func verifyArchiveCoverage(archiveName string, required, seen map[string]struct{
 	return fmt.Errorf("archive %q is missing entries %v", archiveName, missing)
 }
 
+// Release archives contain a CLI binary and small documentation files. Bound
+// both individual entries and the whole decompressed stream, including padding.
+const maxArchiveEntryBytes int64 = 512 << 20
+const maxArchiveStreamBytes int64 = 2 << 30
+
+func copyArchiveEntry(dst io.Writer, src io.Reader) (int64, error) {
+	return copyArchiveBytes(dst, src, maxArchiveEntryBytes)
+}
+
+func copyArchiveBytes(dst io.Writer, src io.Reader, limit int64) (int64, error) {
+	written, err := io.Copy(dst, io.LimitReader(src, limit+1))
+	if err != nil {
+		return written, err
+	}
+	if written > limit {
+		return written, fmt.Errorf("archive entry exceeds %d bytes", limit)
+	}
+	return written, nil
+}
+
 func verifyTarGzArchive(archivePath, archiveName string, required map[string]struct{}) error {
-	file, err := os.Open(archivePath)
+	file, err := os.Open(archivePath) // #nosec G304 -- Local CLI reads an operator-selected project or artifact path.
 	if err != nil {
 		return fmt.Errorf("open archive %q: %w", archiveName, err)
 	}
@@ -486,7 +509,8 @@ func verifyTarGzArchive(archivePath, archiveName string, required map[string]str
 	defer gzipReader.Close()
 
 	seen := make(map[string]struct{}, len(required))
-	tarReader := tar.NewReader(gzipReader)
+	limited := &io.LimitedReader{R: gzipReader, N: maxArchiveStreamBytes + 1}
+	tarReader := tar.NewReader(limited)
 	for {
 		header, err := tarReader.Next()
 		if errors.Is(err, io.EOF) {
@@ -499,7 +523,7 @@ func verifyTarGzArchive(archivePath, archiveName string, required map[string]str
 		if err := validateArchiveEntry(archiveName, header.Name, regular, header.Size, required, seen); err != nil {
 			return err
 		}
-		written, err := io.Copy(io.Discard, tarReader)
+		written, err := copyArchiveEntry(io.Discard, tarReader)
 		if err != nil {
 			return fmt.Errorf("read archive %q entry %q: %w", archiveName, header.Name, err)
 		}
@@ -507,8 +531,11 @@ func verifyTarGzArchive(archivePath, archiveName string, required map[string]str
 			return fmt.Errorf("archive %q entry %q has size %d, read %d", archiveName, header.Name, header.Size, written)
 		}
 	}
-	if _, err := io.Copy(io.Discard, gzipReader); err != nil {
+	if _, err := io.Copy(io.Discard, limited); err != nil {
 		return fmt.Errorf("finish reading archive %q gzip stream: %w", archiveName, err)
+	}
+	if limited.N == 0 {
+		return fmt.Errorf("archive %q exceeds decompressed stream limit", archiveName)
 	}
 	return verifyArchiveCoverage(archiveName, required, seen)
 }
@@ -522,11 +549,14 @@ func verifyZipArchive(archivePath, archiveName string, required map[string]struc
 
 	seen := make(map[string]struct{}, len(required))
 	for _, entry := range reader.File {
+		if entry.UncompressedSize64 > uint64(maxArchiveEntryBytes) {
+			return fmt.Errorf("archive %q entry %q exceeds size limit", archiveName, entry.Name)
+		}
 		if err := validateArchiveEntry(
 			archiveName,
 			entry.Name,
 			entry.FileInfo().Mode().IsRegular(),
-			int64(entry.UncompressedSize64),
+			int64(entry.UncompressedSize64), // #nosec G115 -- The entry size is bounded to 512 MiB above before conversion.
 			required,
 			seen,
 		); err != nil {
@@ -536,7 +566,7 @@ func verifyZipArchive(archivePath, archiveName string, required map[string]struc
 		if err != nil {
 			return fmt.Errorf("open archive %q entry %q: %w", archiveName, entry.Name, err)
 		}
-		written, copyErr := io.Copy(io.Discard, file)
+		written, copyErr := copyArchiveEntry(io.Discard, file)
 		closeErr := file.Close()
 		if copyErr != nil {
 			return fmt.Errorf("read archive %q entry %q: %w", archiveName, entry.Name, copyErr)
@@ -544,7 +574,8 @@ func verifyZipArchive(archivePath, archiveName string, required map[string]struc
 		if closeErr != nil {
 			return fmt.Errorf("close archive %q entry %q: %w", archiveName, entry.Name, closeErr)
 		}
-		if uint64(written) != entry.UncompressedSize64 {
+		// #nosec G115 -- The entry size is bounded to 512 MiB above before conversion.
+		if written != int64(entry.UncompressedSize64) {
 			return fmt.Errorf(
 				"archive %q entry %q has size %d, read %d",
 				archiveName,
@@ -558,7 +589,7 @@ func verifyZipArchive(archivePath, archiveName string, required map[string]struc
 }
 
 func fileSHA256(path string) (string, error) {
-	file, err := os.Open(path)
+	file, err := os.Open(path) // #nosec G304 -- Local CLI reads an operator-selected project or artifact path.
 	if err != nil {
 		return "", fmt.Errorf("open %q for hashing: %w", path, err)
 	}
@@ -602,11 +633,12 @@ func verifyNativeVersion(dist string, archive artifact, tag, expectedCommit stri
 		return err
 	}
 	if archive.GoOS != "windows" {
-		if err := os.Chmod(binaryPath, 0o755); err != nil {
+		// #nosec G302 -- Owner-only executable in a private temporary directory.
+		if err := os.Chmod(binaryPath, 0o700); err != nil {
 			return fmt.Errorf("make release binary executable: %w", err)
 		}
 	}
-	output, err := exec.Command(binaryPath, "version").CombinedOutput()
+	output, err := exec.Command(binaryPath, "version").CombinedOutput() // #nosec G204 -- Deliberately executes the locally built release artifact from a private temporary directory.
 	if err != nil {
 		return fmt.Errorf("run release binary version command: %w: %s", err, output)
 	}
@@ -639,7 +671,7 @@ func extractNativeBinary(archivePath string, native target, targetPath string) e
 }
 
 func extractTarGzFile(archivePath, wantedBase, targetPath string) error {
-	file, err := os.Open(archivePath)
+	file, err := os.Open(archivePath) // #nosec G304 -- Local CLI reads an operator-selected project or artifact path.
 	if err != nil {
 		return fmt.Errorf("open native archive: %w", err)
 	}
@@ -649,7 +681,8 @@ func extractTarGzFile(archivePath, wantedBase, targetPath string) error {
 		return fmt.Errorf("open native archive gzip stream: %w", err)
 	}
 	defer gzipReader.Close()
-	tarReader := tar.NewReader(gzipReader)
+	limited := &io.LimitedReader{R: gzipReader, N: maxArchiveStreamBytes + 1}
+	tarReader := tar.NewReader(limited)
 	found := false
 	for {
 		header, err := tarReader.Next()
@@ -658,6 +691,9 @@ func extractTarGzFile(archivePath, wantedBase, targetPath string) error {
 		}
 		if err != nil {
 			return fmt.Errorf("read native archive: %w", err)
+		}
+		if header.Size < 0 || header.Size > maxArchiveEntryBytes {
+			return fmt.Errorf("native archive entry %q exceeds size limit", header.Name)
 		}
 		if header.Name != wantedBase {
 			continue
@@ -668,11 +704,11 @@ func extractTarGzFile(archivePath, wantedBase, targetPath string) error {
 		if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA {
 			return fmt.Errorf("native archive %q entry %q is not a regular file", archivePath, wantedBase)
 		}
-		target, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o755)
+		target, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- Fixed binary basename is extracted exclusively into a private temporary directory.
 		if err != nil {
 			return fmt.Errorf("create extracted release binary: %w", err)
 		}
-		_, copyErr := io.Copy(target, tarReader)
+		_, copyErr := copyArchiveEntry(target, tarReader)
 		closeErr := target.Close()
 		if copyErr != nil {
 			return fmt.Errorf("extract release binary: %w", copyErr)
@@ -681,6 +717,9 @@ func extractTarGzFile(archivePath, wantedBase, targetPath string) error {
 			return fmt.Errorf("close extracted release binary: %w", closeErr)
 		}
 		found = true
+	}
+	if limited.N == 0 {
+		return fmt.Errorf("native archive exceeds decompressed stream limit")
 	}
 	if found {
 		return nil
@@ -711,17 +750,20 @@ func extractZipFile(archivePath, wantedBase, targetPath string) error {
 	if wanted == nil {
 		return fmt.Errorf("native archive %q does not contain %q", archivePath, wantedBase)
 	}
+	if wanted.UncompressedSize64 > uint64(maxArchiveEntryBytes) {
+		return fmt.Errorf("native archive entry %q exceeds size limit", wantedBase)
+	}
 
 	source, err := wanted.Open()
 	if err != nil {
 		return fmt.Errorf("open native archive entry %q: %w", wantedBase, err)
 	}
-	target, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o755)
+	target, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- Fixed binary basename is extracted exclusively into a private temporary directory.
 	if err != nil {
-		source.Close()
+		_ = source.Close() // Preserve the target creation error.
 		return fmt.Errorf("create extracted release binary: %w", err)
 	}
-	_, copyErr := io.Copy(target, source)
+	_, copyErr := copyArchiveEntry(target, source)
 	sourceCloseErr := source.Close()
 	targetCloseErr := target.Close()
 	if copyErr != nil {

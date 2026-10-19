@@ -213,6 +213,12 @@ core/server/transport/observability 的 race 检查，以及 Go 1.27.2 的核心
 
 ## 参考方法
 
+2026-10-19 公开仓库后已取得 `6648bcb` 的干净提交 Linux CI、完整 race、
+性能预算、真实 MySQL/PostgreSQL 集成、Windows 与 Go 1.26.9/1.27.2 通过证据，
+链接及范围见 [开源发布准备](open-source-release.md#公开仓库后的远程验证)。
+该提交的独立安全工作流失败，正在发布准备分支修正，不算发布验收通过。
+P0-1 的代表性业务负载性能对比仍待完成，当前阶段和下一项实施任务保持不变。
+
 - [gRPC Benchmarking](https://grpc.io/docs/guides/benchmarking/)：参考其持续性能
   验证、客户端与服务端分机及多场景测量方法。
 - [Go Compatibility](https://go.dev/doc/go1compat)：参考其兼容承诺、例外和演进边界。

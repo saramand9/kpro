@@ -15,9 +15,9 @@ without changing this startup shape.
   unreleased source.
 - Port `8080` available, or another port supplied with `-addr`.
 
-`v0.1.0` is the initial pre-1.0 developer release. This guide tracks current
-`main`, whose dependency-neutral mounting API is planned for the next minor
-release. Pin one revision and use the documentation from the same revision;
+`v0.1.0` is the initial pre-1.0 developer release. The dependency-neutral
+mounting API is introduced in `v0.2.0`. This guide tracks its source revision;
+`main` may contain later unreleased work. Pin one revision and use the documentation from the same revision;
 review the [API stability policy](api-stability.md) before upgrading.
 
 ## 2. Start the service

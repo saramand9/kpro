@@ -159,7 +159,7 @@ func ParseReader(reader io.Reader) (Document, error) {
 
 // Load reads and parses one message-spec file.
 func Load(filename string) (Document, error) {
-	data, err := os.ReadFile(filename)
+	data, err := os.ReadFile(filename) // #nosec G304 -- Local CLI reads an operator-selected project or artifact path.
 	if err != nil {
 		return Document{}, fmt.Errorf("message codegen: read %q: %w", filename, err)
 	}

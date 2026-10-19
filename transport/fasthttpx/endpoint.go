@@ -406,7 +406,7 @@ func (e *Endpoint) buildServer() *fasthttp.Server {
 		CloseOnShutdown:              true,
 	}
 	if e.config.TLS {
-		server.TLSConfig = &tls.Config{NextProtos: []string{"http/1.1"}}
+		server.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"http/1.1"}}
 	}
 	return server
 }

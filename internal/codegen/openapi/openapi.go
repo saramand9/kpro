@@ -106,7 +106,7 @@ func ParseReader(reader io.Reader) (Document, error) {
 }
 
 func Load(filename string) (Document, error) {
-	data, err := os.ReadFile(filename)
+	data, err := os.ReadFile(filename) // #nosec G304 -- Local CLI reads an operator-selected project or artifact path.
 	if err != nil {
 		return Document{}, fmt.Errorf("openapi: read %q: %w", filename, err)
 	}

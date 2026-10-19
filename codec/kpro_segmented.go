@@ -21,6 +21,6 @@ func WriteKProV1Header(dst []byte, msg core.Message) error {
 	dst[3] = msg.Flags
 	binary.BigEndian.PutUint32(dst[4:8], msg.ID)
 	binary.BigEndian.PutUint64(dst[8:16], msg.Seq)
-	binary.BigEndian.PutUint32(dst[16:20], uint32(len(msg.Data)))
+	binary.BigEndian.PutUint32(dst[16:20], uint32(len(msg.Data))) // #nosec G115 -- Payload length is checked against MaxUint32 before encoding.
 	return nil
 }
