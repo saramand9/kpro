@@ -10,20 +10,12 @@ upgrading between minor versions.
 
 ## Unreleased
 
-### Fixed
-
-- Upgrade the minimum Go toolchain to 1.26.9 and update x/net, x/text, and
-  gRPC to address reachable vulnerability reports. Go 1.25 support is dropped
-  for the next minor release; new service templates use the same baseline.
-
-- TCP queue drains now honor `MaxWriteBatchFrames` as a hard limit under
-  backlog instead of implicitly doubling it. The performance guide documents
-  the current default, coalescing polling, and write-deadline refresh behavior.
+## [0.2.0] - 2026-10-19
 
 ### Added
 
 - Open-source release preparation checklist, a pull request template, and
-  draft migration notes for the next minor release, `v0.2.0`.
+  migration notes for `v0.2.0`.
 
 - A production-v1 roadmap records staged acceptance gates, current evidence
   limits, and the next implementation task. Repository agent instructions now
@@ -175,6 +167,12 @@ upgrading between minor versions.
 
 ### Fixed
 
+- KProV1 stream reads and contiguous encoding reject frame sizes that cannot
+  fit an `int` including the header on 32-bit builds.
+
+- TCP queue drains honor `MaxWriteBatchFrames` as a hard limit under backlog
+  instead of implicitly doubling it. The performance guide documents the
+  default, coalescing polling, and write-deadline refresh behavior.
 - SSE event serialization now treats CR, LF, and CRLF as line boundaries and
   rejects line breaks in event names, preventing unprefixed or injected
   event-stream fields.
@@ -237,9 +235,20 @@ upgrading between minor versions.
 
 ### Security
 
-- Upgraded `google.golang.org/grpc` to v1.82.1 to address GO-2026-6061; the
-  required protobuf, genproto, and OpenTelemetry dependency versions move with
-  that security update.
+- TLS example clients verify server certificates by default and accept explicit
+  `-ca` or local-only `-insecure` flags. Framework-created TLS configurations
+  require TLS 1.2, or TLS 1.3 for QUIC/HTTP3.
+- Release archive verification and extraction enforce entry and decompressed
+  stream limits. Extracted binaries remain owner-only in private directories.
+- Security CI uses the locally verified Gitleaks version and manual Go CodeQL
+  builds. Intentional local CLI filesystem/tool access and RFC 6455 SHA-1 use
+  carry narrow, documented scanner exceptions.
+
+- Require Go 1.26.9 and upgrade x/net to v0.60.0, x/text to v0.42.0, and
+  gRPC to v1.83.2, with their required transitive dependencies, to address
+  reachable vulnerability reports. This includes gRPC GO-2026-6348 and
+  GO-2026-6443. Go 1.25 support is dropped in this minor release; scaffolding
+  templates use the same patched baseline.
 
 ## [0.1.0] - 2026-07-24
 

@@ -164,6 +164,8 @@ func TestSlowConnectionCountRoundsUp(t *testing.T) {
 		{connections: 1_000, percent: 1, want: 10},
 		{connections: 3, percent: 50, want: 2},
 		{connections: 3, percent: 100, want: 3},
+		{connections: int(^uint(0) >> 1), percent: 100, want: int(^uint(0) >> 1)},
+		{connections: int(^uint(0) >> 1), percent: 1, want: int(^uint(0)>>1)/100 + 1},
 	}
 	for _, test := range tests {
 		if got := slowConnectionCount(test.connections, test.percent); got != test.want {

@@ -134,7 +134,7 @@ func (ExecRunner) Run(ctx context.Context, command Command) (RunResult, error) {
 
 	stdout := newCappedBuffer(command.StdoutLimit)
 	stderr := newCappedBuffer(command.StderrLimit)
-	process := exec.CommandContext(ctx, command.Path, command.Args...)
+	process := exec.CommandContext(ctx, command.Path, command.Args...) // #nosec G204 -- Code generation deliberately executes a locally configured tool, without a shell; project configuration must be trusted.
 	process.Dir = command.Dir
 	process.Stdin = bytes.NewReader(command.Stdin)
 	process.Stdout = stdout

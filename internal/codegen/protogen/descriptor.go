@@ -173,7 +173,7 @@ func resolveTool(lookup LookupTool, name string) (string, error) {
 }
 
 func loadDescriptorSet(filename, sourcePath string) (Contract, error) {
-	data, err := os.ReadFile(filename)
+	data, err := os.ReadFile(filename) // #nosec G304 -- Local CLI reads an operator-selected project or artifact path.
 	if err != nil {
 		return Contract{}, fmt.Errorf("read descriptor set: %w", err)
 	}

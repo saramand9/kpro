@@ -269,6 +269,7 @@ func execute(plan Plan, options Options, transactionOps fileTransactionOps) (Res
 		})
 	}
 	if _, statErr := os.Stat(root); os.IsNotExist(statErr) {
+		// #nosec G301 -- Generated source directories intentionally allow read and traversal, without group or other write access.
 		if mkdirErr := os.MkdirAll(root, 0o755); mkdirErr != nil {
 			return Result{}, fmt.Errorf("create codegen root: %w", mkdirErr)
 		}
@@ -387,12 +388,12 @@ func readRegularFile(filename string) ([]byte, bool, error) {
 	if !info.Mode().IsRegular() {
 		return nil, false, fmt.Errorf("codegen output %q is not a regular file", filename)
 	}
-	data, err := os.ReadFile(filename)
+	data, err := os.ReadFile(filename) // #nosec G304 -- Local CLI reads an operator-selected project or artifact path.
 	return data, true, err
 }
 
 func existingBytes(filename string) ([]byte, bool, error) {
-	data, err := os.ReadFile(filename)
+	data, err := os.ReadFile(filename) // #nosec G304 -- Local CLI reads an operator-selected project or artifact path.
 	if os.IsNotExist(err) {
 		return nil, false, nil
 	}

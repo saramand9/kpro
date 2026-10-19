@@ -253,7 +253,7 @@ func readLocalTemplateRegularFile(root, relative string) ([]byte, error) {
 	if err := recheckLocalTemplatePath(checked, portable); err != nil {
 		return nil, err
 	}
-	file, err := os.Open(current)
+	file, err := os.Open(current) // #nosec G304 -- SafeRelativePath, symlink checks and SameFile checks constrain the local template path.
 	if err != nil {
 		return nil, err
 	}

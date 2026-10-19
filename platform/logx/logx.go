@@ -61,7 +61,7 @@ func Init(cfg Config) (*zap.Logger, func(), error) {
 	if err := level.UnmarshalText([]byte(cfg.Level)); err != nil {
 		return nil, nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(cfg.FileName), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(cfg.FileName), 0o750); err != nil {
 		return nil, nil, err
 	}
 

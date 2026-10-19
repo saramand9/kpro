@@ -98,7 +98,7 @@ func selfSignedCert() (string, string, func(), error) {
 }
 
 func writePEM(path string, perm os.FileMode, block *pem.Block) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm) // #nosec G304 -- Example certificate files are created under an application-owned temporary directory.
 	if err != nil {
 		return err
 	}

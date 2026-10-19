@@ -288,7 +288,7 @@ func planPlugin(root string, value manifest.Manifest, source manifest.Source) (c
 	if err != nil {
 		return codegen.Plan{}, fmt.Errorf("resolve plugin source %q: %w", source.Path, err)
 	}
-	sourceContent, err := os.ReadFile(sourceFilename)
+	sourceContent, err := os.ReadFile(sourceFilename) // #nosec G304 -- Local CLI reads an operator-selected project or artifact path.
 	if err != nil {
 		return codegen.Plan{}, fmt.Errorf("read plugin source %q: %w", source.Path, err)
 	}

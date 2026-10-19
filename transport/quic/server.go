@@ -748,6 +748,7 @@ func buildTLSConfig(config Config) (*tls.Config, error) {
 		return nil, err
 	}
 	return &tls.Config{
+		MinVersion:   tls.VersionTLS13,
 		Certificates: []tls.Certificate{cert},
 		NextProtos:   append([]string(nil), config.NextProtos...),
 	}, nil

@@ -16,7 +16,7 @@ server code assembles transports, middleware and routers
 
 ## Status
 
-Current `main` requires Go 1.26.9 or newer. The next minor release drops Go
+`v0.2.0` and current `main` require Go 1.26.9 or newer. This minor release drops Go
 1.25 support to adopt security fixes in the toolchain and dependencies.
 
 Current implementation:
@@ -38,9 +38,8 @@ gRPC        implemented through transport/grpcx and generic server mounting
 
 Implemented means the code path and repository-level tests exist; it is not a
 production certification or a capacity/availability guarantee. `v0.1.0` is the
-initial developer release. Current `main` includes source-incompatible API work
-for the next minor release, so these documents describe `main`, not the
-`v0.1.0` API. Pin an exact version or reviewed commit, use the documentation at
+initial developer release. `v0.2.0` introduces source-incompatible API changes;
+current `main` may include later unreleased work. Pin an exact version or reviewed commit, use the documentation at
 that revision, and validate the framework against the target workload.
 
 Developer and operational support currently includes checked server

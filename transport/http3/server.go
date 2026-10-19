@@ -297,7 +297,7 @@ func (e *Endpoint) buildTLSConfig() (*tls.Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &tls.Config{Certificates: []tls.Certificate{certificate}}, nil
+	return &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}}, nil
 }
 
 func (e *Endpoint) buildServer(tlsConfig *tls.Config) *qh3.Server {

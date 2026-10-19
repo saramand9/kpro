@@ -450,7 +450,7 @@ func inspectAddProjectFile(root, name string) (addFileState, error) {
 		if !info.Mode().IsRegular() {
 			return addFileState{}, fmt.Errorf("project file %q is not a regular file", portable)
 		}
-		content, err := os.ReadFile(current)
+		content, err := os.ReadFile(current) // #nosec G304 -- Local CLI reads an operator-selected project or artifact path.
 		if err != nil {
 			return addFileState{}, fmt.Errorf("read project file %q: %w", portable, err)
 		}
@@ -473,6 +473,7 @@ func writeAddStageFile(root, name string, content []byte, mode fs.FileMode, excl
 		return err
 	}
 	target := filepath.Join(root, filepath.FromSlash(portable))
+	// #nosec G301 -- Generated source directories intentionally allow read and traversal, without group or other write access.
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return fmt.Errorf("create parent for %q: %w", portable, err)
 	}
@@ -483,7 +484,7 @@ func writeAddStageFile(root, name string, content []byte, mode fs.FileMode, excl
 	if mode == 0 {
 		mode = 0o644
 	}
-	file, err := os.OpenFile(target, flags, mode.Perm())
+	file, err := os.OpenFile(target, flags, mode.Perm()) // #nosec G304 -- Local CLI reads an operator-selected project or artifact path.
 	if err != nil {
 		return fmt.Errorf("open %q: %w", portable, err)
 	}

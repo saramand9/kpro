@@ -34,6 +34,9 @@ func (s *session) encodeOutboundFrame(msg core.Message) (outboundFrame, error) {
 }
 
 func validateSegmentedPayloadSize(streamCodec codec.StreamCodec, size int) error {
+	if size < 0 {
+		return codec.ErrFrameTooLarge
+	}
 	if isExactKProV1Codec(streamCodec) && uint64(size) > uint64(^uint32(0)) {
 		return codec.ErrFrameTooLarge
 	}
@@ -105,6 +108,6 @@ func (s *session) customSegmentedFrame(
 		)
 	}
 	copy(frame.header[:], header)
-	frame.headerLen = uint8(len(header))
+	frame.headerLen = uint8(len(header)) // #nosec G115 -- Header length was checked against maxInlineFrameHeader before appending and copying.
 	return frame, nil
 }

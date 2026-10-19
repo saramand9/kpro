@@ -39,6 +39,52 @@ func TestValidateTag(t *testing.T) {
 	}
 }
 
+func TestArchiveReadLimit(t *testing.T) {
+	for _, size := range []int{3, 4, 5, 64} {
+		var output strings.Builder
+		written, err := copyArchiveBytes(&output, strings.NewReader(strings.Repeat("a", size)), 4)
+		if (err != nil) != (size > 4) {
+			t.Fatalf("size %d: error %v", size, err)
+		}
+		if written > 5 || output.Len() > 5 {
+			t.Fatalf("read beyond limit sentinel: %d", written)
+		}
+	}
+}
+
+func TestArchiveRejectsOversizedEntry(t *testing.T) {
+	required := map[string]struct{}{"kpro": {}}
+	seen := map[string]struct{}{}
+	if err := validateArchiveEntry("test.tar.gz", "kpro", true, maxArchiveEntryBytes+1, required, seen); err == nil {
+		t.Fatal("oversized entry accepted")
+	}
+	archivePath := filepath.Join(t.TempDir(), "oversized.tar.gz")
+	file, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gzipWriter := gzip.NewWriter(file)
+	tarWriter := tar.NewWriter(gzipWriter)
+	if err := tarWriter.WriteHeader(&tar.Header{Name: "kpro", Mode: 0o700, Size: maxArchiveEntryBytes + 1, Typeflag: tar.TypeReg}); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately truncated oversized header must be rejected before extraction.
+	_ = tarWriter.Close()
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "kpro")
+	if err := extractTarGzFile(archivePath, "kpro", target); err == nil || !strings.Contains(err.Error(), "size limit") {
+		t.Fatalf("oversized extraction error = %v", err)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("extraction created output: %v", err)
+	}
+}
+
 func TestValidateVersionOutput(t *testing.T) {
 	const commit = "0123456789abcdef0123456789abcdef01234567"
 	valid := "kpro v0.1.0 (commit 0123456, built 2026-07-24T12:00:00Z, linux/amd64, go1.26.5)"

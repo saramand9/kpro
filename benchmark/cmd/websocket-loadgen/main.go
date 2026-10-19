@@ -6,7 +6,7 @@ package main
 import (
 	"bufio"
 	"crypto/rand"
-	"crypto/sha1"
+	"crypto/sha1" // #nosec G505 -- RFC 6455 mandates SHA-1 for the WebSocket handshake accept value.
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
@@ -220,7 +220,7 @@ func dialWebSocket(addr, path string) (*wsConnection, error) {
 	if !strings.EqualFold(response.Header.Get("Upgrade"), "websocket") {
 		return nil, errors.New("handshake missing websocket Upgrade header")
 	}
-	digest := sha1.Sum([]byte(key + webSocketGUID))
+	digest := sha1.Sum([]byte(key + webSocketGUID)) // #nosec G401 -- RFC 6455 mandates SHA-1 here; this digest is not an authentication primitive.
 	wantAccept := base64.StdEncoding.EncodeToString(digest[:])
 	if response.Header.Get("Sec-WebSocket-Accept") != wantAccept {
 		return nil, errors.New("invalid Sec-WebSocket-Accept")
@@ -261,7 +261,7 @@ func runWorker(
 	readBuffer := make([]byte, packetSize)
 	sentAt := make([]time.Time, config.inflight)
 	sentSequences := make([]uint64, config.inflight)
-	latencies := newReservoir(sampleBudget, uint64(index+1))
+	latencies := newReservoir(sampleBudget, uint64(index+1)) // #nosec G115 -- Load configuration validates nonnegative payload sizes and worker indices before use.
 	maskState := conn.seed
 	var sequence uint64
 
@@ -289,8 +289,8 @@ func runWorker(
 				sentSequences[first+item] = sequence
 			}
 			written, err := writeFull(conn, writeBuffer[:offset])
-			result.bytesWritten += uint64(written)
-			result.sent += uint64(written / wireFrameSize)
+			result.bytesWritten += uint64(written)         // #nosec G115 -- writeFull returns a nonnegative count bounded by the input slice.
+			result.sent += uint64(written / wireFrameSize) // #nosec G115 -- writeFull returns a nonnegative count bounded by the input slice.
 			if err != nil {
 				recordIOFailure(result, err)
 				result.samples = latencies.values
@@ -364,7 +364,7 @@ func encodeClientFrame(dst []byte, sequence uint64, payloadSize int, maskState *
 	payload[3] = 0
 	binary.BigEndian.PutUint32(payload[4:8], echoMessageID)
 	binary.BigEndian.PutUint64(payload[8:16], sequence)
-	binary.BigEndian.PutUint32(payload[16:20], uint32(payloadSize))
+	binary.BigEndian.PutUint32(payload[16:20], uint32(payloadSize)) // #nosec G115 -- Load configuration validates nonnegative payload sizes and worker indices before use.
 	for index := 0; index < payloadSize; index++ {
 		payload[headerSize+index] = expectedPayloadByte(sequence, index)
 	}
@@ -380,7 +380,7 @@ func nextMask(state *uint64) uint32 {
 	value ^= value >> 7
 	value ^= value << 17
 	*state = value
-	return uint32(value ^ (value >> 32))
+	return uint32(value ^ (value >> 32)) // #nosec G115 -- Intentional truncation to 32 bits for the WebSocket mask generator.
 }
 
 func readServerBinaryFrame(reader *bufio.Reader, payload []byte) error {
@@ -434,7 +434,7 @@ func validateResponsePacket(packet []byte, sequence uint64, payloadSize int) err
 		return fmt.Errorf("message id %d, want %d", binary.BigEndian.Uint32(packet[4:8]), echoMessageID)
 	case binary.BigEndian.Uint64(packet[8:16]) != sequence:
 		return fmt.Errorf("sequence %d, want %d", binary.BigEndian.Uint64(packet[8:16]), sequence)
-	case binary.BigEndian.Uint32(packet[16:20]) != uint32(payloadSize):
+	case binary.BigEndian.Uint32(packet[16:20]) != uint32(payloadSize): // #nosec G115 -- Load configuration validates nonnegative payload sizes and worker indices before use.
 		return fmt.Errorf("payload length %d, want %d", binary.BigEndian.Uint32(packet[16:20]), payloadSize)
 	}
 	for index, value := range packet[headerSize:] {
@@ -446,7 +446,7 @@ func validateResponsePacket(packet []byte, sequence uint64, payloadSize int) err
 }
 
 func expectedPayloadByte(sequence uint64, index int) byte {
-	shift := uint(index&7) * 8
+	shift := uint(index&7) * 8 // #nosec G115 -- Masking with 7 bounds this shift index to 0 through 7.
 	return byte(sequence>>shift) ^ byte(index*31+17)
 }
 
