@@ -10,6 +10,18 @@ upgrading between minor versions.
 
 ## Unreleased
 
+## [0.2.1] - 2026-10-19
+
+### Security
+
+- `httpx.Context` raw responses default an unspecified Content-Type to
+  `application/octet-stream` and set `X-Content-Type-Options: nosniff` before
+  committing headers. This prevents echoed HTML bytes from selecting an HTML
+  response through automatic sniffing. Explicit response types and bytes remain
+  unchanged; applications intentionally serving HTML must escape untrusted input.
+- Real HTTP regression tests cover `Write`, `Bytes`, `Stream`, and `CopyBody`,
+  plus preservation of explicit types, status codes and response bytes.
+
 ## [0.2.0] - 2026-10-19
 
 ### Added

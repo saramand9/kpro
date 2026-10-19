@@ -153,11 +153,13 @@ replacement. Before distributing the generated module, remove the local
 path. A versioned CLI install uses:
 
 ```sh
-go install github.com/saramand9/kpro/cmd/kpro@vX.Y.Z
+go install github.com/saramand9/kpro/cmd/kpro@v0.2.1
 ```
 
-That command is only expected to work after the selected tag and declared
-module path are reachable. Private-source use requires both working VCS
+The public v0.2.0 path has been verified through the official Go module proxy,
+including an independent-directory CLI install and generated HTTP service.
+Run the installed CLI outside a KPro checkout to use that release without a
+local replacement. Private-source use requires both working VCS
 credentials and appropriate `GOPRIVATE` configuration; `GOPRIVATE` is not an
 authentication mechanism. Use a reviewed checkout or verified release archive
 when the versioned module path is not available.
