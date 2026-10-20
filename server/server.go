@@ -558,45 +558,29 @@ func (s *Server) listenAndServeClaimed(parent context.Context) error {
 		for readyCount := 0; readyCount < len(runners); {
 			if ctx.Err() != nil {
 				startupAborted = true
-				if parent.Err() != nil {
-					startupErr = context.Cause(parent)
-				} else {
-					startupErr = ErrServerStopped
-				}
+				startupErr = startupCancellationError(parent)
 				break
 			}
 			select {
 			case <-readyEvents:
 				if ctx.Err() != nil {
 					startupAborted = true
-					if parent.Err() != nil {
-						startupErr = context.Cause(parent)
-					} else {
-						startupErr = ErrServerStopped
-					}
+					startupErr = startupCancellationError(parent)
 					break
 				}
 				select {
 				case startupErr = <-errCh:
-					if startupErr == nil {
-						startupErr = ErrComponentExitedBeforeReady
-					}
+					startupErr, startupAborted = startupRunnerExit(parent, ctx, startupErr)
 					readyCount = len(runners)
 				default:
 					readyCount++
 				}
 			case startupErr = <-errCh:
-				if startupErr == nil {
-					startupErr = ErrComponentExitedBeforeReady
-				}
+				startupErr, startupAborted = startupRunnerExit(parent, ctx, startupErr)
 				readyCount = len(runners)
 			case <-ctx.Done():
 				startupAborted = true
-				if parent.Err() != nil {
-					startupErr = context.Cause(parent)
-				} else {
-					startupErr = ErrServerStopped
-				}
+				startupErr = startupCancellationError(parent)
 				readyCount = len(runners)
 			}
 		}
@@ -634,11 +618,35 @@ func (s *Server) listenAndServeClaimed(parent context.Context) error {
 	case <-parent.Done():
 		runnerErr = context.Cause(parent)
 	}
+	// A canceled parent and a runner's clean exit can both be ready. A nil
+	// runner result must not discard the caller's cancellation cause.
+	if runnerErr == nil {
+		runnerErr = context.Cause(parent)
+	}
 	s.mu.Lock()
 	s.beginDrainingLocked()
 	s.cancel()
 	s.mu.Unlock()
 	return s.finishShutdown(runnerErr, runners)
+}
+
+func startupCancellationError(parent context.Context) error {
+	if cause := context.Cause(parent); cause != nil {
+		return cause
+	}
+	return ErrServerStopped
+}
+
+// startupRunnerExit preserves component failures and distinguishes a clean
+// early exit from a cancellation-induced startup abort.
+func startupRunnerExit(parent, runContext context.Context, serveErr error) (err error, aborted bool) {
+	if serveErr != nil {
+		return serveErr, false
+	}
+	if runContext.Err() != nil || parent.Err() != nil {
+		return startupCancellationError(parent), true
+	}
+	return ErrComponentExitedBeforeReady, false
 }
 
 func (s *Server) finishShutdown(runnerErr error, runners []transport.Runner) error {
