@@ -16,6 +16,7 @@ import (
 	"github.com/saramand9/kpro/transport/internal/dispatchgate"
 	"github.com/saramand9/kpro/transport/internal/outbound"
 	"github.com/saramand9/kpro/transport/internal/serveutil"
+	"github.com/saramand9/kpro/transport/internal/sessionoutbound"
 	"github.com/saramand9/kpro/transport/internal/streamutil"
 	kcpgo "github.com/xtaci/kcp-go"
 )
@@ -280,23 +281,14 @@ func (s *Server) DrainOutbound(ctx context.Context) (drainErr error) {
 	defer func() {
 		s.outboundStats.RecordDrain(time.Since(started), drainErr)
 	}()
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	sessions := make([]*session, 0)
+	queues := make([]*outbound.Queue[[]byte], 0)
 	s.sessions.Range(func(_, value interface{}) bool {
 		if session, ok := value.(*session); ok {
-			sessions = append(sessions, session)
+			queues = append(queues, session.sendQueue)
 		}
 		return true
 	})
-	for _, session := range sessions {
-		session.sendQueue.Seal()
-	}
-	for _, session := range sessions {
-		drainErr = errors.Join(drainErr, session.sendQueue.WaitDrained(ctx))
-	}
-	return drainErr
+	return outbound.DrainQueues(ctx, queues)
 }
 
 // OutboundSnapshot reports bounded aggregate write and drain statistics.
@@ -483,17 +475,7 @@ func (s *session) WaitOutboundWritable(ctx context.Context) error {
 	if s == nil || s.sendQueue == nil {
 		return core.ErrClosed
 	}
-	err := s.sendQueue.WaitWritable(ctx)
-	switch {
-	case err == nil:
-		return nil
-	case errors.Is(err, outbound.ErrClosed):
-		return core.ErrClosed
-	case errors.Is(err, outbound.ErrTooManyWaiters):
-		return core.ErrTooManyOutboundWaiters
-	default:
-		return err
-	}
+	return sessionoutbound.MapWaitError(s.sendQueue.WaitWritable(ctx))
 }
 
 func (s *session) start(handler core.Handler) {
