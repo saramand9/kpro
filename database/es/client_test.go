@@ -3,6 +3,7 @@ package elasticstore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -175,5 +176,57 @@ func TestBulkReportsItemErrors(t *testing.T) {
 	defer client.Close()
 	if err := client.Bulk("articles").Do(context.Background(), BulkIndex("a1", searchDoc{Title: "bad"})); err == nil {
 		t.Fatal("expected bulk error")
+	}
+}
+
+func TestBulkRejectsInvalidResponses(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{name: "success", body: `{"errors":false,"items":[]}`},
+		{name: "item failure", body: `{"errors":true,"items":[{"index":{"status":400}}]}`, wantErr: true},
+		{name: "malformed JSON", body: `{"errors":`, wantErr: true},
+		{name: "wrong flag type", body: `{"errors":"true"}`, wantErr: true},
+		{name: "missing flag", body: `{"items":[]}`, wantErr: true},
+		{name: "null flag", body: `{"errors":null}`, wantErr: true},
+		{name: "null response", body: `null`, wantErr: true},
+		{name: "empty response", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("X-Elastic-Product", "Elasticsearch")
+				if r.Method != http.MethodPost || r.URL.Path != "/articles/_bulk" {
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer server.Close()
+			client, err := Open(context.Background(), Config{Addresses: []string{server.URL}, SkipHealthCheck: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			err = client.Bulk("articles").Do(context.Background(), BulkIndex("a1", searchDoc{Title: "test"}))
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("bulk error = %v, want error %v", err, tt.wantErr)
+			}
+			if tt.name == "malformed JSON" {
+				var syntaxErr *json.SyntaxError
+				if !errors.As(err, &syntaxErr) {
+					t.Fatalf("bulk error = %v, want wrapped JSON syntax error", err)
+				}
+			}
+			if tt.name == "wrong flag type" {
+				var typeErr *json.UnmarshalTypeError
+				if !errors.As(err, &typeErr) {
+					t.Fatalf("bulk error = %v, want wrapped JSON type error", err)
+				}
+			}
+		})
 	}
 }

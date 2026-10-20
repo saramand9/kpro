@@ -135,10 +135,16 @@ func checkBulkResponse(resp *esapi.Response) error {
 		return err
 	}
 	var result struct {
-		Errors bool `json:"errors"`
+		Errors *bool `json:"errors"`
 	}
-	if err := json.Unmarshal(body, &result); err == nil && result.Errors {
-		return &ResponseError{StatusCode: 200, Status: "200 OK", Body: string(body)}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return fmt.Errorf("decode elastic bulk response: %w", err)
+	}
+	if result.Errors == nil {
+		return fmt.Errorf("elastic bulk response is missing the errors flag")
+	}
+	if *result.Errors {
+		return &ResponseError{StatusCode: resp.StatusCode, Status: resp.Status(), Body: string(body)}
 	}
 	return nil
 }
