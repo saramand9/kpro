@@ -373,6 +373,57 @@ func TestRunUsesCallerContextAndReportsComponentProvenance(t *testing.T) {
 	}
 }
 
+func TestRunPreservesCallerCancellationCauseWhenRunnerExitsCleanly(t *testing.T) {
+	for _, phase := range []string{"starting", "running"} {
+		t.Run(phase, func(t *testing.T) {
+			cause := errors.New("caller requested stop")
+			for attempt := 0; attempt < 32; attempt++ {
+				ctx, cancel := context.WithCancelCause(context.Background())
+				t.Cleanup(func() { cancel(nil) })
+				runner := newReadinessRunner("cancellation")
+				app := New()
+				app.MountRunner(runner)
+				result := make(chan error, 1)
+				go func() { result <- app.Run(ctx) }()
+				waitForClosed(t, runner.started, "cancellation runner did not start")
+				if phase == "running" {
+					func() {
+						// Hold readiness publication until both the parent's
+						// cancellation and the runner's nil result are ready.
+						app.readyMu.Lock()
+						defer app.readyMu.Unlock()
+						close(runner.ready)
+						deadline := time.Now().Add(time.Second)
+						for app.State() != StateRunning {
+							if time.Now().After(deadline) {
+								t.Fatalf("attempt %d did not enter running state", attempt)
+							}
+							time.Sleep(time.Millisecond)
+						}
+						cancel(cause)
+						returned := make(chan struct{})
+						go func() {
+							app.wg.Wait()
+							close(returned)
+						}()
+						waitForClosed(t, returned, "runner did not exit after cancellation")
+					}()
+				} else {
+					cancel(cause)
+				}
+				select {
+				case err := <-result:
+					if !errors.Is(err, cause) {
+						t.Fatalf("attempt %d cancellation error = %v, want %v", attempt, err, cause)
+					}
+				case <-time.After(time.Second):
+					t.Fatalf("attempt %d did not stop after cancellation", attempt)
+				}
+			}
+		})
+	}
+}
+
 func TestStartupFailureReportsComponentAndUnblocksWaitReady(t *testing.T) {
 	wantErr := errors.New("bind failed")
 	runner := newReadinessRunner("http-public")

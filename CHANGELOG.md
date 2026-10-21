@@ -10,6 +10,24 @@ upgrading between minor versions.
 
 ## Unreleased
 
+### Fixed
+
+- Elasticsearch bulk helpers reject malformed response JSON and missing, null,
+  or incorrectly typed `errors` flags instead of reporting success. JSON decoding
+  errors retain their original cause for `errors.As`.
+- Server runs preserve the caller's cancellation cause when a component exits
+  cleanly at the same time, including during startup. Cancellation is no longer
+  reported as success or as an unrelated early component exit.
+
+### Changed
+
+- Message transports share writable-wait error mapping and seal-all-before-wait
+  drain logic while retaining direct outbound-state mapping, protocol-specific
+  session ownership, shutdown behavior, and drain statistics.
+- CLI gRPC additions and generation execution separate project inspection,
+  isolated generation, mutation planning, and transaction application while
+  preserving generated-file ownership and concurrent-edit protection.
+
 ## [0.2.1] - 2026-10-19
 
 ### Security

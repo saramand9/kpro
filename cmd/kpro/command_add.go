@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/saramand9/kpro/internal/codegen"
@@ -61,273 +60,33 @@ func runAdd(args []string, stdout, stderr io.Writer) error {
 }
 
 func addGRPC(options addOptions, output, warningOutput io.Writer) error {
-	root, configPath, lockFile, err := resolveAddCodegenPaths(options.root, options.config)
+	project, err := inspectAddGRPCProject(options)
 	if err != nil {
-		return fmt.Errorf("add gRPC API: %w", err)
-	}
-	input := codegenInput{
-		root:     root,
-		config:   filepath.Join(root, filepath.FromSlash(configPath)),
-		lockFile: lockFile,
-	}
-
-	snapshots := make(map[string]addFileState)
-	capture := func(name string, required bool) (addFileState, error) {
-		name, err = codegen.SafeRelativePath(name)
-		if err != nil {
-			return addFileState{}, err
-		}
-		if state, exists := snapshots[name]; exists {
-			if required && !state.exists {
-				return addFileState{}, fmt.Errorf("required project file %q is missing", name)
-			}
-			return state, nil
-		}
-		state, err := inspectAddProjectFile(input.root, name)
-		if err != nil {
-			return addFileState{}, err
-		}
-		if required && !state.exists {
-			return addFileState{}, fmt.Errorf("required project file %q is missing", name)
-		}
-		snapshots[name] = state
-		return state, nil
-	}
-
-	manifestState, err := capture(configPath, true)
-	if err != nil {
-		return fmt.Errorf("add gRPC API: %w", err)
-	}
-	currentManifest, err := manifest.Parse(manifestState.content)
-	if err != nil {
-		return fmt.Errorf("add gRPC API: %w", err)
-	}
-	input.manifest = currentManifest
-
-	serviceState, err := capture(defaultServiceProjectFile, true)
-	if err != nil {
-		return fmt.Errorf("add gRPC API: %s is required; only unified service projects support incremental APIs: %w", defaultServiceProjectFile, err)
-	}
-	project, err := parseServiceProjectConfig(serviceState.content)
-	if err != nil {
-		return fmt.Errorf("add gRPC API: %w", err)
-	}
-
-	hasProjectGRPC := serviceProjectHasSelection(project.APIs, "grpc")
-	grpcSource, hasManifestGRPC := serviceAssemblySource(currentManifest.Sources, "grpc-api")
-	switch {
-	case hasProjectGRPC != hasManifestGRPC:
-		return errors.New(`add gRPC API: project configuration is inconsistent: "grpc" and manifest source "grpc-api" must either both exist or both be absent`)
-	case hasManifestGRPC && !canonicalAddGRPCSource(grpcSource):
-		return fmt.Errorf("add gRPC API: existing manifest source %q conflicts with the canonical gRPC source", grpcSource.ID)
-	}
-
-	if err := preflightAddGRPCTools(); err != nil {
 		return err
 	}
-
-	adding := !hasProjectGRPC
-	if adding {
-		for _, name := range []string{addGRPCProtoPath, addGRPCServicePath} {
-			state, err := capture(name, false)
-			if err != nil {
-				return fmt.Errorf("add gRPC API: inspect new path: %w", err)
-			}
-			if state.exists {
-				return fmt.Errorf("add gRPC API: refusing to overwrite unmanaged path %q", name)
-			}
-		}
-	}
-
-	for _, source := range currentManifest.Sources {
-		if _, err := capture(source.Path, true); err != nil {
-			return fmt.Errorf("add gRPC API: snapshot source %q: %w", source.ID, err)
-		}
-	}
-	if err := snapshotProtoImportClosure(currentManifest, capture); err != nil {
-		return fmt.Errorf("add gRPC API: snapshot proto import closure: %w", err)
-	}
-	lockState, err := capture(input.lockFile, false)
-	if err != nil {
-		return fmt.Errorf("add gRPC API: snapshot generation lock: %w", err)
-	}
-
-	currentPlan, err := buildGenerationPlan(input.root, currentManifest, false)
-	if err != nil {
-		return fmt.Errorf("add gRPC API: build current generation plan: %w", err)
-	}
-	currentResult, err := codegen.Execute(currentPlan, codegen.Options{Root: input.root, LockFile: input.lockFile, Mode: codegen.DryRun})
-	if err != nil {
-		return fmt.Errorf("add gRPC API: validate current generated outputs: %w", err)
-	}
-	// A create-once scaffold edit changes only the lock hash. Treat that as
-	// application-owned state and fold the refreshed hash into this transaction;
-	// generated creates, updates, and removals must already be applied explicitly.
-	if len(currentResult.Created) != 0 || len(currentResult.Updated) != 0 || len(currentResult.Removed) != 0 {
-		return fmt.Errorf("add gRPC API: existing generated outputs are not current; run 'kpro generate' first (create=%v update=%v remove=%v)", currentResult.Created, currentResult.Updated, currentResult.Removed)
-	}
-	if !lockState.exists {
-		return errors.New("add gRPC API: generation lock is missing; run 'kpro generate' first")
-	}
-
-	currentFiles, err := currentPlan.OrderedFiles()
-	if err != nil {
-		return fmt.Errorf("add gRPC API: inspect current generation plan: %w", err)
-	}
-	currentOutputs := make(map[string]struct{}, len(currentFiles))
-	for _, file := range currentFiles {
-		currentOutputs[file.Path] = struct{}{}
-		required := file.Ownership == codegen.Generated
-		if _, err := capture(file.Path, required); err != nil {
-			return fmt.Errorf("add gRPC API: cannot safely snapshot current output %q: %w", file.Path, err)
-		}
-	}
-
-	if !adding && !currentResult.Changed() {
+	if project.upToDate {
 		fmt.Fprintln(output, "gRPC API is already configured and generated outputs are current")
 		return nil
 	}
 
-	stage, err := createAddStage(input.root)
+	stageRoot, err := createAddStage(project.input.root)
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(stage)
-	for name, state := range snapshots {
-		if !state.exists {
-			continue
-		}
-		if err := writeAddStageFile(stage, name, state.content, state.mode.Perm(), true); err != nil {
-			return fmt.Errorf("add gRPC API: copy %q to isolated stage: %w", name, err)
-		}
-	}
-
-	if adding {
-		updatedService, err := addServiceAPIYAML(serviceState.content, "grpc")
-		if err != nil {
-			return fmt.Errorf("add gRPC API: update %s: %w", defaultServiceProjectFile, err)
-		}
-		if parsed, err := parseServiceProjectConfig(updatedService); err != nil {
-			return fmt.Errorf("add gRPC API: validate updated %s: %w", defaultServiceProjectFile, err)
-		} else if !serviceProjectHasSelection(parsed.APIs, "grpc") {
-			return fmt.Errorf("add gRPC API: updated %s does not select gRPC", defaultServiceProjectFile)
-		}
-		if err := writeAddStageFile(stage, defaultServiceProjectFile, updatedService, serviceState.mode.Perm(), false); err != nil {
-			return err
-		}
-
-		updatedManifest, err := appendAddGRPCManifestSource(manifestState.content)
-		if err != nil {
-			return fmt.Errorf("add gRPC API: update generation manifest: %w", err)
-		}
-		if err := writeAddStageFile(stage, configPath, updatedManifest, manifestState.mode.Perm(), false); err != nil {
-			return err
-		}
-
-		data := scaffoldData{Module: currentManifest.Module, ServiceIdentifier: currentManifest.Service, ServiceExported: serviceAssemblyExportedIdentifier(currentManifest.Service)}
-		if err := renderTemplate(stage, "templates/profiles/service/service.proto.tmpl", addGRPCProtoPath, 0o644, data); err != nil {
-			return fmt.Errorf("add gRPC API: render gRPC contract: %w", err)
-		}
-		if err := renderTemplate(stage, "templates/profiles/service/grpc_service.go.tmpl", addGRPCServicePath, 0o644, data); err != nil {
-			return fmt.Errorf("add gRPC API: render ready gRPC service: %w", err)
-		}
-	}
-
-	stageInput, err := loadCodegenInput(stage, configPath)
+	defer os.RemoveAll(stageRoot)
+	stage, err := project.prepareStage(stageRoot)
 	if err != nil {
-		return fmt.Errorf("add gRPC API: load isolated generation input: %w", err)
+		return err
 	}
-	stagePlan, err := buildGenerationPlan(stage, stageInput.manifest, false)
+	mutations, err := project.planMutations(stage)
 	if err != nil {
-		return fmt.Errorf("add gRPC API: build isolated generation plan: %w", err)
+		return err
 	}
-	stageResult, err := codegen.Execute(stagePlan, codegen.Options{Root: stage, LockFile: stageInput.lockFile, Mode: codegen.Apply})
-	if err != nil {
-		return fmt.Errorf("add gRPC API: execute isolated generation plan: %w", err)
-	}
-	if len(stageResult.Removed) != 0 {
-		return fmt.Errorf("add gRPC API: isolated generation unexpectedly removes files: %v", stageResult.Removed)
-	}
-
-	stageFiles, err := stagePlan.OrderedFiles()
-	if err != nil {
-		return fmt.Errorf("add gRPC API: inspect isolated generation plan: %w", err)
-	}
-	readSet := make(map[string]struct{}, len(snapshots)+len(stageFiles)+2)
-	for name, state := range snapshots {
-		if state.exists {
-			readSet[name] = struct{}{}
-		}
-	}
-	readSet[configPath] = struct{}{}
-	readSet[defaultServiceProjectFile] = struct{}{}
-	readSet[stageInput.lockFile] = struct{}{}
-	if adding {
-		readSet[addGRPCProtoPath] = struct{}{}
-		readSet[addGRPCServicePath] = struct{}{}
-	}
-	for _, file := range stageFiles {
-		staged, err := inspectAddProjectFile(stage, file.Path)
-		if err != nil {
-			return fmt.Errorf("add gRPC API: inspect isolated output %q: %w", file.Path, err)
-		}
-		if !staged.exists {
-			state, snapshotted := snapshots[file.Path]
-			_, wasCurrent := currentOutputs[file.Path]
-			if file.Ownership == codegen.Generated || !snapshotted || state.exists || !wasCurrent {
-				return fmt.Errorf("add gRPC API: isolated generation did not produce required output %q", file.Path)
-			}
-			// Execute intentionally preserves a user's deletion of a previously
-			// locked create-once file. Keep that absence out of the write set.
-			continue
-		}
-		readSet[file.Path] = struct{}{}
-		if _, exists := snapshots[file.Path]; exists {
-			continue
-		}
-		state, err := capture(file.Path, false)
-		if err != nil {
-			return fmt.Errorf("add gRPC API: inspect new output %q: %w", file.Path, err)
-		}
-		if state.exists {
-			if _, managed := currentOutputs[file.Path]; !managed {
-				return fmt.Errorf("add gRPC API: refusing to overwrite unmanaged path %q", file.Path)
-			}
-		}
-	}
-
-	names := make([]string, 0, len(readSet))
-	for name := range readSet {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	mutations := make([]codegen.FileMutation, 0, len(names))
-	for _, name := range names {
-		state, exists := snapshots[name]
-		if !exists {
-			return fmt.Errorf("add gRPC API: missing snapshot for %q", name)
-		}
-		staged, err := inspectAddProjectFile(stage, name)
-		if err != nil {
-			return fmt.Errorf("add gRPC API: inspect staged %q: %w", name, err)
-		}
-		if !staged.exists {
-			return fmt.Errorf("add gRPC API: isolated generation did not retain required read-set file %q", name)
-		}
-		precondition := codegen.ExpectFileMissing()
-		mode := staged.mode.Perm()
-		if state.exists {
-			precondition = codegen.ExpectFileContent(state.content)
-			mode = 0
-		}
-		mutations = append(mutations, codegen.FileMutation{Path: name, Content: staged.content, Mode: mode, Precondition: precondition})
-	}
-
 	if options.dryRun {
-		printAddMutationPreview(output, mutations, snapshots)
+		printAddMutationPreview(output, mutations, project.files)
 		return nil
 	}
-	result, err := addCommitFileTransaction(mutations, codegen.FileTransactionOptions{Root: input.root})
+	result, err := addCommitFileTransaction(mutations, codegen.FileTransactionOptions{Root: project.input.root})
 	if err != nil {
 		return fmt.Errorf("add gRPC API: commit project transaction: %w", err)
 	}
@@ -346,13 +105,13 @@ func addGRPC(options addOptions, output, warningOutput io.Writer) error {
 	}
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "next:")
-	fmt.Fprintf(output, "  cd %s\n", input.root)
+	fmt.Fprintf(output, "  cd %s\n", project.input.root)
 	fmt.Fprintln(output, "  go mod tidy")
 	fmt.Fprintln(output, "  go test ./...")
-	if configPath == defaultCodegenConfig {
+	if project.input.configPath == defaultCodegenConfig {
 		fmt.Fprintln(output, "  kpro generate --check")
 	} else {
-		fmt.Fprintf(output, "  kpro generate --config %s --check\n", configPath)
+		fmt.Fprintf(output, "  kpro generate --config %s --check\n", project.input.configPath)
 	}
 	return nil
 }
