@@ -99,7 +99,7 @@ jobs:
           cache: true
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4.36.0
+        uses: github/codeql-action/init@v4.39.0
         with:
           languages: go
           build-mode: manual
@@ -111,4 +111,4 @@ jobs:
           go -C benchmark/compare test -run '^$' ./...
 
       - name: Analyze with CodeQL
-        uses: github/codeql-action/analyze@v4.36.0
+        uses: github/codeql-action/analyze@v4.39.0
