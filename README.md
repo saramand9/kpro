@@ -16,8 +16,8 @@ server code assembles transports, middleware and routers
 
 ## Status
 
-`v0.2.0` and current `main` require Go 1.26.9 or newer. This minor release drops Go
-1.25 support to adopt security fixes in the toolchain and dependencies.
+`v0.2.0` requires Go 1.26.9 or newer. Current `main` requires Go 1.26.11
+or newer for toolchain security fixes.
 
 Current implementation:
 

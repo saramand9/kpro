@@ -207,7 +207,7 @@ The repository CI requires live MySQL and PostgreSQL for its `dbintegration` sui
 
 ## Testing and release evidence
 
-- [ ] Use Go 1.26.9 or a newer supported patch release; repository CI targets Go 1.26.9 and 1.27.2.
+- [ ] Use Go 1.26.11 or a newer supported patch release.
 - [ ] Run `go mod verify` and `govulncheck ./...`; triage every reachable finding before release and retain the report. A clean call-graph scan is not a complete image or deployment scan.
 - [ ] Run unit, race, protocol integration, and database integration tests for the exact build.
 - [ ] **Built in:** TCP, KCP, QUIC, UDP, and WebSocket run the same public
