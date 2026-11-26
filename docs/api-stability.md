@@ -37,7 +37,8 @@ Tagged releases will follow Semantic Versioning:
 A tag, release notes, and an upgrade note are the release contract. A branch name or arbitrary commit is not a compatibility promise.
 
 The supported toolchain follows maintained Go release lines. The current
-repository baseline is Go 1.26.9+, and CI targets Go 1.26.9 and 1.27.2. The
+repository baseline is Go 1.26.11+. The CI compatibility jobs start from Go
+1.26.9 and 1.27.2 and let Go select the toolchain required by the module. The
 v0.2.0 release drops Go 1.25 to adopt security fixes in the Go toolchain
 and dependencies. Dropping a supported Go line is a compatibility change and
 must be called out in release notes.

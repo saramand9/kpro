@@ -91,7 +91,7 @@ func TestGeneratedHTTPClientRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	module := "module example.com/generated\n\ngo 1.26.9\n\nrequire github.com/saramand9/kpro v0.0.0\n\nreplace github.com/saramand9/kpro => " + filepath.ToSlash(repository) + "\n"
+	module := "module example.com/generated\n\ngo 1.26.11\n\nrequire github.com/saramand9/kpro v0.0.0\n\nreplace github.com/saramand9/kpro => " + filepath.ToSlash(repository) + "\n"
 	if err := os.WriteFile(filepath.Join(directory, "go.mod"), []byte(module), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestGeneratedHTTPClientRuntime(t *testing.T) {
 	if err := os.WriteFile(testFile, []byte(generatedHTTPClientTest), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command("go", "test", "./...")
+	command := exec.Command("go", "test", "-mod=mod", "./...")
 	command.Dir = directory
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("generated HTTP client tests failed: %v\n%s", err, output)

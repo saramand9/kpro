@@ -29,7 +29,8 @@ func (KProV1Codec) Name() string {
 	return "kpro.v1"
 }
 
-// Read decodes one framed message from a stream reader.
+// Read decodes one framed message. EOF at a frame boundary is io.EOF,
+// while EOF inside a header or its declared payload is io.ErrUnexpectedEOF.
 func (KProV1Codec) Read(r io.Reader, maxBodySize uint32) (ReadResult, error) {
 	result, _, err := KProV1Codec{}.ReadInto(r, maxBodySize, nil)
 	return result, err
@@ -63,6 +64,9 @@ func (KProV1Codec) ReadInto(r io.Reader, maxBodySize uint32, scratch []byte) (Re
 		scratch = scratch[:int(length)]
 		msg.Data = scratch
 		if _, err := io.ReadFull(r, msg.Data); err != nil {
+			if err == io.EOF {
+				err = io.ErrUnexpectedEOF
+			}
 			return ReadResult{}, scratch, err
 		}
 	}
@@ -113,7 +117,8 @@ func (KProV1Codec) Encode(msg core.Message) ([]byte, error) {
 	return buf, nil
 }
 
-// DecodePacket decodes one complete packet payload.
+// DecodePacket decodes one complete packet. Empty input returns io.EOF and
+// a truncated header or representable declared payload returns io.ErrUnexpectedEOF.
 func (k KProV1Codec) DecodePacket(data []byte) (core.Message, error) {
 	if len(data) < FrameHeaderSize {
 		if len(data) == 0 {
@@ -125,15 +130,12 @@ func (k KProV1Codec) DecodePacket(data []byte) (core.Message, error) {
 	if err != nil {
 		return core.Message{}, err
 	}
-	if uint64(length) > uint64(len(data)) {
+	if uint64(length) > uint64(int(^uint(0)>>1)-FrameHeaderSize) {
 		return core.Message{}, ErrFrameTooLarge
 	}
 	available := len(data) - FrameHeaderSize
 	// #nosec G115 -- The header-length guard makes available nonnegative.
 	if uint64(length) > uint64(available) {
-		if available == 0 {
-			return core.Message{}, io.EOF
-		}
 		return core.Message{}, io.ErrUnexpectedEOF
 	}
 	end := FrameHeaderSize + int(length)

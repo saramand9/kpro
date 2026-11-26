@@ -8,6 +8,25 @@ import (
 	"testing"
 )
 
+func TestCloneContextIsolatesEmptyContainers(t *testing.T) {
+	original := Message{Data: make([]byte, 0, 1), Headers: map[string]string{}, Meta: map[string]any{}}
+	cloned := CloneContext(NewContext(nil, original)).Message()
+	if cloned.Data == nil || cloned.Headers == nil || cloned.Meta == nil {
+		t.Fatal("clone discarded an initialized empty container")
+	}
+	cloned.Headers["trace"] = "clone"
+	cloned.Meta["attempt"] = 1
+	cloned.Data = append(cloned.Data, 'c')
+	original.Data = append(original.Data, 'o')
+	if len(original.Headers) != 0 || len(original.Meta) != 0 || cloned.Data[0] != 'c' {
+		t.Fatalf("original and clone share mutable storage: original=%+v clone=%+v", original, cloned)
+	}
+	empty := CloneContext(NewContext(nil, Message{})).Message()
+	if empty.Data != nil || empty.Headers != nil || empty.Meta != nil {
+		t.Fatal("clone changed nil containers into initialized ones")
+	}
+}
+
 func TestReleaseContextClearsPooledBaseContext(t *testing.T) {
 	session := newFakeSession(1)
 	ctx := AcquireContext(session, Message{

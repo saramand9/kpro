@@ -665,7 +665,6 @@ func (s *Server) finishShutdown(runnerErr error, runners []transport.Runner) err
 		)
 		resourceErr = s.shutdownResources(resourceCtx)
 		resourceCancel()
-		s.state.Store(uint32(StateStopped))
 	}
 	cleanupErr := errors.Join(shutdownErr, waitErr, resourceErr)
 	if cleanupErr != nil && IsContextTermination(runnerErr) {
@@ -779,7 +778,8 @@ func validateRunners(runners []transport.Runner) error {
 	return validationErr
 }
 
-// Shutdown asks all mounted runners to stop and waits for the server lifecycle to drain.
+// Shutdown stops the runners and then the managed resources. Failed cleanup
+// leaves the server draining until a subsequent Shutdown completes it.
 func (s *Server) Shutdown(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -795,9 +795,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	runnerErr := s.shutdownRunners(ctx, runners)
 	if waitErr := s.wait(ctx); runnerErr == nil && waitErr == nil {
-		resourceErr := s.shutdownResources(ctx)
-		s.state.Store(uint32(StateStopped))
-		return errors.Join(runnerErr, resourceErr)
+		return s.shutdownResources(ctx)
 	} else {
 		return errors.Join(runnerErr, waitErr)
 	}
@@ -983,6 +981,9 @@ func (s *Server) shutdownResources(ctx context.Context) error {
 	var resourceErr error
 	for i := len(resources) - 1; i >= 0; i-- {
 		resourceErr = errors.Join(resourceErr, resources[i].shutdown(ctx))
+	}
+	if resourceErr == nil {
+		s.state.Store(uint32(StateStopped))
 	}
 	return resourceErr
 }

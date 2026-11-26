@@ -16,6 +16,28 @@ import (
 	"github.com/saramand9/kpro/core"
 )
 
+func TestTCPFaultInitialReadDeadlineReleasesSession(t *testing.T) {
+	server := New(Config{MaxConnections: 1, ReadTimeout: time.Second})
+	conn, peer := net.Pipe()
+	defer peer.Close()
+	_ = conn.Close()
+	if !server.tryAcquireConnectionSlot() {
+		t.Fatal("could not reserve the initial connection slot")
+	}
+	s := &session{id: 1, server: server, raw: conn, done: make(chan struct{}), sendQueue: newSessionOutboundQueue(server.config)}
+	server.sessions.Store(s.id, s)
+	s.readLoop(nil, nil)
+	select {
+	case <-s.Done():
+	default:
+		t.Fatal("failed initialization left the session open")
+	}
+	if _, registered := server.sessions.Load(s.id); registered || !server.tryAcquireConnectionSlot() {
+		t.Fatal("failed initialization retained the registered session or its connection slot")
+	}
+	server.releaseConnectionSlot()
+}
+
 func TestTCPFaultShortWriteCompletesEveryReceipt(t *testing.T) {
 	connection := &chunkedFaultConn{maxChunk: 2, failAfter: -1}
 	server := New(Config{

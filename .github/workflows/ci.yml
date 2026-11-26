@@ -23,7 +23,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: 1.26.9
+          go-version: 1.26.11
           cache: true
 
       - name: Verify module checksums
@@ -239,7 +239,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: 1.26.9
+          go-version: 1.26.11
           cache: true
 
       - name: Test SQL database integrations
@@ -260,7 +260,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: 1.26.9
+          go-version: 1.26.11
           cache: true
 
       - name: Test Windows core and developer tooling
@@ -389,6 +389,7 @@ jobs:
           go-version: ${{ matrix.go-version }}
           cache: true
 
+      # Keep the required check names and verify the module with each bootstrap toolchain.
       - name: Verify supported Go version
         run: |
           go version

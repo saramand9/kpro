@@ -5,6 +5,8 @@ package core
 
 import (
 	"context"
+	"maps"
+	"slices"
 	"sync"
 	"sync/atomic"
 )
@@ -159,12 +161,7 @@ func CloneContext(ctx Context) *BaseContext {
 func (c *BaseContext) Clone() *BaseContext {
 	cloned := NewContext(c.session, cloneMessage(c.message))
 	cloned.ctx = normalizeContext(c.ctx)
-	if len(c.values) > 0 {
-		cloned.values = make(map[string]interface{}, len(c.values))
-		for key, value := range c.values {
-			cloned.values[key] = value
-		}
-	}
+	cloned.values = maps.Clone(c.values)
 	return cloned
 }
 
@@ -241,23 +238,10 @@ func withMessageContext(messageCtx Context, ctx context.Context) Context {
 }
 
 func cloneMessage(msg Message) Message {
-	cloned := msg
-	if len(msg.Data) > 0 {
-		cloned.Data = append([]byte(nil), msg.Data...)
-	}
-	if len(msg.Headers) > 0 {
-		cloned.Headers = make(map[string]string, len(msg.Headers))
-		for key, value := range msg.Headers {
-			cloned.Headers[key] = value
-		}
-	}
-	if len(msg.Meta) > 0 {
-		cloned.Meta = make(map[string]interface{}, len(msg.Meta))
-		for key, value := range msg.Meta {
-			cloned.Meta[key] = value
-		}
-	}
-	return cloned
+	msg.Data = slices.Clone(msg.Data)
+	msg.Headers = maps.Clone(msg.Headers)
+	msg.Meta = maps.Clone(msg.Meta)
+	return msg
 }
 
 // Session returns the transport session that delivered the message.

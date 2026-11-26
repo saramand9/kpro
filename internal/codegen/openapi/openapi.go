@@ -613,10 +613,10 @@ func unsupportedSchemaConstraints(schema *openapi3.Schema) []string {
 	if schema.UniqueItems {
 		constraints = append(constraints, "uniqueItems")
 	}
-	if schema.ExclusiveMin {
+	if schema.ExclusiveMin.IsTrue() || schema.ExclusiveMin.Value != nil {
 		constraints = append(constraints, "exclusiveMinimum")
 	}
-	if schema.ExclusiveMax {
+	if schema.ExclusiveMax.IsTrue() || schema.ExclusiveMax.Value != nil {
 		constraints = append(constraints, "exclusiveMaximum")
 	}
 	if schema.Min != nil {

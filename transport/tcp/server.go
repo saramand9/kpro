@@ -38,6 +38,8 @@ const (
 	DefaultWriteTimeout           = 5 * time.Second
 	defaultPayloadPoolShards      = 64
 	defaultMaxReadBatchFrames     = 16
+	initialAcceptRetryDelay       = 5 * time.Millisecond
+	maxAcceptRetryDelay           = time.Second
 )
 
 // Config controls TCP listener, codec, queue, and timeout settings.
@@ -98,6 +100,8 @@ type Server struct {
 	lifecycleMu   sync.Mutex
 	accepting     bool
 	started       bool
+	admissionDone chan struct{}
+	admissionOnce sync.Once
 	dispatch      *dispatchgate.Gate
 	payloadPool   *bufferpool.ShardedPool
 	outboundStats outbound.Tracker
@@ -115,10 +119,11 @@ type Server struct {
 func New(config Config) *Server {
 	normalized := normalizeConfig(config)
 	server := &Server{
-		config:    normalized,
-		rawConfig: config,
-		accepting: true,
-		dispatch:  dispatchgate.New(),
+		config:        normalized,
+		rawConfig:     config,
+		accepting:     true,
+		admissionDone: make(chan struct{}),
+		dispatch:      dispatchgate.New(),
 		payloadPool: bufferpool.NewSharded(bufferpool.Config{
 			MaxRetainedBytes: normalized.MaxRetainedBufferBytes,
 			MaxPooledSize:    DefaultMaxFrameSize,
@@ -205,12 +210,12 @@ func (s *Server) listenAndServe(
 	defer serveutil.FinishContextWatcher(serveDone, watcherDone)
 
 	for {
-		raw, err := ln.Accept()
+		raw, err := s.acceptConnection(ctx, ln)
 		if err != nil {
-			if ctx.Err() != nil || !s.isAccepting() {
-				return nil
-			}
 			return err
+		}
+		if raw == nil {
+			return nil
 		}
 		if !s.tryAcquireConnectionSlot() {
 			_ = raw.Close()
@@ -229,6 +234,57 @@ func (s *Server) listenAndServe(
 			_ = raw.Close()
 			s.releaseConnectionSlot()
 		}
+	}
+}
+
+// acceptConnection retries temporary listener failures with bounded backoff.
+// Resource exhaustion such as EMFILE is recoverable once existing descriptors
+// are released; permanent listener failures remain terminal.
+func (s *Server) acceptConnection(ctx context.Context, listener net.Listener) (net.Conn, error) {
+	var retryDelay time.Duration
+	for {
+		connection, err := listener.Accept()
+		if err == nil {
+			return connection, nil
+		}
+		if ctx.Err() != nil || !s.isAccepting() {
+			return nil, nil
+		}
+		if !isTemporaryAcceptError(err) {
+			return nil, err
+		}
+		retryDelay = nextAcceptRetryDelay(retryDelay)
+		if !s.waitForAcceptRetry(ctx, retryDelay) {
+			return nil, nil
+		}
+	}
+}
+
+func isTemporaryAcceptError(err error) bool {
+	var temporary interface{ Temporary() bool }
+	return errors.As(err, &temporary) && temporary.Temporary()
+}
+
+func nextAcceptRetryDelay(current time.Duration) time.Duration {
+	if current <= 0 {
+		return initialAcceptRetryDelay
+	}
+	if current >= maxAcceptRetryDelay/2 {
+		return maxAcceptRetryDelay
+	}
+	return current * 2
+}
+
+func (s *Server) waitForAcceptRetry(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-s.admissionDone:
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -310,6 +366,9 @@ func (s *Server) OutboundSnapshot() transportapi.OutboundSnapshot {
 func (s *Server) stopAdmissionAndReads() error {
 	s.lifecycleMu.Lock()
 	s.accepting = false
+	if s.admissionDone != nil {
+		s.admissionOnce.Do(func() { close(s.admissionDone) })
+	}
 	s.dispatch.Stop()
 	ln := s.ln
 	s.lifecycleMu.Unlock()
@@ -579,14 +638,6 @@ func (s *session) start(handler core.Handler, batchHandler transportapi.BatchHan
 
 func (s *session) readLoop(handler core.Handler, batchHandler transportapi.BatchHandler) {
 	preserveSession := false
-	var readDeadlineRefresh time.Time
-	if timeout := s.server.config.ReadTimeout; timeout > 0 {
-		now := time.Now()
-		if err := s.raw.SetReadDeadline(now.Add(timeout)); err != nil {
-			return
-		}
-		readDeadlineRefresh = now.Add(timeout / 2)
-	}
 	defer func() {
 		if preserveSession {
 			return
@@ -600,6 +651,14 @@ func (s *session) readLoop(handler core.Handler, batchHandler transportapi.Batch
 			_ = s.Close()
 		}
 	}()
+	var readDeadlineRefresh time.Time
+	if timeout := s.server.config.ReadTimeout; timeout > 0 {
+		now := time.Now()
+		if err := s.raw.SetReadDeadline(now.Add(timeout)); err != nil {
+			return
+		}
+		readDeadlineRefresh = now.Add(timeout / 2)
+	}
 	for {
 		if s.server.dispatch.Stopped() {
 			preserveSession = true

@@ -13,16 +13,17 @@ import (
 // and set X-Content-Type-Options: nosniff. Applications explicitly serving HTML
 // must escape untrusted input; response bytes are never rewritten.
 type Context struct {
-	w           http.ResponseWriter
-	r           *http.Request
-	header      http.Header
-	body        []byte
-	bodyRead    bool
-	bodyErr     error
-	maxBody     int64
-	bodyLimited bool
-	status      int
-	wroteHeader bool
+	w             http.ResponseWriter
+	r             *http.Request
+	header        http.Header
+	body          []byte
+	bodyRead      bool
+	bodyErr       error
+	maxBody       int64
+	bodyLimited   bool
+	status        int
+	wroteHeader   bool
+	nativeTracked bool
 }
 
 // Context returns the request cancellation and deadline context.
@@ -42,11 +43,17 @@ func (c *Context) Request() *http.Request {
 	return c.r
 }
 
-// ResponseWriter exposes the underlying writer for protocol-specific features
-// such as streaming and HTTP connection control.
+// ResponseWriter provides the native HTTP writer capabilities and tracks when
+// the response is committed, including by a flush or connection takeover.
+// Use this writer for output. A wrapper's Unwrap method gives access to the
+// original concrete writer for application-specific inspection.
 func (c *Context) ResponseWriter() http.ResponseWriter {
-	if c == nil {
+	if c == nil || c.w == nil {
 		return nil
+	}
+	if !c.nativeTracked && !c.wroteHeader {
+		c.w = c.trackResponseWriter()
+		c.nativeTracked = true
 	}
 	return c.w
 }
@@ -59,36 +66,47 @@ func (c *Context) Header() http.Header {
 }
 
 func (c *Context) WriteHeader(status int) {
-	// Header-only calls never invoke the underlying writer's Write method.
-	_, _ = c.writeResponse(status, nil, false)
+	c.writeHeader(status, false)
 }
 
 func (c *Context) Write(body []byte) (int, error) {
 	return c.writeResponse(http.StatusOK, body, true)
 }
 
-// writeResponse keeps header policy and byte writes at one response boundary.
 // writeBody distinguishes Write(nil), which must forward its writer result,
-// from a header-only call. Text and streaming retain their native fast paths.
+// from a header-only call.
 func (c *Context) writeResponse(status int, body []byte, writeBody bool) (int, error) {
-	if !c.wroteHeader {
-		// Unspecified types must not be inferred from untrusted bytes. An
-		// application explicitly serving HTML must escape its input.
-		header := c.w.Header()
-		if header.Get("Content-Type") == "" {
-			header.Set("Content-Type", "application/octet-stream")
-		}
-		if header.Get("X-Content-Type-Options") != "nosniff" {
-			header.Set("X-Content-Type-Options", "nosniff")
-		}
-		c.wroteHeader = true
-		c.status = status
-		c.w.WriteHeader(status)
-	}
+	c.writeHeader(status, writeBody)
 	if !writeBody {
 		return 0, nil
 	}
 	return c.w.Write(body)
+}
+
+func (c *Context) writeHeader(status int, writeBody bool) {
+	if c.wroteHeader {
+		return
+	}
+	if status >= 100 && status < 200 && status != http.StatusSwitchingProtocols {
+		c.w.WriteHeader(status)
+		if !writeBody {
+			return
+		}
+		// Writing a body after an informational response implies a final 200.
+		status = http.StatusOK
+	}
+	// Unspecified types must not be inferred from untrusted bytes. An
+	// application explicitly serving HTML must escape its input.
+	header := c.w.Header()
+	if header.Get("Content-Type") == "" {
+		header.Set("Content-Type", "application/octet-stream")
+	}
+	if header.Get("X-Content-Type-Options") != "nosniff" {
+		header.Set("X-Content-Type-Options", "nosniff")
+	}
+	c.wroteHeader = true
+	c.status = status
+	c.w.WriteHeader(status)
 }
 
 func (c *Context) setContentType(contentType string) {
@@ -172,7 +190,7 @@ func (c *Context) Bytes(status int, contentType string, body []byte) error {
 
 func (c *Context) Stream(status int, contentType string, reader io.Reader) error {
 	c.setContentType(contentType)
-	c.WriteHeader(status)
+	c.writeHeader(status, reader != nil)
 	if reader == nil {
 		return nil
 	}
@@ -194,7 +212,7 @@ func (c *Context) CopyBody(status int, contentType string) error {
 
 func (c *Context) Text(status int, text string) error {
 	c.setContentType("text/plain; charset=utf-8")
-	c.WriteHeader(status)
+	c.writeHeader(status, true)
 	_, err := io.WriteString(c.w, text)
 	return err
 }

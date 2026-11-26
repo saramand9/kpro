@@ -5,6 +5,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
+	"net/textproto"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -33,6 +36,63 @@ func TestContextHeaderOnlyAndEmptyWriteResults(t *testing.T) {
 	}
 	if n, err := ctx.Write(nil); n != 0 || !errors.Is(err, wantErr) || writer.writes != 1 {
 		t.Fatalf("empty Write result = (%d, %v), writes=%d", n, err, writer.writes)
+	}
+}
+
+func TestEarlyHintsPreserveFinalResponse(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		reply  Handler
+		status int
+	}{
+		{
+			name: "created",
+			reply: func(ctx *Context) error {
+				return ctx.Text(http.StatusCreated, "created")
+			},
+			status: http.StatusCreated,
+		},
+		{
+			name:   "handler_error",
+			reply:  func(*Context) error { return errors.New("handler failed") },
+			status: http.StatusInternalServerError,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			endpoint := New(Config{})
+			endpoint.Get("/", func(ctx *Context) error {
+				ctx.WriteHeader(http.StatusEarlyHints)
+				ctx.WriteHeader(http.StatusEarlyHints)
+				return tc.reply(ctx)
+			})
+			server := httptest.NewServer(endpoint)
+			defer server.Close()
+
+			var hints []int
+			trace := &httptrace.ClientTrace{
+				Got1xxResponse: func(code int, _ textproto.MIMEHeader) error {
+					hints = append(hints, code)
+					return nil
+				},
+			}
+			request, err := http.NewRequestWithContext(
+				httptrace.WithClientTrace(t.Context(), trace), http.MethodGet, server.URL, nil,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := server.Client().Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			if !slices.Equal(hints, []int{http.StatusEarlyHints, http.StatusEarlyHints}) {
+				t.Errorf("informational responses = %v, want two Early Hints", hints)
+			}
+			if response.StatusCode != tc.status {
+				t.Fatalf("final status = %d, want %d", response.StatusCode, tc.status)
+			}
+		})
 	}
 }
 
