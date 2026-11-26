@@ -100,7 +100,7 @@ func TestGeneratedHTTPClientRuntime(t *testing.T) {
 	if err := os.WriteFile(testFile, []byte(generatedHTTPClientTest), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command("go", "test", "./...")
+	command := exec.Command("go", "test", "-mod=mod", "./...")
 	command.Dir = directory
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("generated HTTP client tests failed: %v\n%s", err, output)

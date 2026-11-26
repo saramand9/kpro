@@ -325,6 +325,12 @@ func (e *Endpoint) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	if e.config.WriteTimeout > 0 {
 		_ = controller.SetWriteDeadline(time.Now().Add(e.config.WriteTimeout))
 	}
+	if native, ok := w.(interface {
+		streamResponseWriter
+		streamExtensions
+	}); ok {
+		w = nativeStreamWriter{native, native}
+	}
 	e.http.ServeHTTP(w, r)
 }
 

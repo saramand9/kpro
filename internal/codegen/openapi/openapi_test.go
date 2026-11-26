@@ -243,7 +243,7 @@ func TestBuildPlanDeterministicAndCompiles(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(mod), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command("go", "test", "./...")
+	command := exec.Command("go", "test", "-mod=mod", "./...")
 	command.Dir = dir
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("generated package does not compile: %v\n%s", err, output)
@@ -681,7 +681,7 @@ func TestGeneratedBindings(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(mod), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command("go", "test", "./...")
+	command := exec.Command("go", "test", "-mod=mod", "./...")
 	command.Dir = dir
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("generated CRUD packages/tests fail: %v\n%s", err, output)

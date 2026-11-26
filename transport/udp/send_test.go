@@ -43,6 +43,78 @@ func TestSendWithReceiptCompletesOnWriterResult(t *testing.T) {
 	}
 }
 
+func TestDatagramSizeErrorPreservesQueuedReply(t *testing.T) {
+	// Some platforms have no distinct packet-size error.
+	if error(errMessageTooLong) == nil {
+		t.Skip("platform does not identify datagrams exceeding the path limit")
+	}
+	peer := listenUDPTestConn(t)
+	defer peer.Close()
+	server := newUDPOutboundTestServer(t, Config{SendQueueSize: 2, MaxPendingBytes: 128 << 10})
+	s := newUDPTestPacketSession(server, peer.LocalAddr().String())
+	defer s.Close()
+	server.sessions[s.key] = s
+	oversize, err := s.SendWithReceipt(core.Message{ID: 1, Data: make([]byte, 64<<10)})
+	if err != nil {
+		t.Fatalf("queue first packet: %v", err)
+	}
+	reply, err := s.SendWithReceipt(core.Message{ID: 2, Seq: 3, Data: []byte("reply")})
+	if err != nil {
+		t.Fatalf("queue second packet: %v", err)
+	}
+	go s.writeLoop()
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if err := oversize.Wait(ctx); !errors.Is(err, errMessageTooLong) {
+		t.Fatalf("first receipt = %v, want datagram size error", err)
+	}
+	if err := reply.Wait(ctx); err != nil || s.OutboundState().Closed {
+		t.Fatalf("second receipt = %v, session closed = %t", err, s.OutboundState().Closed)
+	}
+	if current, ok := server.getOrCreateSession(s.remote); !ok || current != s {
+		t.Fatal("the next datagram would be assigned to a different virtual session")
+	}
+	if err := peer.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var buf [128]byte
+	n, _, err := peer.ReadFromUDP(buf[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := codec.KProV1().DecodePacket(buf[:n])
+	if err != nil || msg.ID != 2 || msg.Seq != 3 || string(msg.Data) != "reply" {
+		t.Fatalf("received packet = %+v, error = %v", msg, err)
+	}
+	if err := s.DrainOutbound(ctx); !errors.Is(err, errMessageTooLong) {
+		t.Fatalf("drain error = %v, want the failed datagram's write result", err)
+	}
+}
+
+func TestClosedSocketFailsRemainingUDPReceipts(t *testing.T) {
+	server := newUDPOutboundTestServer(t, Config{SendQueueSize: 2})
+	s := newUDPTestPacketSession(server, "127.0.0.1:10000")
+	defer s.Close()
+	first, err := s.SendWithReceipt(core.Message{ID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.SendWithReceipt(core.Message{ID: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.udpConn().Close(); err != nil {
+		t.Fatal(err)
+	}
+	s.writeLoop()
+	if err := first.Wait(t.Context()); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("first receipt = %v, want socket error", err)
+	}
+	if err := second.Wait(t.Context()); !errors.Is(err, core.ErrClosed) || !s.OutboundState().Closed {
+		t.Fatalf("pending receipt = %v, session closed = %t", err, s.OutboundState().Closed)
+	}
+}
+
 func (c *blockingPacketCodec) EncodePacket(msg core.Message) ([]byte, error) {
 	close(c.started)
 	<-c.release

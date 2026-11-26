@@ -638,14 +638,6 @@ func (s *session) start(handler core.Handler, batchHandler transportapi.BatchHan
 
 func (s *session) readLoop(handler core.Handler, batchHandler transportapi.BatchHandler) {
 	preserveSession := false
-	var readDeadlineRefresh time.Time
-	if timeout := s.server.config.ReadTimeout; timeout > 0 {
-		now := time.Now()
-		if err := s.raw.SetReadDeadline(now.Add(timeout)); err != nil {
-			return
-		}
-		readDeadlineRefresh = now.Add(timeout / 2)
-	}
 	defer func() {
 		if preserveSession {
 			return
@@ -659,6 +651,14 @@ func (s *session) readLoop(handler core.Handler, batchHandler transportapi.Batch
 			_ = s.Close()
 		}
 	}()
+	var readDeadlineRefresh time.Time
+	if timeout := s.server.config.ReadTimeout; timeout > 0 {
+		now := time.Now()
+		if err := s.raw.SetReadDeadline(now.Add(timeout)); err != nil {
+			return
+		}
+		readDeadlineRefresh = now.Add(timeout / 2)
+	}
 	for {
 		if s.server.dispatch.Stopped() {
 			preserveSession = true

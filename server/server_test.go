@@ -335,17 +335,34 @@ func TestServerManageShutsResourcesAfterRunners(t *testing.T) {
 
 func TestServerRetriesManagedResourceAfterShutdownFailure(t *testing.T) {
 	wantErr := errors.New("temporary shutdown failure")
-	resource := &retryingManagedResource{firstErr: wantErr}
-	app := New().Manage(resource)
-
-	if err := app.Shutdown(context.Background()); !errors.Is(err, wantErr) {
-		t.Fatalf("first Shutdown error = %v, want %v", err, wantErr)
-	}
-	if err := app.Shutdown(context.Background()); err != nil {
-		t.Fatalf("retry Shutdown error = %v", err)
-	}
-	if got := resource.attempts.Load(); got != 2 {
-		t.Fatalf("resource shutdown attempts = %d, want 2", got)
+	for _, path := range []string{"explicit", "running"} {
+		t.Run(path, func(t *testing.T) {
+			resource := &retryingManagedResource{firstErr: wantErr}
+			app := New().Manage(resource)
+			var err error
+			if path == "running" {
+				app.MountRunner(newFakeRunner("worker", nil, true))
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				handle, startErr := app.Start(ctx)
+				if startErr != nil {
+					t.Fatal(startErr)
+				}
+				if readyErr := handle.WaitReady(ctx); readyErr != nil {
+					t.Fatal(readyErr)
+				}
+				cancel()
+				err = handle.Wait()
+			} else {
+				err = app.Shutdown(t.Context())
+			}
+			if !errors.Is(err, wantErr) || app.State() != StateDraining {
+				t.Fatalf("failed cleanup: error=%v state=%v, want resource error and draining", err, app.State())
+			}
+			if err := app.Shutdown(t.Context()); err != nil || app.State() != StateStopped || resource.attempts.Load() != 2 {
+				t.Fatalf("retry: error=%v state=%v attempts=%d", err, app.State(), resource.attempts.Load())
+			}
+		})
 	}
 }
 

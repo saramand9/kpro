@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/saramand9/kpro/core"
@@ -412,6 +413,41 @@ func TestBodyPayloadLimitReturnsTypedError(t *testing.T) {
 	}
 	if sizeErr.Size != len("toolong") || sizeErr.Limit != 3 {
 		t.Fatalf("body size error = %+v", sizeErr)
+	}
+}
+
+func TestBodyPayloadSizeAfterRead(t *testing.T) {
+	cause := errors.New("request body interrupted")
+	for _, test := range []struct {
+		name     string
+		body     string
+		declared int64
+		failure  error
+		want     int
+		known    bool
+	}{
+		{"chunked complete", "ab", -1, nil, 2, true},
+		{"chunked empty", "", -1, nil, 0, true},
+		{"chunked interrupted", "ab", -1, cause, 0, false},
+		{"declared interrupted", "ab", 6, cause, 6, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var reader io.Reader = strings.NewReader(test.body)
+			if test.failure != nil {
+				reader = io.MultiReader(reader, iotest.ErrReader(test.failure))
+			}
+			req := httptest.NewRequest(http.MethodPost, "/", reader)
+			req.ContentLength = test.declared
+			p := NewBodyPayload(&Context{w: httptest.NewRecorder(), r: req})
+			for range 2 {
+				if _, err := p.Bytes(); !errors.Is(err, test.failure) {
+					t.Fatalf("read = %v, want %v", err, test.failure)
+				}
+				if n, ok := p.PayloadSize(); n != test.want || ok != test.known {
+					t.Fatalf("PayloadSize() = (%d,%t), want (%d,%t)", n, ok, test.want, test.known)
+				}
+			}
+		})
 	}
 }
 

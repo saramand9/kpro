@@ -253,6 +253,64 @@ func TestHTTP3GetAndPost(t *testing.T) {
 	assertHTTP3Response(t, resp, http.StatusCreated, "payload")
 }
 
+func TestHTTP3NativeResponsePreservesBodyAndExtensions(t *testing.T) {
+	endpoint, baseURL, client, stop := startHTTP3TestServer(t)
+	defer stop()
+	endpoint.Get("/native", func(ctx *Context) error {
+		w := ctx.ResponseWriter()
+		if _, ok := w.(qh3.HTTPStreamer); !ok {
+			t.Error("missing native HTTP/3 stream takeover")
+		}
+		if _, ok := w.(qh3.Settingser); !ok {
+			t.Error("missing native HTTP/3 settings")
+		}
+		w.WriteHeader(http.StatusAccepted)
+		if _, err := io.WriteString(w, "accepted"); err != nil {
+			return err
+		}
+		return errors.New("late handler error")
+	})
+	select {
+	case <-endpoint.Ready():
+	case <-time.After(3 * time.Second):
+		t.Fatal("HTTP/3 listener did not become ready")
+	}
+	resp, err := client.Get(baseURL + "/native")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	assertHTTP3Response(t, resp, http.StatusAccepted, "accepted")
+}
+
+type takeoverRecorder struct {
+	*deadlineRecorder
+	qh3.Settingser
+	stream *qh3.Stream
+}
+
+func (r *takeoverRecorder) FlushError() error       { r.Flush(); return nil }
+func (r *takeoverRecorder) HTTPStream() *qh3.Stream { return r.stream }
+
+func TestHTTP3StreamTakeoverOwnsResponse(t *testing.T) {
+	writer := &takeoverRecorder{
+		deadlineRecorder: &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()},
+		stream:           new(qh3.Stream),
+	}
+	endpoint := New(Config{})
+	endpoint.Get("/", func(ctx *Context) error {
+		got := ctx.ResponseWriter().(qh3.HTTPStreamer).HTTPStream()
+		if got != writer.stream {
+			t.Fatal("takeover returned a different stream")
+		}
+		return errors.New("handler ended after stream takeover")
+	})
+	endpoint.ServeHTTP(writer, httptest.NewRequest(http.MethodGet, "/", nil))
+	if writer.Code != http.StatusOK || writer.Body.Len() != 0 {
+		t.Fatalf("framework wrote to a transferred stream: status=%d body=%q", writer.Code, writer.Body.String())
+	}
+}
+
 func TestHTTP3RoutingErrors(t *testing.T) {
 	endpoint, baseURL, client, stop := startHTTP3TestServer(t)
 	defer stop()

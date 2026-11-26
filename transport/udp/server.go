@@ -556,6 +556,11 @@ func (s *packetSession) writeLoop() {
 			written, err := conn.WriteToUDP(packet, s.remote)
 			if err != nil {
 				item.Complete(err)
+				// A packet exceeding the path's datagram limit did not damage
+				// the socket. Later packets for this peer can still be sent.
+				if errors.Is(err, errMessageTooLong) {
+					continue
+				}
 				_ = s.Close()
 				return
 			}

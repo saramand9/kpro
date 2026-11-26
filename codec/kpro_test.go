@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strconv"
 	"testing"
+	"testing/iotest"
 
 	"github.com/saramand9/kpro/core"
 )
@@ -26,6 +27,37 @@ func TestReadIntoRejectsUnrepresentableFrameOn32Bit(t *testing.T) {
 	binary.BigEndian.PutUint32(header[16:20], 1<<31-1)
 	if _, _, err := KProV1().ReadInto(bytes.NewReader(header), ^uint32(0), nil); !errors.Is(err, ErrFrameTooLarge) {
 		t.Fatalf("unrepresentable frame: %v", err)
+	}
+	if _, err := KProV1().DecodePacket(header); !errors.Is(err, ErrFrameTooLarge) {
+		t.Fatalf("unrepresentable packet: %v", err)
+	}
+}
+
+func TestKProV1TruncatedFrameErrors(t *testing.T) {
+	c := KProV1()
+	for _, size := range []int{0, 1, FrameHeaderSize, FrameHeaderSize + 1, 256} {
+		frame, err := c.Encode(core.Message{ID: 7, Seq: 9, Data: make([]byte, size)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for cut := 0; cut < len(frame); cut++ {
+			want := io.ErrUnexpectedEOF
+			if cut == 0 {
+				want = io.EOF
+			}
+			stream, streamErr := c.Read(bytes.NewReader(frame[:cut]), 256)
+			packet, packetErr := c.DecodePacket(frame[:cut])
+			if streamErr != want || packetErr != want || stream.Bytes != 0 || stream.Message.ID != 0 || packet.ID != 0 {
+				t.Fatalf("size=%d cut=%d stream=(%+v, %v) packet=(%+v, %v), want empty results and %v", size, cut, stream, streamErr, packet, packetErr, want)
+			}
+		}
+		if size > 0 {
+			cause := errors.New("body read interrupted")
+			_, err := c.Read(io.MultiReader(bytes.NewReader(frame[:FrameHeaderSize]), iotest.ErrReader(cause)), 256)
+			if !errors.Is(err, cause) {
+				t.Fatalf("read failure = %v, want %v", err, cause)
+			}
+		}
 	}
 }
 

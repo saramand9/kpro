@@ -945,7 +945,7 @@ func (p *BodyPayload) PayloadSize() (int, bool) {
 	if p == nil || p.ctx == nil || p.ctx.r == nil {
 		return 0, true
 	}
-	if p.ctx.bodyRead {
+	if p.ctx.bodyRead && p.ctx.bodyErr == nil {
 		return len(p.ctx.body), true
 	}
 	if p.ctx.r.ContentLength >= 0 {
